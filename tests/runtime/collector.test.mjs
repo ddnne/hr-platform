@@ -14,6 +14,9 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  let manifestWrites=0;
  const bindings=fault==='publish' ? {...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),
  batch:async()=>{throw new Error('injected index publication failure');}}}
+ : fault==='metrics' ? {...env,INDEX:{batch:env.INDEX.batch.bind(env.INDEX),
+ prepare:(sql)=>sql.startsWith('UPDATE captures SET processing_ms')
+ ? {bind:()=>({run:async()=>{throw new Error('metric failure');}})} : env.INDEX.prepare(sql)}}
  : fault==='manifest' ? {...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),
  put:async(key,value)=>{if(key.startsWith('manifests/') && ++manifestWrites===2) throw new Error('manifest failure');
  return env.RAW.put(key,value);}}} : env;
@@ -21,7 +24,7 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  if(u.pathname==='/retry') return Response.json(retryAfter(u.searchParams.get('v'),1000));
  return production.fetch();}};`, resolveDir: process.cwd(), sourcefile: 'harness.ts'},
  bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
-const schema = await readFile('migrations/0001_capture.sql', 'utf8');
+const schema = await readFile('migrations/0001_capture.sql', 'utf8') + await readFile('migrations/0002_processing_metrics.sql', 'utf8');
 const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1, 2, 3]); // raw capture only, not a parser success fixture
 
 async function runtime(responses, enabled=true) {
@@ -35,7 +38,8 @@ async function runtime(responses, enabled=true) {
     return new Response(item.body ?? null, {status:item.status ?? 200, headers:item.headers});}
  }));
  const db = await mf.getD1Database('INDEX');
- for (const statement of schema.split(';').map(s=>s.trim()).filter(Boolean)) await db.prepare(statement).run();
+ try {for (const statement of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean)) await db.prepare(statement).run();}
+ catch(error){await mf.dispose();throw error;}
  const tick = async t => {const r=await mf.dispatchFetch(`http://local/tick?t=${t}`); assert.equal(r.status,200);};
  const reset = () => db.prepare('UPDATE source_control SET next_allowed_at=0').run();
  return {mf,db,requests,tick,reset};
@@ -147,4 +151,40 @@ test('errored body cancellation cannot bypass refusal or Retry-After',async()=>{
    assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
   }finally{await r.mf.dispose();}
  }
+});
+
+test('ordinary HTML 429 waits; a 429 CAPTCHA stops; Retry-After is retained in both',async()=>{
+ for(const challenge of [false,true]){
+  const r=await runtime([{status:429,body:challenge?'<html>CAPTCHA</html>':'<html>Too many requests</html>',
+   headers:{'content-type':'text/html','retry-after':'600'}}]);
+  try{
+   const before=Date.now();await r.tick(1);await r.tick(2);
+   const control=await r.db.prepare('SELECT * FROM source_control').first();
+   assert.equal(control.blocked,Number(challenge));assert.ok(control.next_allowed_at>=before+600000);
+   const record=await r.db.prepare('SELECT retry_after_at,error_code FROM captures WHERE event_id=?').bind('nar-daily-odds:1').first();
+   assert.ok(record.retry_after_at);assert.equal(record.error_code,challenge?'NON_ZIP_OR_CHALLENGE':'RATE_LIMITED');
+   assert.equal(r.requests.length,1);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('successful publication records processing wall time separately from receipt duration',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  await r.tick(1);
+  const record=await r.db.prepare('SELECT duration_ms,processing_ms FROM captures').first();
+  assert.ok(record.processing_ms>=record.duration_ms);assert.ok(record.duration_ms>=0);
+ }finally{await r.mf.dispose();}
+});
+
+test('failed metric write does not invalidate a published observation or its validator',async()=>{
+ const r=await runtime([{body:zip,headers:{etag:'"v1"'}},{status:304}]);
+ try{
+  await r.mf.dispatchFetch('http://local/tick?t=1&fault=metrics');
+  const record=await r.db.prepare('SELECT status,processing_ms FROM captures').first();
+  assert.equal(record.status,'RAW_STORED');assert.equal(record.processing_ms,null);
+  await r.reset();await r.tick(2);
+  assert.equal(r.requests[1].etag,'"v1"');
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,2);
+ }finally{await r.mf.dispose();}
 });

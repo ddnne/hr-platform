@@ -76,6 +76,7 @@ def unzip(raw):
                     or entry.filename in names
                     or entry.is_dir()
                     or entry.flag_bits & 1
+                    or entry.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
                     or (entry.external_attr >> 16) & 0o170000 == 0o120000
                     or entry.file_size > max(entry.compress_size, 1) * 300
                 ):
@@ -106,7 +107,7 @@ def parse_odds(raw, race_states, encoding="utf-8-sig"):
         raise ValueError("ENCODING_UNQUALIFIED")
     files = unzip(raw)
     odds_files = [v for k, v in files.items() if k.endswith("_odds.csv")]
-    if len(odds_files) != 1:
+    if len(odds_files) != 1 or len(files) != 1:
         raise ValueError("ODDS_FILE_COUNT")
     reader = csv.reader(io.StringIO(odds_files[0].decode(encoding, errors="strict")))
     if next(reader, None) != HEADERS:

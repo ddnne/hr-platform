@@ -52,7 +52,7 @@ export async function boundedBody(response: Response): Promise<Uint8Array> {
   return all;
 }
 
-async function publish(env: Env, m: Manifest): Promise<void> {
+async function publish(env: Env, m: Manifest, processingStarted: number): Promise<void> {
   // R2 object and manifest must both exist before publishing an observation index.
   const raw = await env.RAW.head(`raw/${m.raw_sha256}`);
   if (!raw) throw new Error("RAW_MISSING");
@@ -71,17 +71,26 @@ async function publish(env: Env, m: Manifest): Promise<void> {
       .bind(m.event_id, m.raw_sha256, m.collector_received_at, m.raw_saved_at,
         m.http_status === 304 ? "validator_304" : "body_200")
   ]);
+  // Include raw writes and index publication; the final metric write itself is excluded.
+  try {
+    await env.INDEX.prepare("UPDATE captures SET processing_ms=? WHERE event_id=?")
+      .bind(Date.now() - processingStarted, m.event_id).run();
+  } catch {
+    // Metrics cannot invalidate an already published observation or its ETag.
+    console.log(JSON.stringify({component: "collector", status: "METRIC_WRITE_FAILED"}));
+  }
 }
 
 export async function capture(scheduledTime: number, env: Env): Promise<void> {
   if (env.COLLECTION_ENABLED !== "true" || env.SOURCE_APPROVED !== "true") return;
+  const processingStarted = Date.now();
   const eventId = `${SOURCE}:${scheduledTime}`;
   const existing = await env.INDEX.prepare("SELECT status FROM captures WHERE event_id=?")
     .bind(eventId).first<{status: string}>();
   if (existing) {
     if (existing.status === "PENDING" || existing.status === "STORAGE_ERROR") {
       const stored = await env.RAW.get(`manifests/${eventId}.json`);
-      if (stored) await publish(env, await stored.json<Manifest>());
+      if (stored) await publish(env, await stored.json<Manifest>(), processingStarted);
     }
     return; // no re-fetch on event redelivery; a later slot is a new attempt
   }
@@ -115,7 +124,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
     const received = Date.now();
     headersAt = iso(received);
     if (response.status === 403 || response.status === 401 || response.headers.get("cf-mitigated") === "challenge"
-        || (response.status !== 200 && response.status !== 304 && response.headers.get("content-type")?.includes("text/html"))) {
+        || (response.status !== 200 && response.status !== 304 && response.status !== 429 && response.headers.get("content-type")?.includes("text/html"))) {
       await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
       await discard(response);
       throw new Error("SOURCE_DENIED");
@@ -126,7 +135,15 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
         env.INDEX.prepare("UPDATE source_control SET next_allowed_at=? WHERE source=?").bind(next, SOURCE),
         env.INDEX.prepare("UPDATE captures SET retry_after_at=? WHERE event_id=?").bind(iso(next), eventId)
       ]);
-      await discard(response);
+      // Save the wait before inspecting the body: a broken stream must not undo Retry-After.
+      if (response.body) {
+        const rateBody = await boundedBody(response);
+        receivedAt = iso(Date.now());
+        if (/captcha|challenge/i.test(new TextDecoder().decode(rateBody.subarray(0, 8192)))) {
+          await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
+          throw new Error("NON_ZIP_OR_CHALLENGE");
+        }
+      }
       throw new Error("RATE_LIMITED");
     }
     if (response.status !== 200 && response.status !== 304) {
@@ -187,7 +204,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
       manifest.raw_saved_at = saved.uploaded.toISOString();
       await env.RAW.put(`manifests/${eventId}.json`, JSON.stringify(manifest));
     }
-    await publish(env, manifest);
+    await publish(env, manifest, processingStarted);
   } catch (error) {
     const allowed = new Set(["SOURCE_DENIED", "RATE_LIMITED", "HTTP_ERROR", "UNBOUND_304", "BODY_LIMIT", "BODY_EMPTY", "NON_ZIP_OR_CHALLENGE"]);
     const code = error instanceof Error && allowed.has(error.message) ? error.message : stage === "STORAGE" ? "STORAGE_ERROR" : controller.signal.aborted ? "FETCH_TIMEOUT" : "NETWORK_ERROR";
