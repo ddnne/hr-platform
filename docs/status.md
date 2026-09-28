@@ -3,6 +3,7 @@
 ## 到達点
 
 **M1の合成データによる縦断処理を実装。M0の実ZIP検査、M2継続収集、M3クラウドPaper、M4収益検証は未完了。**
+初期実装15795e1をmainへpush。数値精度修正は[PR #1](https://github.com/ddnne/hr-platform/pull/1)（fix/marginal-ipf-accuracy）へpush済み、未マージ。現在の作業コピーはこの修正ブランチ。
 開始時にGitHubの公開設定と空リポジトリ、ローカル空フォルダを確認。originは`https://github.com/ddnne/hr-platform.git`。quant-platformは変更していない。
 `docs/project_brief.md`は添付統合v0.4の同一コピー。Grokは当初の指示に従い起動したが、指示更新時に停止。生成された実装はなく、以後はメインCodexが実装した。サブエージェントは編集を行わない独立レビューだけに使用。
 
@@ -19,7 +20,7 @@
 
 - `make test`：Python **49件成功**、Ruff成功、TypeScript型検査成功、Miniflare/workerd **9件成功**。
 - `make demo`：入力→原本・履歴→as-of→分布・依存診断→Paper判断→合成払戻精算が完走。同じコマンドの再実行でも購入・精算を増やさない。
-- 初回GitHub CIでLinux上の比較分布の数値誤差を検出。許容値を維持したままIPFへ修正し、非一様解析解・境界例の試験を追加。再CIの結果はGitHub Actionsで確認する。
+- 初回GitHub CIでLinux上の比較分布の数値誤差を検出。許容値を維持したままIPFへ修正し、非一様解析解・境界例の試験を追加。修正コードf1305caの[GitHub Linux CI](https://github.com/ddnne/hr-platform/actions/runs/36423381238)は全工程成功（Python49件、Worker9件、公開境界・型検査・dry-run）。
 - `npm run build`：Workerのdry-runバンドル成功。デプロイではない。
 - `scripts/benchmark.py`：合成12頭1,320状態でQref+Qmarg約152ms、16頭3,360状態で約278ms。いずれもoptimal。周辺誤差はそれぞれ約1.1e-13/4.3e-13。Mac上の単発計測、起動時間やCloudflare実行時間ではない。プロセス最大RSSは約117/126MB（macOSのbytes単位）。
 - solverを故意に1反復で止める試験で警告が1件発生するが、成功扱いにせずMODEL_ERRORにすることを確認。
