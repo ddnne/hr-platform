@@ -6,6 +6,7 @@ import cvxpy as cp
 import numpy as np
 from scipy import sparse
 from scipy.optimize import linprog
+from scipy.special import logsumexp
 
 VERSION = "top3-kl-v1"
 MODELED = {"win", "exacta", "quinella", "trifecta", "trio"}
@@ -139,17 +140,58 @@ def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_ite
 
 
 def same_marginals(omega, qref, max_iter=300):
+    """Maximum entropy on distinct-horse support by iterative proportional fitting.
+
+    Each rank is a categorical partition. Cyclic KL projections from uniform keep
+    q in the exponential family and converge to the required I-projection.
+    Both marginal feasibility and the entropy dual gap must pass; no tolerance relaxation.
+    """
+    begin = time.perf_counter()
+    qref = np.asarray(qref, dtype=float)
+    if not np.isfinite(qref).all() or qref.min() < 0 or abs(qref.sum() - 1) > 1e-10:
+        raise ModelError("PROBABILITY_INVALID")
     m = marginals(omega)
-    q = cp.Variable(len(omega), nonneg=True)
-    problem = cp.Problem(
-        cp.Minimize(cp.sum(cp.kl_div(q, np.ones(len(omega)) / len(omega)))),
-        [cp.sum(q) == 1, m @ q == m @ qref],
+    horses = sorted(set(x for s in omega for x in s))
+    indices = np.array([[horses.index(h) for h in s] for s in omega])
+    target = np.asarray(m @ qref).reshape(len(horses), 3)
+    support = np.array(
+        [all(target[indices[i, rank], rank] > 0 for rank in range(3)) for i in range(len(omega))]
     )
-    result, diagnostics = solve(problem, q, max_iter=max_iter)
-    diagnostics["marginal_error"] = float(np.max(abs(m @ result - m @ qref)))
-    if diagnostics["marginal_error"] > 1e-7:
-        raise ModelError("MARGINAL_MISMATCH")
-    return result, diagnostics
+    if not support.any():
+        raise ModelError("MARGINAL_INFEASIBLE")
+    q = support.astype(float) / support.sum()
+    potentials = np.zeros_like(target)
+    for iteration in range(1, max_iter + 1):
+        for rank in range(3):
+            current = np.bincount(indices[:, rank], weights=q, minlength=len(horses))
+            positive = target[:, rank] > 0
+            if np.any(current[positive] <= 0):
+                raise ModelError("MARGINAL_INFEASIBLE")
+            factor = np.ones(len(horses))
+            factor[positive] = target[positive, rank] / current[positive]
+            q *= factor[indices[:, rank]]
+            potentials[positive, rank] += np.log(factor[positive])
+        error = float(np.max(abs(m @ q - target.ravel())))
+        objective = float(np.sum(q[support] * np.log(q[support] * len(omega))))
+        logits = np.array(
+            [sum(potentials[indices[i, rank], rank] for rank in range(3)) for i in range(len(omega))]
+        ) - np.log(len(omega))
+        dual = float(np.sum(target * potentials) - logsumexp(logits[support]))
+        gap = abs(objective - dual)
+        if error <= 1e-12 and gap <= 1e-9:
+            return q, {
+                "status": "converged",
+                "solver": "categorical_IPF_v1",
+                "iterations": iteration,
+                "marginal_error": error,
+                "objective": objective,
+                "dual_gap": gap,
+                "sum_error": float(abs(q.sum() - 1)),
+                "min_component": float(q.min()),
+                "duration_ms": (time.perf_counter() - begin) * 1000,
+                "correction_l1": 0.0,
+            }
+    raise ModelError("MARGINAL_NOT_CONVERGED")
 
 
 def bounds(omega, markets, refs, target, selection, epsilon=1e-6):

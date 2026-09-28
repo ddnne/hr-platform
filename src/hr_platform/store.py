@@ -4,6 +4,7 @@ Bodies precede index writes. Orphans are harmless and reused after an index fail
 SQLite transactions make each index publication atomic; no cross-store atomicity assumed.
 """
 
+import csv
 import json
 from datetime import timedelta
 import os
@@ -37,19 +38,44 @@ CREATE TABLE IF NOT EXISTS settlements(id TEXT PRIMARY KEY, decision_id TEXT NOT
 
 class Store:
     def __init__(self, root, clock=utcnow):
-        self.root = Path(root)
+        self.root = Path(root).absolute()
+        if any(p.is_symlink() for p in [self.root, *self.root.parents]):
+            raise ValueError("STORE_SYMLINK")
         self.root.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "raw",
+            "normalized",
+            "receipts",
+            "reports",
+            "index.sqlite",
+            "index.sqlite-wal",
+            "index.sqlite-shm",
+            "index.sqlite-journal",
+        ):
+            self.safe_path(name)
         self.clock = clock
         self.db = sqlite3.connect(self.root / "index.sqlite", timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+
+    def safe_path(self, *parts):
+        path = self.root
+        for part in parts:
+            if not part or Path(part).name != part or part in {".", ".."}:
+                raise ValueError("STORE_PATH")
+            path = path / part
+            if path.is_symlink():
+                raise ValueError("STORE_SYMLINK")
+            if path.is_file() and path.stat().st_nlink != 1:
+                raise ValueError("STORE_HARDLINK")
+        return path
 
     def close(self):
         self.db.close()
 
     def body(self, data, kind):
         digest = sha(data)
-        path = self.root / kind / digest
+        path = self.safe_path(kind, digest)
         path.parent.mkdir(exist_ok=True)
         if path.exists():
             if sha(path.read_bytes()) != digest:
@@ -66,7 +92,7 @@ class Store:
     def read_body(self, digest, kind):
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("INVALID_HASH")
-        raw = (self.root / kind / digest).read_bytes()
+        raw = self.safe_path(kind, digest).read_bytes()
         if sha(raw) != digest:
             raise ValueError("BODY_CORRUPT")
         return raw
@@ -180,7 +206,7 @@ class Store:
                     content_hash = self.body(canonical(content), "normalized")
                     rows.append((parse_id, race_id, market, content_hash, identity(race["state"])))
             status, error = "OK", None
-        except (ValueError, UnicodeError, KeyError) as exc:
+        except (ValueError, UnicodeError, KeyError, csv.Error) as exc:
             status, error, rows = "ERROR", type(exc).__name__, []
         parsed = stamp(self.clock())
         if parsed < obs["raw_saved_at"]:

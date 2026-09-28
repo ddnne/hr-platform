@@ -15,7 +15,7 @@
   "d1_databases": [{
     "binding": "INDEX",
     "database_name": "hr-platform-dev-index",
-    "database_id": "00000000-0000-0000-0000-000000000000",
+    "database_id": "81fc8e82-cb25-4baa-834d-b69a8f2ac977",
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{ "binding": "RAW", "bucket_name": "hr-platform-dev-private" }]
