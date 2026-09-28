@@ -17,10 +17,11 @@
 
 ## 実行したテストと結果
 
-- `make test`：Python **47件成功**、Ruff成功、TypeScript型検査成功、Miniflare/workerd **9件成功**。
+- `make test`：Python **49件成功**、Ruff成功、TypeScript型検査成功、Miniflare/workerd **9件成功**。
 - `make demo`：入力→原本・履歴→as-of→分布・依存診断→Paper判断→合成払戻精算が完走。同じコマンドの再実行でも購入・精算を増やさない。
+- 初回GitHub CIでLinux上の比較分布の数値誤差を検出。許容値を維持したままIPFへ修正し、非一様解析解・境界例の試験を追加。再CIの結果はGitHub Actionsで確認する。
 - `npm run build`：Workerのdry-runバンドル成功。デプロイではない。
-- `scripts/benchmark.py`：合成12頭1,320状態でQref+Qmarg約92ms、16頭3,360状態で約317ms。いずれもoptimal。周辺誤差はそれぞれ約5.6e-14/3.0e-13。Mac上の単発計測、起動時間やCloudflare実行時間ではない。プロセス最大RSSは約119/132MB（macOSのbytes単位）。
+- `scripts/benchmark.py`：合成12頭1,320状態でQref+Qmarg約152ms、16頭3,360状態で約278ms。いずれもoptimal。周辺誤差はそれぞれ約1.1e-13/4.3e-13。Mac上の単発計測、起動時間やCloudflare実行時間ではない。プロセス最大RSSは約117/126MB（macOSのbytes単位）。
 - solverを故意に1反復で止める試験で警告が1件発生するが、成功扱いにせずMODEL_ERRORにすることを確認。
 - 独立レビューの指摘（欠測の消去、実験設定混在、解析公開前中断、ETag誤対応、判断前呼出し、manifest部分失敗、受信時刻、非200のCAPTCHA、body解放失敗、Git indexの検査漏れ）を修正し、回帰試験を追加。
 

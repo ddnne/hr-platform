@@ -123,3 +123,24 @@ def test_trio_separate_experiment(config):
     np.testing.assert_allclose(
         [r["p_direct"] for r in result["rows"]], [r["v_target"] for r in result["rows"]]
     )
+
+
+def test_max_entropy_nonuniform_analytic_exponential_family():
+    omega = states([1, 2, 3, 4])
+    potentials = np.array([[0.7, -0.2, 0.1], [-0.4, 0.5, 0.8], [0.2, -0.7, -0.3], [0.4, 0.6, -0.5]])
+    logits = np.array([sum(potentials[horse - 1, rank] for rank, horse in enumerate(s)) for s in omega])
+    known = np.exp(logits - logits.max())
+    known /= known.sum()
+    actual, d = same_marginals(omega, known)
+    np.testing.assert_allclose(actual, known, atol=1e-9, rtol=1e-9)
+    assert d["dual_gap"] <= 1e-9
+    with pytest.raises(ModelError, match="MARGINAL_NOT_CONVERGED"):
+        same_marginals(omega, known, max_iter=1)
+
+
+def test_max_entropy_boundary_support():
+    omega = states([1, 2, 3, 4])
+    known = np.array([0.5 if s in [(1, 2, 3), (1, 3, 2)] else 0 for s in omega])
+    actual, d = same_marginals(omega, known)
+    np.testing.assert_allclose(actual, known, atol=1e-12)
+    assert d["marginal_error"] <= 1e-12
