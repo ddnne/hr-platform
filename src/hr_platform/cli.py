@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import yaml
 from .common import canonical
 from .collector_log import CaptureLog
 from .parser import parse_odds, VERSION
@@ -45,6 +46,13 @@ def arguments():
     capture.add_argument("--manifest", required=True)
     capture.add_argument("--zip", required=True)
     capture.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
+    diagnostic = commands.add_parser("diagnose", help="一競走の馬連・依存構造を静的比較。Paper台帳は作らない")
+    diagnostic.add_argument("--zip", required=True)
+    diagnostic.add_argument("--race-zip", required=True)
+    diagnostic.add_argument("--kind", choices=["DAILY_SNAPSHOT"], required=True)
+    diagnostic.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
+    diagnostic.add_argument("--race", help="未指定なら完全性条件を満たす最初の平地競走")
+    diagnostic.add_argument("--config", default="configs/research.yaml")
     log = commands.add_parser("import-log", help="D1の成功・失敗・待機ログを非公開で取込み")
     log.add_argument("--file", required=True)
     log_query = commands.add_parser("capture-log", help="取得状態の履歴を時点指定で再読出し")
@@ -81,6 +89,20 @@ def run(args, store):
                 "race_inspection_id": race["id"],
                 "coverage": completeness(report["content"], race["content"]),
             }
+    elif args.command == "diagnose":
+        from .diagnostic import diagnose
+
+        report = diagnose(
+            store,
+            read_limited(args.zip),
+            Path(args.zip).name,
+            read_limited(args.race_zip),
+            Path(args.race_zip).name,
+            args.kind,
+            args.encoding,
+            yaml.safe_load(read_limited(args.config, 64 * 1024)),
+            args.race,
+        )
     elif args.command == "import-capture":
         manifest = json.loads(read_limited(args.manifest, 64 * 1024))
         parse_id = adapter.import_capture(manifest, read_limited(args.zip), args.encoding)
@@ -123,8 +145,16 @@ def main(argv=None):
         store = Store(root)
         result = run(args, store)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if result["status"] in {"QUARANTINED", "ERROR"} else 0
-    except (ValueError, TypeError, KeyError, AttributeError, OSError, subprocess.SubprocessError):
+        return 1 if result["status"] in {"QUARANTINED", "ERROR", "NO_COMPATIBLE_RACE", "MODEL_ERROR"} else 0
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        OSError,
+        yaml.YAMLError,
+        subprocess.SubprocessError,
+    ):
         # No traceback, source cell, filename, receipt, odds or credentials on stdout/stderr.
         print(
             '{"status":"INPUT_OR_STORAGE_ERROR","detail":"入力形式・保存先・先行する200取得記録を確認してください"}',

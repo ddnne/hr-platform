@@ -21,6 +21,8 @@ make demo
 
 取得済みZIPの非公開検査、Worker取得記録付き原本の取込み、履歴/as-of/再解析をCLIで実行できる。D1の成功・失敗・待機ログも非公開で取込み、時点指定で再読出しできる。手順と残条件は [docs/real_data_runbook.md](docs/real_data_runbook.md)。取得時刻不明のZIPは過去の観測にせず、出走状態・返還の意味が未確認のデータではPaper判断・精算を止める。
 
+まずはZIP一組の静的診断を優先する。`diagnose`で馬連の価格差・依存構造・単純換算との差を調べ、有望なら複数競走やPaperへ進む。運用・バックアップの高度化は研究開始の条件にしない。
+
 ## 保存と公開境界
 
 - `Store.history`、`Store.latest`、`Store.asof`を分離。as-ofは利用可能時刻、鮮度、元観測、欠測を保持。
