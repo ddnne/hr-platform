@@ -31,6 +31,7 @@ originは `https://github.com/ddnne/hr-platform.git`。既存作業を維持し�
 - Python **109件成功**（取得ログ21件・静的診断6件の追加を含む）、workerd **12件成功**。Ruff、TypeScript型検査、Worker dry-runバンドル成功。
 - `make demo`：合成一競走の入力→原本/履歴→as-of→分布/依存診断→Paper判断→払戻精算が完走。再実行でも観測・購入・精算を増やさない。
 - 初期実装のLinux CIで検出した比較分布の誤差は、許容値を緩めずIPFへ修正済み。前回のコードコミット4dd116fの[GitHub Linux CI](https://github.com/ddnne/hr-platform/actions/runs/36427908267)も全工程成功（Python82件・Worker12件・公開境界・型検査・dry-run）。
+- 今回の実装は[PR #2](https://github.com/ddnne/hr-platform/pull/2)。コードコミット `7cb51fd` の[Linux CI](https://github.com/ddnne/hr-platform/actions/runs/36435493647)で、Python109件・Worker12件・公開境界・型検査・dry-runが成功した。
 - 意図的にsolverを1反復で止める試験の警告1件を含む。未収束を成功扱いせずMODEL_ERRORにすることを確認。
 - 独立レビューで指摘された、内部symlink経由の公開先書込み、遅着200による304再配送の対応先変更、別由来の同ID受入れ、計測失敗による取得成功の降格を修正。回帰テストと再レビューで解消を確認。
 - 今回の独立コードレビューで、重なるexportを完了順に並べると古い状態へ戻る問題を検出・修正。非重複の読出しだけで順序を確定し、重複して内容が違えばORDER_UNCERTAINと両候補を残す。追加回帰テスト成功。
