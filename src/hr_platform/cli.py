@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from .common import canonical
+from .collector_log import CaptureLog
 from .parser import parse_odds, VERSION
 from .realdata import RealData, completeness, read_limited
 from .store import Store
@@ -44,6 +45,12 @@ def arguments():
     capture.add_argument("--manifest", required=True)
     capture.add_argument("--zip", required=True)
     capture.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
+    log = commands.add_parser("import-log", help="D1の成功・失敗・待機ログを非公開で取込み")
+    log.add_argument("--file", required=True)
+    log_query = commands.add_parser("capture-log", help="取得状態の履歴を時点指定で再読出し")
+    log_query.add_argument("--from", dest="start", required=True)
+    log_query.add_argument("--until", dest="end", required=True)
+    log_query.add_argument("--at", required=True)
     for name in ("history", "asof"):
         query = commands.add_parser(name, help="結果を非公開レポートへ保存")
         query.add_argument("--race", required=True)
@@ -78,6 +85,10 @@ def run(args, store):
         manifest = json.loads(read_limited(args.manifest, 64 * 1024))
         parse_id = adapter.import_capture(manifest, read_limited(args.zip), args.encoding)
         report = dict(store.db.execute("SELECT * FROM parses WHERE id=?", (parse_id,)).fetchone())
+    elif args.command == "import-log":
+        report = CaptureLog(store).ingest(json.loads(read_limited(args.file)))
+    elif args.command == "capture-log":
+        report = CaptureLog(store).history(args.start, args.end, args.at)
     elif args.command == "history":
         report = {"history": {h: store.history(args.race, h, args.at) for h in args.market}}
     elif args.command == "asof":
