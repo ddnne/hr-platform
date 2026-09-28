@@ -1,0 +1,23 @@
+version: IRCD-v0.3-exploratory-001
+mode: EXPLORATORY_SHADOW
+target: quinella
+references: [win, exacta]
+asof_before_start_seconds: 600
+max_decision_delay_seconds: 120
+max_age_seconds: 300
+max_source_skew_seconds: 120
+lambda: 0.0001
+sensitivity_lambdas: [0.000001, 0.01]
+stake_yen: 100
+max_tickets_per_race: 1
+# Separate books, never summed as one bankroll.
+comparison_models: [direct, marginal, reference]
+daily_stake_limit_yen_per_model: 10000
+stress_fractions: [0, 0.1, 0.2]
+tie_tolerance: 0.000000001
+probability_tolerance: 0.0000001
+solver: CLARABEL
+solver_max_iter: 300
+identification_epsilon: 0.000001
+paper_timing_assumption: scheduled_start_minus_10_minutes_no_confirmed_sales_channel
+freshness_basis: assumed_release_cadence

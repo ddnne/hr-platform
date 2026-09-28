@@ -1,0 +1,26 @@
+name: synthetic-ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - run: uv sync --frozen
+      - run: npm ci
+      - run: uv run --frozen python scripts/check_public_boundary.py
+      - run: make test
+      - run: npm run build
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+      # No provider download, cloud credentials, remote migration, deploy, artifact upload, or report publication.

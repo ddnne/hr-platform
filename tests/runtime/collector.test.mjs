@@ -1,0 +1,150 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { build } from 'esbuild';
+import { Miniflare, Log, LogLevel, convertV4MiniflareOptions } from 'miniflare';
+
+// The test-only HTTP harness is never the production Worker entrypoint.
+const bundle = await build({stdin: {contents: `import production,{capture,retryAfter} from './workers/ingestion/index.ts';
+export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='/tick'){
+ const fault=u.searchParams.get('fault');
+ if(fault==='cancel403'||fault==='cancel429') globalThis.fetch=async()=>new Response(
+ new ReadableStream({start(controller){controller.error(new Error('stream failed'));}}),
+ {status:fault==='cancel403'?403:429,headers:{'retry-after':'600'}});
+ let manifestWrites=0;
+ const bindings=fault==='publish' ? {...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),
+ batch:async()=>{throw new Error('injected index publication failure');}}}
+ : fault==='manifest' ? {...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),
+ put:async(key,value)=>{if(key.startsWith('manifests/') && ++manifestWrites===2) throw new Error('manifest failure');
+ return env.RAW.put(key,value);}}} : env;
+ await capture(Number(u.searchParams.get('t')),bindings); return new Response('ok');}
+ if(u.pathname==='/retry') return Response.json(retryAfter(u.searchParams.get('v'),1000));
+ return production.fetch();}};`, resolveDir: process.cwd(), sourcefile: 'harness.ts'},
+ bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
+const schema = await readFile('migrations/0001_capture.sql', 'utf8');
+const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1, 2, 3]); // raw capture only, not a parser success fixture
+
+async function runtime(responses, enabled=true) {
+ let requests = [];
+ const mf = new Miniflare(convertV4MiniflareOptions({modules: true, script: bundle.outputFiles[0].text,
+  compatibilityDate: '2026-09-28', compatibilityFlags: ['nodejs_compat'],
+  bindings: {COLLECTION_ENABLED: String(enabled), SOURCE_APPROVED: String(enabled)},
+  d1Databases: ['INDEX'], r2Buckets: ['RAW'], log: new Log(LogLevel.NONE),
+  outboundService: async req => {requests.push({url:req.url,etag:req.headers.get('if-none-match')});
+    const item = responses.shift(); if(!item) throw new Error('unexpected outbound request');
+    return new Response(item.body ?? null, {status:item.status ?? 200, headers:item.headers});}
+ }));
+ const db = await mf.getD1Database('INDEX');
+ for (const statement of schema.split(';').map(s=>s.trim()).filter(Boolean)) await db.prepare(statement).run();
+ const tick = async t => {const r=await mf.dispatchFetch(`http://local/tick?t=${t}`); assert.equal(r.status,200);};
+ const reset = () => db.prepare('UPDATE source_control SET next_allowed_at=0').run();
+ return {mf,db,requests,tick,reset};
+}
+
+test('disabled gate has no network and public endpoint returns 404', async()=>{
+ const r=await runtime([],false);
+ try {await r.tick(1);assert.equal(r.requests.length,0); assert.equal((await r.mf.dispatchFetch('http://local/')).status,404);}
+ finally{await r.mf.dispose();}
+});
+
+test('same bytes at two times retain observations; same event and concurrent delivery do not',async()=>{
+ const r=await runtime([{body:zip,headers:{etag:'"a"'}},{body:zip,headers:{etag:'"a"'}}]);
+ try {
+  await Promise.all([r.tick(1000),r.tick(1000)]);
+  await r.reset(); await r.tick(121000); await r.tick(121000);
+  const rows=await r.db.prepare('SELECT * FROM raw_observations ORDER BY observation_id').all();
+  assert.equal(rows.results.length,2);assert.equal(r.requests.length,2);
+  assert.equal(rows.results[0].raw_sha256,rows.results[1].raw_sha256);
+  assert.equal(rows.results[0].source_updated_at,null);
+  const raw=await r.mf.getR2Bucket('RAW'); assert.equal((await raw.list({prefix:'raw/'})).objects.length,1);
+  const captures=await r.db.prepare('SELECT available_at,parsed_at FROM captures').all();
+  assert.ok(captures.results.every(x=>x.available_at===null&&x.parsed_at===null));
+ }finally{await r.mf.dispose();}
+});
+
+test('validated 304 records observation and never reuses an old ETag for a changed 200',async()=>{
+ const r=await runtime([{body:zip,headers:{etag:'"a"'}},{status:304},
+  {body:new Uint8Array([0x50,0x4b,3,4,9])},{status:304}]);
+ try{
+  await r.tick(1);await r.reset();await r.tick(2);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,2);
+  await r.reset();await r.tick(3);
+  const third=await r.db.prepare('SELECT etag FROM captures WHERE event_id=?').bind('nar-daily-odds:3').first();
+  assert.equal(third.etag,null);
+  // Current implementation must select the newest successful body, even if it lacks a validator.
+  await r.reset();await r.tick(4);
+  assert.equal(r.requests[3].etag,null);
+  assert.equal((await r.db.prepare('SELECT error_code FROM captures WHERE event_id=?').bind('nar-daily-odds:4').first()).error_code,'UNBOUND_304');
+ }finally{await r.mf.dispose();}
+});
+
+test('403 and HTML challenge stop further requests',async()=>{
+ for(const response of [{status:403},{body:'<html>captcha</html>'},{status:503,body:'CAPTCHA verification'},{status:503,body:'challenge',headers:{'cf-mitigated':'challenge'}}]){
+  const r=await runtime([response]);
+  try{await r.tick(1);await r.reset();await r.tick(2);
+   assert.equal(r.requests.length,1);assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('429 honors Retry-After durably; failure and recovery retain separate attempts',async()=>{
+ const r=await runtime([{status:429,headers:{'retry-after':'600'}},{body:zip}]);
+ try{
+  const before=Date.now();await r.tick(1);await r.tick(2);
+  assert.equal(r.requests.length,1);
+  assert.ok((await r.db.prepare('SELECT next_allowed_at FROM source_control').first()).next_allowed_at >= before+600000);
+  await r.reset();await r.tick(3);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM captures').first()).n,3);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+  assert.equal(await (await r.mf.dispatchFetch('http://local/retry?v=60')).json(),121000);
+ }finally{await r.mf.dispose();}
+});
+
+test('oversized response cannot publish an observation',async()=>{
+ const r=await runtime([{body:zip,headers:{'content-length':String(17*1024*1024)}}]);
+ try{await r.tick(1);assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);}
+ finally{await r.mf.dispose();}
+});
+
+test('R2 manifest repairs D1 publication failure without re-fetch or duplicate observation',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  assert.equal((await r.mf.dispatchFetch('http://local/tick?t=1&fault=publish')).status,200);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'STORAGE_ERROR');
+  await r.tick(1);await r.tick(1);
+  assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'RAW_STORED');
+ }finally{await r.mf.dispose();}
+});
+
+test('raw write followed by completion-manifest failure recovers original receipt from intent',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  assert.equal((await r.mf.dispatchFetch('http://local/tick?t=1&fault=manifest')).status,200);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  const raw=await r.mf.getR2Bucket('RAW');
+  const before=await (await raw.get('manifests/nar-daily-odds:1.json')).json();
+  assert.equal(before.raw_saved_at,null);
+  await r.tick(1);
+  assert.equal(r.requests.length,1);
+  const after=await r.db.prepare('SELECT * FROM raw_observations').first();
+  assert.equal(after.received_at,before.collector_received_at);
+  assert.ok(after.raw_saved_at>=after.received_at);
+ }finally{await r.mf.dispose();}
+});
+
+test('errored body cancellation cannot bypass refusal or Retry-After',async()=>{
+ for(const fault of ['cancel403','cancel429']){
+  const r=await runtime([]);
+  try{
+   const now=Date.now();await r.mf.dispatchFetch(`http://local/tick?t=1&fault=${fault}`);
+   const control=await r.db.prepare('SELECT * FROM source_control').first();
+   if(fault==='cancel403') assert.equal(control.blocked,1);
+   else assert.ok(control.next_allowed_at>=now+600000);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  }finally{await r.mf.dispose();}
+ }
+});
