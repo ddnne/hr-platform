@@ -63,6 +63,9 @@ def arguments():
     research.add_argument("--race", required=True)
     research.add_argument("--schedule", required=True, help="事前に判明した予定のJSON")
     research.add_argument("--config", default="configs/research.yaml")
+    comparison = commands.add_parser("compare-paper", help="同じ競走集合で保存済みPaper台帳を比較")
+    comparison.add_argument("--config", default="configs/research.yaml")
+    comparison.add_argument("--at", required=True)
     for name in ("history", "asof", "trajectory"):
         query = commands.add_parser(name, help="結果を非公開レポートへ保存")
         query.add_argument("--race", required=True)
@@ -128,6 +131,10 @@ def run(args, store):
             store, args.race, json.loads(read_limited(args.schedule, 64 * 1024)),
             yaml.safe_load(read_limited(args.config, 64 * 1024)),
         )
+    elif args.command == "compare-paper":
+        from .evaluation import compare
+
+        report = compare(store, yaml.safe_load(read_limited(args.config, 64 * 1024)), args.at)
     elif args.command == "asof":
         report = store.asof(args.race, args.market, args.at)
     elif args.command == "reparse":
