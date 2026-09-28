@@ -84,12 +84,12 @@ uv run python -m hr_platform.cli metrics
 | Worker | hr-platform-dev-ingestion |
 | D1 | hr-platform-dev-index |
 | R2 | hr-platform-dev-private |
-| 収集 / 提供元承認 | false / false |
+| 収集 / 内部の取得条件確認 | false / false |
 | Cron / HTTP公開 / preview | なし / 無効 / 無効 |
 
 既存の接続アカウントで専用リソースを作成した。既存サービス・公開設定・契約は変更しない。
 D1 migrationは新設DBだけへ適用し、Workerは上記の停止設定で配置する。
-提供元の条件が解決するまでは収集を有効化しない。
+提供元の条件が解決するまでは収集を有効化しない。`SOURCE_APPROVED`は内部の条件確認スイッチであり、個別の許可申請が必要と確認した意味ではない。通常ダウンロードの申請要否と、今回の自動取得条件を [source_capabilities.md](source_capabilities.md) で区別する。
 
 ```sh
 # 合成データだけで、開発用D1/R2の保存・2時点の履歴読戻しを確認する。
@@ -103,7 +103,7 @@ Workerの `duration_ms` は保存前までの取得段階、D1の `processing_ms
 
 ## 6. 実収集開始の残条件
 
-1. [提供元への確認文](source_capabilities.md)の自動取得・クラウド保存・robots適用関係を解決し、条件と根拠を非公開の運用記録へ保存する。
+1. 自動取得・クラウド保存・robotsの適用関係を公開資料等で確認し、条件と根拠を記録する。[問い合わせ文](source_capabilities.md)は確認方法の選択肢であり、申請義務やPRマージの必須条件としない。送信を選ぶ場合だけ明示的な送信依頼を受ける。
 2. その条件の範囲で複数時点の実ZIPを取得する。文字コード、全券種の行数/意味、ファイル時刻、304、出走状態・返還を実ファイルで検査する。
 3. 条件が許す収集頻度・開催時間帯を設定してM2の継続保存を開始する。モデル失敗と収集を切り離す。
 4. 失敗・未実行枠を含む履歴索引、クラウド内正規化、公式状態/払戻、実時間Paperを接続する。Mac常時稼働を定常構成にしない。
