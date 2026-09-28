@@ -203,6 +203,12 @@ def settle(store, decision_id, payout):
         previous = json.loads(old[0])
         if previous["source_hash"] != digest:
             raise ValueError("PAYOUT_REVISION_CONFLICT")
+        if not previous.get("recorded_at"):
+            store.body(canonical(payout), "receipts")
+            previous["recorded_at"] = stamp(store.clock())
+            with store.db:
+                store.db.execute("UPDATE settlements SET body=? WHERE decision_id=? AND revision=?",
+                                 (canonical(previous).decode(), decision_id, payout["revision"]))
         return previous
     rows = payout.get("tickets", [])
     seen = set()
@@ -241,7 +247,11 @@ def settle(store, decision_id, payout):
         "refund_yen": refund if status != "PENDING" else None,
         "profit_yen": paid + refund - stake if status != "PENDING" else None,
         "roi": (paid + refund - stake) / stake if stake and status == "SETTLED" else None,
+        "recorded_at": None,
     }
+    # Retain the exact settlement input behind source_hash, not only its digest.
+    store.body(canonical(payout), "receipts")
+    record["settled_at"] = stamp(store.clock())
     with store.db:
         store.db.execute(
             "INSERT INTO settlements VALUES(?,?,?,?,?)",
@@ -253,4 +263,10 @@ def settle(store, decision_id, payout):
                 canonical(record).decode(),
             ),
         )
+    # A committed row without this publication marker remains unavailable to queries.
+    # Interrupted publication can be repaired by replay, using the replay's actual time.
+    record["recorded_at"] = stamp(store.clock())
+    with store.db:
+        store.db.execute("UPDATE settlements SET body=? WHERE decision_id=? AND revision=?",
+                         (canonical(record).decode(), decision_id, payout["revision"]))
     return record
