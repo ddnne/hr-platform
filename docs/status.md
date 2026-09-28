@@ -4,7 +4,7 @@
 
 **M1の合成データによる縦断処理と、実ファイルの非公開検査・取込みを実装。Cloudflare開発環境は停止状態で配置。M0の実ZIP適合確認、M2の実継続収集、M3実時間Paper、M4収益検証は未完了。**
 
-originは `https://github.com/ddnne/hr-platform.git`。既存作業を維持し、[PR #1](https://github.com/ddnne/hr-platform/pull/1)へ変更を追加する。タイトル・説明は日本語。mainへの初期実装に対する数値修正も同PRに含む。PRは未マージ。
+originは `https://github.com/ddnne/hr-platform.git`。既存作業を維持し、[PR #1](https://github.com/ddnne/hr-platform/pull/1)へ変更をpush済み。タイトル・説明は日本語。mainへの初期実装に対する数値修正も同PRに含む。PRは未マージ。
 `docs/project_brief.md`は添付統合v0.4の同一コピー。quant-platformは変更していない。実装・調査はメイン、サブエージェントは編集しない独立批判レビューだけに使用。
 
 ## 実装した内容
@@ -24,7 +24,7 @@ originは `https://github.com/ddnne/hr-platform.git`。既存作業を維持し�
 
 - Python **82件成功**、workerd **12件成功**。Ruff、TypeScript型検査、Worker dry-runバンドル成功。
 - `make demo`：合成一競走の入力→原本/履歴→as-of→分布/依存診断→Paper判断→払戻精算が完走。再実行でも観測・購入・精算を増やさない。
-- 初期実装のLinux CIで検出した比較分布の誤差は、許容値を緩めずIPFへ修正済み。先行コミット61d9edbのCIは成功。今回の追加変更はPRチェックで検証する。
+- 初期実装のLinux CIで検出した比較分布の誤差は、許容値を緩めずIPFへ修正済み。今回のコードコミット4dd116fの[GitHub Linux CI](https://github.com/ddnne/hr-platform/actions/runs/36427908267)も全工程成功（Python82件・Worker12件・公開境界・型検査・dry-run）。
 - 意図的にsolverを1反復で止める試験の警告1件を含む。未収束を成功扱いせずMODEL_ERRORにすることを確認。
 - 独立レビューで指摘された、内部symlink経由の公開先書込み、遅着200による304再配送の対応先変更、別由来の同ID受入れ、計測失敗による取得成功の降格を修正。回帰テストと再レビューで解消を確認。
 - テスト用SQL分割がmigrationコメントのセミコロンで失敗する問題も修正。失敗したテストrunを成功件数へ数えず、修正後に全件を再実行した。
