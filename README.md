@@ -42,3 +42,17 @@ npm run build    # dry-runのみ
 ```
 
 専用のdev D1・非公開R2を作成し、停止状態のWorkerを配置。Cron・収集スイッチ・内部の取得条件確認スイッチは無効。合成データ2観測のリモート保存・読戻しを確認した。NARの実ZIP互換性、継続収集、実時間Paper、収益性は未確認。
+
+### 保存済み中間オッズの時点診断
+
+`uv run python -m hr_platform.cli --root private/real research-asof --race RACE_ID --schedule private/inbox/schedule.json`
+
+予定JSONは `version`, `known_at`, `scheduled_start_at`, `sales_close_at`（不明ならnull）を含めます。
+予定の出典と事前に判明していた時刻は別途確認が必要です。設定ファイルの発走10分前を固定し、
+当時利用可能だった断面だけで三つのモデルを比較します。過去の購入や実行可能性・利益の証明は作りません。
+不適格な入力は理由を保存し、モデルを実行しません。
+
+`uv run python -m hr_platform.cli --root private/real trajectory --race RACE_ID --market quinella --at 2026-09-28T05:00:00Z`
+
+推移は実観測のみを返し、同値の再観測を保持します。再解析はその時点までに利用可能な版を選び、
+欠測を補間しません。確定済み・レース前か不明の断面は`excluded_points`へ分離します。レポートはGit対象外のprivate配下に保存されます。

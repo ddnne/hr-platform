@@ -59,11 +59,15 @@ def arguments():
     log_query.add_argument("--from", dest="start", required=True)
     log_query.add_argument("--until", dest="end", required=True)
     log_query.add_argument("--at", required=True)
-    for name in ("history", "asof"):
+    research = commands.add_parser("research-asof", help="予定発走時刻から固定した断面と推移を診断。購入なし")
+    research.add_argument("--race", required=True)
+    research.add_argument("--schedule", required=True, help="事前に判明した予定のJSON")
+    research.add_argument("--config", default="configs/research.yaml")
+    for name in ("history", "asof", "trajectory"):
         query = commands.add_parser(name, help="結果を非公開レポートへ保存")
         query.add_argument("--race", required=True)
         query.add_argument("--market", action="append", required=True)
-        query.add_argument("--at", required=name == "asof")
+        query.add_argument("--at", required=name != "history")
     reparse = commands.add_parser(
         "reparse", help="保存原本を現在時刻で再解析。過去の利用可能時刻は変更しない"
     )
@@ -113,6 +117,17 @@ def run(args, store):
         report = CaptureLog(store).history(args.start, args.end, args.at)
     elif args.command == "history":
         report = {"history": {h: store.history(args.race, h, args.at) for h in args.market}}
+    elif args.command == "trajectory":
+        from .research import trajectory
+
+        report = trajectory(store, args.race, args.market, args.at)
+    elif args.command == "research-asof":
+        from .research import research_asof
+
+        report = research_asof(
+            store, args.race, json.loads(read_limited(args.schedule, 64 * 1024)),
+            yaml.safe_load(read_limited(args.config, 64 * 1024)),
+        )
     elif args.command == "asof":
         report = store.asof(args.race, args.market, args.at)
     elif args.command == "reparse":
