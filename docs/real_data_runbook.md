@@ -248,7 +248,7 @@ PYTHONPATH=src uv run python -m hr_platform.cli --root private/research settle-p
 
 実物の1競走で除外表示・通常払戻の取込み、再配送、as-of、再読出しを確認した。実時間Paper判断はまだなく、実際の購入判断に対する精算は未実施。合成判断で払戻・返還・外れ・取消時停止を試験した。
 
-## Python Workerのモデル実行試験（ローカル限定）
+## Python Workerのモデル実行試験
 
 [Python Workers](https://developers.cloudflare.com/workers/languages/python/)の
 [対応パッケージ](https://developers.cloudflare.com/workers/languages/python/packages/)を使い、
@@ -264,6 +264,7 @@ uvx --with 'uv==0.12.3' --from 'workers-py==1.17.4' pywrangler dev \
 
 準備先は新しいGit対象外ディレクトリを指定する。ビルド対象の `src/` にはモデルと入口の
 明示した4ファイルだけをコピーする。仮想環境や実データは置かない。
+依存内のテストデータ・型定義・pycは `python_modules.exclude` で配布から外す。
 数学実装を別言語へ複製せず、依存版は `workers/research/pylock.toml` に固定する。
 科学計算パッケージはRPC呼出し内で読み込む。起動時のimportではSciPyの乱数初期化が失敗した。
 
@@ -278,8 +279,10 @@ RPCは1MiB、3〜16頭、最大300反復などを検査し、モデルの価格�
 常に `MODEL_ONLY_NOT_PAPER_DECISION`、`paper_decision_created=false`、
 `live_execution_qualified=false` とし、呼出し時間と実際の依存版を返す。
 実データを使う場合の入力・返値は非公開保存し、公開CIへ渡さない。
+v2では進まない内部時計のduration_msをnullにする。経過時間はCPU時間ではなく、
+課金CPU時間はCloudflareの計測値を別に確認する。
 
-2026-09-29にローカルworkerdの実RPCで合成入力と保存済み実断面を計算した。
-既存native環境とはCVXPY等の依存版が異なり、実断面1件は比較基準を超える確率差がある。
-実クラウドのCPU時間・メモリ上限・実行適格性は未検証。
-採用前に差の原因とクラウド上の実行制限を確認する。詳しい検証範囲は [status.md](status.md)。
+2026-09-29にローカルworkerd、30日にCloudflare上の実RPCで合成入力と保存済み実断面を計算した。
+依存版を揃えたnative比較でも実断面1件は確率差の基準外で、実行環境による差が残る。
+クラウドで合成1＋実8件の計算・CPU時間を確認したが、全頭数・券種・同時実行は未検証。
+取得・クラウド内保存・Paperへの接続は残る。詳しい検証範囲は [status.md](status.md)。

@@ -25,6 +25,19 @@ def test_wrapper_uses_existing_model_and_does_not_claim_live_paper(config):
     assert result["runtime_versions"]["clarabel"] and result["duration_ms"] > 0
 
 
+def test_nonadvancing_runtime_clock_does_not_claim_zero_computation_time(config, monkeypatch):
+    from hr_platform import cloud_model
+
+    monkeypatch.setattr(cloud_model.time, "perf_counter", lambda: 42.0)
+    result = json.loads(execute(json.dumps(payload(config))))
+    assert result["status"] == "ANALYZED"
+    assert result["duration_ms"] is None
+    assert result["analysis"]["reference_diagnostics"]["duration_ms"] is None
+    assert result["analysis"]["marginal_diagnostics"]["duration_ms"] is None
+    assert all(x["diagnostics"]["duration_ms"] is None for x in result["analysis"]["sensitivity"])
+    assert result["timing_basis"] == "RUNTIME_CLOCK_ELAPSED_NOT_BILLED_CPU"
+
+
 @pytest.mark.parametrize(
     "kind",
     [
@@ -143,5 +156,6 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
     config = json.loads((root / "wrangler.jsonc").read_text())
     assert not config["workers_dev"] and not config["preview_urls"] and config["triggers"]["crons"] == []
     assert not {"r2_buckets", "d1_databases", "services"} & config.keys()
+    assert config["python_modules"]["exclude"] == ["**/*.pyc", "**/tests/**", "**/*.pyi"]
     with pytest.raises(ValueError, match="FRESH_BUILD"):
         module.prepare("ignored-test")
