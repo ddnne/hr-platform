@@ -25,7 +25,8 @@ def main():
     config = json.loads(Path("wrangler.jsonc").read_text())
     if (
         config["name"] != "hr-platform-dev-ingestion"
-        or config["vars"] != {"COLLECTION_ENABLED": "false", "SOURCE_APPROVED": "false"}
+        or config["vars"]
+        != {"COLLECTION_ENABLED": "false", "SOURCE_APPROVED": "false", "CAPTURE_SLOTS_JSON": "[]"}
         or config["workers_dev"]
         or config["preview_urls"]
         or config["triggers"]["crons"]

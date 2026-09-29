@@ -11,7 +11,21 @@ import time
 import warnings
 
 MAX_INPUT_BYTES = 1024 * 1024
-VERSION = "python-worker-model-v1"
+VERSION = "python-worker-model-v2"
+
+
+def clock_timings(value):
+    """A frozen runtime clock cannot establish zero execution time."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "duration_ms" and v is not None and v <= 0:
+                value[k] = None
+            else:
+                clock_timings(v)
+    elif isinstance(value, list):
+        for v in value:
+            clock_timings(v)
+    return value
 
 
 def validate(payload):
@@ -64,6 +78,7 @@ def execute(payload):
         "purpose": "MODEL_ONLY_NOT_PAPER_DECISION",
         "paper_decision_created": False,
         "live_execution_qualified": False,
+        "timing_basis": "RUNTIME_CLOCK_ELAPSED_NOT_BILLED_CPU",
     }
     try:
         data = validate(payload)
@@ -90,19 +105,21 @@ def execute(payload):
             "REFERENCE_INCONSISTENT" if result["identification"]["status"] == "INCONSISTENT" else "ANALYZED"
         )
         return json.dumps(
-            {
-                **envelope,
-                "status": status,
-                "analysis": result,
-                "duration_ms": (time.perf_counter() - started) * 1000,
-                "runtime_versions": {
-                    "python": platform.python_version(),
-                    "cvxpy": cvxpy.__version__,
-                    "clarabel": clarabel.__version__,
-                    "scipy": scipy.__version__,
-                    "numpy": numpy.__version__,
-                },
-            },
+            clock_timings(
+                {
+                    **envelope,
+                    "status": status,
+                    "analysis": result,
+                    "duration_ms": (time.perf_counter() - started) * 1000,
+                    "runtime_versions": {
+                        "python": platform.python_version(),
+                        "cvxpy": cvxpy.__version__,
+                        "clarabel": clarabel.__version__,
+                        "scipy": scipy.__version__,
+                        "numpy": numpy.__version__,
+                    },
+                }
+            ),
             allow_nan=False,
         )
     except Exception:

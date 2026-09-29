@@ -38,6 +38,9 @@ def prepare(destination):
         "workers_dev": False,
         "preview_urls": False,
         "triggers": {"crons": []},
+        # Scientific wheels include upstream test datasets and type stubs.
+        # Exclude those from deployment, preserving runtime code and licenses.
+        "python_modules": {"exclude": ["**/*.pyc", "**/tests/**", "**/*.pyi"]},
     }
     (root / "wrangler.jsonc").write_text(json.dumps(config, indent=2) + "\n")
     return root
