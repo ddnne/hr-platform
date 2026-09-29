@@ -1,12 +1,13 @@
 """One-file static market experiment. Never a historical decision or a Paper bet."""
 
 import time
+from math import isfinite
 from .common import identity, stamp
-from .model import analyze, reference, states, ModelError
+from .model import analyze, reference, states, matrix, key, ModelError
 from .race_files import normalize
 from .realdata import RealData
 
-VERSION = "static-market-diagnostic-v2"
+VERSION = "static-market-diagnostic-v3"
 
 
 def diagnose(store, odds_raw, odds_name, race_raw, race_name, kind, encoding, config, race_id=None):
@@ -59,12 +60,34 @@ def diagnose(store, odds_raw, odds_name, race_raw, race_name, kind, encoding, co
         markets = odds["content"][candidate]["markets"]
         try:
             omega = states(runners)
-            for market in [config["target"], *config["references"]]:
+        except ModelError:
+            excluded.append({"race_id": candidate, "reason": "RUNNER_COUNT"})
+            continue
+        issues = []
+        for market in [config["target"], *config["references"]]:
+            expected = {key(selection) for selection in matrix(omega, market)[0]}
+            quotes = markets.get(market, {}).get("quotes", {})
+            try:
                 if market not in markets:
                     raise ModelError("MARKET_MISSING")
-                reference(omega, market, markets[market]["quotes"])
-        except ModelError:
-            excluded.append({"race_id": candidate, "reason": "INCOMPLETE_OR_UNUSABLE_MARKETS"})
+                reference(omega, market, quotes)
+            except ModelError as exc:
+                issues.append({
+                    "market": market, "reason": str(exc),
+                    "expected_rows": len(expected), "observed_rows": len(quotes),
+                    "missing_selections": sorted(expected - quotes.keys()),
+                    "unexpected_selections": sorted(quotes.keys() - expected),
+                    "unusable_selections": [
+                        {"selection": selection, "display_status": quote.get("display_status"),
+                         "raw_odds": quote.get("raw_odds"), "raw_max": quote.get("raw_max")}
+                        for selection, quote in quotes.items()
+                        if quote.get("display_status") != "FIXED" or quote.get("odds") is None
+                        or not isfinite(quote["odds"]) or quote["odds"] < 1
+                    ],
+                    "marker_meaning": "NOT_INFERRED_FROM_DISPLAY_VALUE",
+                })
+        if issues:
+            excluded.append({"race_id": candidate, "reason": "MARKET_QUALITY", "issues": issues})
             continue
         selected = candidate, metadata, runners, markets
         break  # deterministic first eligible race, never selected by price differences or results
