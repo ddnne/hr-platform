@@ -1,0 +1,407 @@
+"""Observed labels from the official win/place page, with an availability timeline.
+
+FINAL describes the displayed odds, not race completion or settlement finality.
+Unverified headings and empty change fields never establish PRE_RACE or active runners.
+"""
+
+from datetime import datetime
+from html.parser import HTMLParser
+import json
+import re
+import unicodedata
+from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
+from .common import canonical, identity, sha, stamp, seconds
+
+VERSION = "nar-odds-page-state-v3"
+MAX_BYTES = 2 * 1024 * 1024
+HEADERS = [
+    "枠",
+    "馬番",
+    "馬名",
+    "単勝オッズ",
+    "複勝オッズ(3着払い)",
+    "性齢",
+    "馬体重(増減)",
+    "負担重量",
+    "騎手(所属)",
+    "所属",
+    "調教師",
+    "変更情報",
+]
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS race_state_observations(
+ id TEXT PRIMARY KEY, race_id TEXT NOT NULL, raw_hash TEXT NOT NULL,
+ receipt_hash TEXT NOT NULL, received_at TEXT NOT NULL, raw_saved_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS race_state_parses(
+ id TEXT PRIMARY KEY, observation_id TEXT NOT NULL, version TEXT NOT NULL,
+ parsed_at TEXT NOT NULL, available_at TEXT, report_hash TEXT NOT NULL,
+ UNIQUE(observation_id,version));
+"""
+
+
+def compact(text):
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+
+
+class OddsPage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.heading = None
+        self.headings = []
+        self.inside = False
+        self.tables = 0
+        self.row = None
+        self.cell = None
+        self.rows = []
+        self.current_links = []
+        self.elements = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        style = compact(attrs.get("style", "")).lower()
+        hidden = (
+            any(x[1] for x in self.elements)
+            or "hidden" in attrs
+            or attrs.get("aria-hidden", "").lower() == "true"
+            or bool(
+                re.search(
+                    r"(?:^|;)(?:display:none|visibility:(?:hidden|collapse))(?:!important)?(?:;|$)", style
+                )
+            )
+            or tag in {"script", "style", "template"}
+        )
+        if tag not in {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }:
+            self.elements.append((tag, hidden))
+        frame_cell = (
+            self.inside and self.row == [] and (tag == "td" or self.cell and self.cell["tag"] == "td")
+        )
+        current_link = tag == "a" and {"cNaviBtn", "live"}.issubset(attrs.get("class", "").split())
+        protected = (
+            tag == "h4"
+            or self.heading is not None
+            or current_link
+            or self.inside
+            and (tag in {"table", "tr", "th"} or (tag == "td" or self.cell is not None) and not frame_cell)
+            or tag == "table"
+            and "odd_popular_table_02" in attrs.get("class", "").split()
+        )
+        if hidden and protected:
+            raise ValueError("STATE_HIDDEN_EVIDENCE")
+        if current_link:
+            self.current_links.append(attrs.get("href", ""))
+        if tag == "h4":
+            if self.heading is not None:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.heading = ""
+        if tag == "table":
+            if self.inside:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            if "odd_popular_table_02" in attrs.get("class", "").split():
+                self.inside = True
+                self.tables += 1
+        if self.inside and tag == "tr":
+            if self.row is not None:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.row = []
+        if self.inside and tag in {"th", "td"}:
+            if self.cell is not None or self.row is None:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.cell = {
+                "tag": tag,
+                "span": attrs.get("colspan", "1"),
+                "rowspan": attrs.get("rowspan", "1"),
+                "text": "",
+            }
+
+    def handle_data(self, data):
+        if self.heading is not None:
+            self.heading += data
+        if self.cell is not None:
+            self.cell["text"] += data
+
+    def handle_endtag(self, tag):
+        matching = [i for i, x in enumerate(self.elements) if x[0] == tag]
+        if matching:
+            del self.elements[matching[-1] :]
+        if tag == "h4" and self.heading is not None:
+            self.headings.append(compact(self.heading))
+            self.heading = None
+        if self.inside and tag in {"td", "th"}:
+            if self.cell is None or self.cell["tag"] != tag:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.row.append(self.cell)
+            self.cell = None
+        if self.inside and tag == "tr":
+            if self.row is None or self.cell is not None:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.rows.append(self.row)
+            self.row = None
+        if self.inside and tag == "table":
+            if self.row is not None or self.cell is not None:
+                raise ValueError("STATE_PAGE_STRUCTURE")
+            self.inside = False
+
+
+def parse_state_page(raw, race_id):
+    page = OddsPage()
+    page.feed(raw.decode("utf-8-sig", errors="strict"))
+    if (
+        page.tables != 1
+        or page.inside
+        or page.row is not None
+        or page.cell is not None
+        or page.heading is not None
+        or len(page.rows) < 2
+    ):
+        raise ValueError("STATE_PAGE_STRUCTURE")
+    identities = []
+    for h in page.headings:
+        m = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日\([^)]*\)(.+)第(\d+)競走(\d{2}:\d{2})発走", h)
+        if m:
+            year, month, day, venue, number, start = m.groups()
+            date = f"{year}{int(month):02}{int(day):02}"
+            dt = datetime.strptime(date + start, "%Y%m%d%H:%M").replace(tzinfo=ZoneInfo("Asia/Tokyo"))
+            identities.append((f"{date}:{venue}:{int(number)}", dt.isoformat()))
+    if len(identities) != 1 or identities[0][0] != race_id:
+        raise ValueError("STATE_RACE_IDENTITY")
+    if len(page.current_links) != 1:
+        raise ValueError("STATE_CURRENT_LINK")
+    current = urlsplit(page.current_links[0])
+    query = parse_qs(current.query, strict_parsing=True)
+    date, _, number = race_id.split(":")
+    if (
+        current.scheme
+        or current.netloc
+        or current.fragment
+        or current.path != "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
+        or set(query) != {"k_raceDate", "k_raceNo", "k_babaCode"}
+        or query["k_raceDate"] != [f"{date[:4]}/{date[4:6]}/{date[6:]}"]
+        or query["k_raceNo"] != [number]
+        or len(query["k_babaCode"]) != 1
+        or not re.fullmatch(r"[0-9]{2}", query["k_babaCode"][0])
+    ):
+        raise ValueError("STATE_CURRENT_LINK")
+    headings = [h for h in page.headings if h.startswith("単勝・複勝オッズ")]
+    if len(headings) != 1:
+        raise ValueError("STATE_ODDS_HEADING")
+    final = headings[0] == "単勝・複勝オッズ(最終)"
+    header = page.rows[0]
+    labels = [compact(c["text"]) for c in header]
+    if (
+        len(labels) != len(HEADERS)
+        or labels[:4] != HEADERS[:4]
+        or labels[5:] != HEADERS[5:]
+        or labels[4] not in {"複勝オッズ(2着払い)", "複勝オッズ(3着払い)"}
+        or any(c["tag"] != "th" or c["rowspan"] != "1" for c in header)
+        or [c["span"] for c in header] != ["1"] * 4 + ["2"] + ["1"] * 7
+    ):
+        raise ValueError("STATE_TABLE_HEADER")
+    runners = {}
+    for row in page.rows[1:]:
+        # The real page keeps a hidden frame cell under a frame rowspan. Horse
+        # number and change columns remain fixed; frame values are not used here.
+        if (
+            len(row) != 13
+            or any(c["tag"] != "td" or c["span"] != "1" for c in row)
+            or row[0]["rowspan"] not in {"1", "2"}
+            or any(c["rowspan"] != "1" for c in row[1:])
+        ):
+            raise ValueError("STATE_RUNNER_ROW")
+        number, change = compact(row[1]["text"]), compact(row[12]["text"])
+        if not re.fullmatch(r"[1-9][0-9]?", number) or not 1 <= int(number) <= 16 or number in runners:
+            raise ValueError("STATE_RUNNER_ID")
+        excluded = change == "競走除外"
+        runners[number] = {
+            "change_label": change,
+            "status": "EXCLUDED" if excluded else "NO_CHANGE_DISPLAYED" if not change else "UNKNOWN_CHANGE",
+            "active": False if excluded else None,
+        }
+    return {
+        "race_id": race_id,
+        "venue_code": query["k_babaCode"][0],
+        "scheduled_start_at": identities[0][1],
+        "odds_heading": headings[0],
+        "odds_stage": "FINAL_DISPLAYED" if final else "UNKNOWN",
+        "reason": "FINAL_ODDS_DISPLAYED" if final else "ODDS_STAGE_UNQUALIFIED",
+        "runners": runners,
+        "source_updated_at": None,
+        "pre_race_evidence": None,
+        "paper_eligible": False,
+        "settlement_final": False,
+    }
+
+
+def validate_receipt(receipt, raw, race_id, now):
+    if (
+        receipt.get("status") != 200
+        or receipt.get("sha256") != sha(raw)
+        or type(receipt.get("bytes")) is not int
+        or receipt["bytes"] != len(raw)
+        or len(raw) > MAX_BYTES
+    ):
+        raise ValueError("STATE_RECEIPT_BODY")
+    url = urlsplit(receipt["url"])
+    query = parse_qs(url.query, strict_parsing=True)
+    date, _, number = race_id.split(":")
+    datetime.strptime(date, "%Y%m%d")
+    if (
+        url.scheme != "https"
+        or url.netloc != "www.keiba.go.jp"
+        or url.fragment
+        or url.path != "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
+        or set(query) != {"k_raceDate", "k_raceNo", "k_babaCode"}
+        or query["k_raceDate"] != [f"{date[:4]}/{date[4:6]}/{date[6:]}"]
+        or query["k_raceNo"] != [number]
+        or len(query["k_babaCode"]) != 1
+        or not re.fullmatch(r"[0-9]{2}", query["k_babaCode"][0])
+    ):
+        raise ValueError("STATE_RECEIPT_URL")
+    fields = ("fetch_started_at", "headers_received_at", "collector_received_at", "raw_saved_at")
+    if any(not isinstance(receipt.get(k), str) for k in fields):
+        raise ValueError("STATE_RECEIPT_TIME")
+    times = [stamp(receipt[k]) for k in fields]
+    if times != sorted(times) or times[-1] > now:
+        raise ValueError("STATE_RECEIPT_TIME")
+    return identity([receipt["url"], times[0]])
+
+
+class StateEvidence:
+    def __init__(self, store):
+        self.store = store
+        store.db.executescript(SCHEMA)
+
+    def published(self, parse_id):
+        row = self.store.db.execute("SELECT * FROM race_state_parses WHERE id=?", (parse_id,)).fetchone()
+        if row["available_at"] is None:
+            available = stamp(self.store.clock())
+            if available < row["parsed_at"]:
+                raise ValueError("STATE_CLOCK_ORDER")
+            with self.store.db:
+                self.store.db.execute(
+                    "UPDATE race_state_parses SET available_at=? WHERE id=? AND available_at IS NULL",
+                    (available, parse_id),
+                )
+            row = self.store.db.execute("SELECT * FROM race_state_parses WHERE id=?", (parse_id,)).fetchone()
+        return {
+            **json.loads(self.store.read_body(row["report_hash"], "reports")),
+            "available_at": row["available_at"],
+        }
+
+    def ingest(self, receipt, raw, race_id, version=VERSION, parser=parse_state_page):
+        now = stamp(self.store.clock())
+        event = validate_receipt(receipt, raw, race_id, now)
+        digest, receipt_hash = sha(raw), identity(receipt)
+        old = self.store.db.execute("SELECT * FROM race_state_observations WHERE id=?", (event,)).fetchone()
+        if old and (old["receipt_hash"] != receipt_hash or old["race_id"] != race_id):
+            raise ValueError("STATE_EVENT_CONFLICT")
+        parse_id = identity([event, version])
+        existing = self.store.db.execute(
+            "SELECT id FROM race_state_parses WHERE id=?", (parse_id,)
+        ).fetchone()
+        if existing:
+            return self.published(parse_id)
+        self.store.body(raw, "raw")
+        self.store.body(canonical(receipt), "receipts")
+        saved_at = stamp(self.store.clock())
+        if saved_at < now:
+            raise ValueError("STATE_CLOCK_ORDER")
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT OR IGNORE INTO race_state_observations VALUES(?,?,?,?,?,?)",
+                (event, race_id, digest, receipt_hash, stamp(receipt["collector_received_at"]), saved_at),
+            )
+        registered = self.store.db.execute(
+            "SELECT * FROM race_state_observations WHERE id=?", (event,)
+        ).fetchone()
+        if registered["receipt_hash"] != receipt_hash or registered["race_id"] != race_id:
+            raise ValueError("STATE_EVENT_CONFLICT")
+        report = {
+            "id": parse_id,
+            "observation_id": event,
+            "version": version,
+            "raw_hash": digest,
+            "receipt_hash": receipt_hash,
+            "race_id": race_id,
+            "received_at": stamp(receipt["collector_received_at"]),
+            "paper_eligible": False,
+            "status": "OBSERVED_UNQUALIFIED",
+        }
+        try:
+            parsed = parser(raw, race_id)
+            if parsed["venue_code"] != parse_qs(urlsplit(receipt["url"]).query)["k_babaCode"][0]:
+                raise ValueError("STATE_VENUE_CODE")
+            report.update(parsed)
+        except (ValueError, UnicodeError):
+            report.update(status="QUARANTINED", reason="STATE_PAGE_UNQUALIFIED")
+        parsed_at = stamp(self.store.clock())
+        if parsed_at < saved_at:
+            raise ValueError("STATE_CLOCK_ORDER")
+        report.update(parsed_at=parsed_at)
+        report_hash = self.store.body(canonical(report), "reports")
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT OR IGNORE INTO race_state_parses VALUES(?,?,?,?,?,?)",
+                (parse_id, event, version, parsed_at, None, report_hash),
+            )
+        return self.published(parse_id)
+
+    def asof(self, race_id, at):
+        at = stamp(at)
+        row = self.store.db.execute(
+            """SELECT p.report_hash,p.available_at FROM race_state_parses p
+            JOIN race_state_observations o ON o.id=p.observation_id
+            WHERE o.race_id=? AND p.available_at<=?
+            ORDER BY o.received_at DESC,p.available_at DESC,p.id DESC LIMIT 1""",
+            (race_id, at),
+        ).fetchone()
+        evidence = (
+            {
+                **json.loads(self.store.read_body(row["report_hash"], "reports")),
+                "available_at": row["available_at"],
+            }
+            if row
+            else None
+        )
+        return {
+            "race_id": race_id,
+            "asof_at": at,
+            "evidence": evidence,
+            "age_seconds": seconds(at, evidence["received_at"]) if evidence else None,
+        }
+
+    def history(self, race_id, at):
+        at = stamp(at)
+        rows = self.store.db.execute(
+            """SELECT p.report_hash,p.available_at FROM race_state_parses p
+            JOIN race_state_observations o ON o.id=p.observation_id
+            WHERE o.race_id=? AND p.available_at<=?
+            ORDER BY o.received_at,p.available_at,p.id""",
+            (race_id, at),
+        ).fetchall()
+        return {
+            "race_id": race_id,
+            "asof_at": at,
+            "history": [
+                {
+                    **json.loads(self.store.read_body(row["report_hash"], "reports")),
+                    "available_at": row["available_at"],
+                }
+                for row in rows
+            ],
+        }
