@@ -98,42 +98,55 @@ def solve(problem, q, tolerance=1e-7, max_iter=300):
     return result, diagnostics
 
 
-def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_iter=300):
-    if target in refs or not refs or len(set(refs)) != len(refs) or regularization <= 0:
+def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_iter=300, solver="CLARABEL"):
+    if (target in refs or not refs or len(set(refs)) != len(refs)
+            or not np.isfinite(regularization) or regularization <= 0):
         raise ModelError("REFERENCE_CONFIG")
     if any(h not in markets for h in refs):
         raise ModelError("REFERENCE_MISSING")
     weights = np.ones(len(refs)) / len(refs) if weights is None else np.asarray(weights, dtype=float)
     if (
-        len(weights) != len(refs)
+        weights.ndim != 1
+        or len(weights) != len(refs)
         or not np.isfinite(weights).all()
         or min(weights) < 0
         or abs(sum(weights) - 1) > 1e-10
     ):
         raise ModelError("REFERENCE_WEIGHTS")
-    # States with identical reference outcomes must share mass equally at the KL optimum.
-    # Collapse these classes exactly, improving conditioning without changing the objective.
-    groups = {}
-    membership = []
-    for s in omega:
-        signature = tuple(ticket(s, h) for h in refs)
-        if signature not in groups:
-            groups[signature] = len(groups)
-        membership.append(groups[signature])
-    sizes = np.bincount(membership)
-    expansion = sparse.csr_matrix(
-        (1 / sizes[membership], (np.arange(len(omega)), membership)), shape=(len(omega), len(groups))
-    )
-    mass = cp.Variable(len(groups), nonneg=True)
-    q = expansion @ mass
-    u = np.ones(len(omega)) / len(omega)
-    objective = regularization * cp.sum(cp.kl_div(q, u))
-    data = []
-    for h, weight in zip(refs, weights):
-        _, a, v, c, _ = reference(omega, h, markets[h]["quotes"])
-        objective += weight * cp.sum(cp.kl_div(v, a @ q))
-        data.append((h, a, v, c))
-    result, diagnostics = solve(cp.Problem(cp.Minimize(objective), [cp.sum(q) == 1]), q, max_iter=max_iter)
+    if solver not in {"CLARABEL", "WIN_EXACTA_NEWTON_V1"}:
+        raise ModelError("SOLVER_CONFIG")
+    data = [(h, *reference(omega, h, markets[h]["quotes"])[1:4]) for h in refs]
+    if solver == "WIN_EXACTA_NEWTON_V1":
+        if target != "quinella" or set(refs) != {"win", "exacta"} or np.any(weights <= 0) or np.any(weights >= 1):
+            raise ModelError("NEWTON_REFERENCE_CONFIG")
+        if type(max_iter) is not int or max_iter < 1:
+            raise ModelError("ITERATION_LIMIT")
+        with np.errstate(over="raise", divide="raise", invalid="raise"):
+            try:
+                result, diagnostics = _win_exacta_newton(omega, data, refs, weights, regularization, max_iter)
+            except FloatingPointError as exc:
+                raise ModelError("NEWTON_NUMERIC") from exc
+    else:
+        # States with identical reference outcomes must share mass equally at the KL optimum.
+        # Collapse these classes exactly, improving conditioning without changing the objective.
+        groups = {}
+        membership = []
+        for s in omega:
+            signature = tuple(ticket(s, h) for h in refs)
+            if signature not in groups:
+                groups[signature] = len(groups)
+            membership.append(groups[signature])
+        sizes = np.bincount(membership)
+        expansion = sparse.csr_matrix(
+            (1 / sizes[membership], (np.arange(len(omega)), membership)), shape=(len(omega), len(groups))
+        )
+        mass = cp.Variable(len(groups), nonneg=True)
+        q = expansion @ mass
+        u = np.ones(len(omega)) / len(omega)
+        objective = regularization * cp.sum(cp.kl_div(q, u))
+        for (_, a, v, _), weight in zip(data, weights):
+            objective += weight * cp.sum(cp.kl_div(v, a @ q))
+        result, diagnostics = solve(cp.Problem(cp.Minimize(objective), [cp.sum(q) == 1]), q, max_iter=max_iter)
     diagnostics["residual_max"] = {h: float(np.max(abs(a @ result - v))) for h, a, v, _ in data}
     diagnostics["common_return"] = {h: float(c) for h, _, _, c in data}
     diagnostics["lambda"] = regularization
@@ -141,6 +154,75 @@ def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_ite
     diagnostics["weights"] = weights.tolist()
     return result, diagnostics
 
+
+
+def _win_exacta_newton(omega, data, refs, weights, regularization, max_iter):
+    """Same KL objective on pair masses; full distinct-horse support is required.
+
+    The Hessian is diagonal plus one rank-one block per winner. Its inverse
+    supplies the equality-constrained Newton direction without a dense solve.
+    The convex tangent bound is an objective diagnostic, not a probability bound.
+    """
+    begin = time.perf_counter()
+    horses = sorted({h for s in omega for h in s})
+    if len(omega) != len(horses) * (len(horses) - 1) * (len(horses) - 2) or set(omega) != set(states(horses)):
+        raise ModelError("NEWTON_SUPPORT")
+    probabilities = {h: v for h, _, v, _ in data}
+    a, w = probabilities["exacta"], probabilities["win"]
+    alpha, beta = weights[refs.index("win")], weights[refs.index("exacta")]
+    first = np.repeat(np.arange(len(horses)), len(horses) - 1)
+    afirst = np.bincount(first, weights=a, minlength=len(w))
+    x = a * ((alpha * w + beta * afirst) / afirst)[first]
+    x /= x.sum()
+
+    def parts(value):
+        totals = np.bincount(first, weights=value, minlength=len(w))
+        f = regularization * np.sum(value * np.log(value * len(value)))
+        f += beta * np.sum(a * np.log(a / value)) + alpha * np.sum(w * np.log(w / totals))
+        gradient = regularization * (np.log(value * len(value)) + 1) - beta * a / value - alpha * (w / totals)[first]
+        inverse_diagonal = 1 / (regularization / value + beta * a / value**2)
+        row_curvature = alpha * w / totals**2
+        return f, gradient, inverse_diagonal, row_curvature
+
+    for iteration in range(max_iter):
+        objective, gradient, dinv, curvature = parts(x)
+        residual = float(np.ptp(gradient))
+        gap = float(gradient @ x - gradient.min())
+        if not np.isfinite(gradient).all() or not np.isfinite(objective) or not np.isfinite(x).all() or x.min() <= 0:
+            raise ModelError("NEWTON_NUMERIC")
+        if residual <= 1e-10 and abs(gap) <= 1e-10 and abs(x.sum() - 1) <= 1e-12:
+            pairs = sorted({s[:2] for s in omega})
+            mapping = {pair: value / (len(horses) - 2) for pair, value in zip(pairs, x)}
+            q = np.array([mapping[s[:2]] for s in omega])
+            return q, {
+                "status": "optimal", "solver": "WIN_EXACTA_NEWTON_V1", "iterations": iteration,
+                "objective": float(objective), "stationarity_range": residual,
+                "convex_gap_upper": max(0.0, gap), "gap_basis": "FLOATING_POINT_CONVEX_TANGENT_NOT_PROBABILITY_BOUND",
+                "duration_ms": (time.perf_counter() - begin) * 1000,
+                "min_component_before": float(q.min()), "sum_error_before": float(abs(q.sum() - 1)),
+                "correction_l1": 0.0,
+            }
+        inverse = []
+        denominator = 1 + curvature * np.bincount(first, weights=dinv, minlength=len(w))
+        for vector in (gradient, np.ones(len(x))):
+            weighted = dinv * vector
+            adjustment = curvature * np.bincount(first, weights=weighted, minlength=len(w)) / denominator
+            inverse.append(weighted - dinv * adjustment[first])
+        hg, ho = inverse
+        direction = -hg + ho * hg.sum() / ho.sum()
+        negative = direction < 0
+        step = min(1.0, float(np.min(-0.99 * x[negative] / direction[negative]))) if negative.any() else 1.0
+        for _ in range(60):
+            candidate = x + step * direction
+            candidate /= candidate.sum()
+            nf, ng, _, _ = parts(candidate)
+            if np.isfinite(nf) and (nf <= objective + 1e-4 * step * (gradient @ direction) or np.ptp(ng) < residual):
+                x = candidate
+                break
+            step *= 0.5
+        else:
+            raise ModelError("NEWTON_LINE_SEARCH")
+    raise ModelError("NEWTON_NOT_CONVERGED")
 
 
 def win_exacta_unregularized(omega, markets, win_weight=0.5):
@@ -335,7 +417,7 @@ def analyze(runners, markets, config):
     # Validate the target before spending time on calibration; all entry points
     # share the same quote checks, including JSON booleans masquerading as 1.
     selections, a, v, _, odds = reference(omega, target, markets[target]["quotes"])
-    qr, dr = fit(omega, markets, target, refs, config["lambda"], max_iter=config["solver_max_iter"])
+    qr, dr = fit(omega, markets, target, refs, config["lambda"], max_iter=config["solver_max_iter"], solver=config["solver"])
     qm, dm = same_marginals(omega, qr, config["solver_max_iter"])
     direct_market = "exacta" if target == "quinella" else "trifecta"
     direct_selections, _, direct_v, _, _ = reference(omega, direct_market, markets[direct_market]["quotes"])
@@ -384,12 +466,12 @@ def analyze(runners, markets, config):
     consistency = reference_consistency(omega, markets, refs, target)
     sensitivity = []
     for value in config["sensitivity_lambdas"]:
-        qs, ds = fit(omega, markets, target, refs, value, max_iter=config["solver_max_iter"])
+        qs, ds = fit(omega, markets, target, refs, value, max_iter=config["solver_max_iter"], solver=config["solver"])
         sensitivity.append({"lambda": value, "probabilities": (a @ qs).tolist(), "diagnostics": ds})
     weight_variants = []
     if len(refs) == 2:
         for weights in ([0.25, 0.75], [0.75, 0.25]):
-            qw, dw = fit(omega, markets, target, refs, config["lambda"], weights, config["solver_max_iter"])
+            qw, dw = fit(omega, markets, target, refs, config["lambda"], weights, config["solver_max_iter"], config["solver"])
             weight_variants.append(
                 {"weights": weights, "probabilities": (a @ qw).tolist(), "diagnostics": dw}
             )
