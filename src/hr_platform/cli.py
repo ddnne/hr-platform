@@ -53,6 +53,11 @@ def arguments():
     diagnostic.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
     diagnostic.add_argument("--race", help="未指定なら完全性条件を満たす最初の平地競走")
     diagnostic.add_argument("--config", default="configs/research.yaml")
+    payout = commands.add_parser("check-payout", help="保存済み成績HTMLとレースCSVの払戻を照合。精算なし")
+    payout.add_argument("--race-zip", required=True)
+    payout.add_argument("--html", required=True)
+    payout.add_argument("--race", required=True)
+    payout.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
     log = commands.add_parser("import-log", help="D1の成功・失敗・待機ログを非公開で取込み")
     log.add_argument("--file", required=True)
     log_query = commands.add_parser("capture-log", help="取得状態の履歴を時点指定で再読出し")
@@ -110,6 +115,11 @@ def run(args, store):
             yaml.safe_load(read_limited(args.config, 64 * 1024)),
             args.race,
         )
+    elif args.command == "check-payout":
+        from .payout_check import crosscheck
+
+        report = crosscheck(store, read_limited(args.race_zip), Path(args.race_zip).name,
+                            read_limited(args.html, 2 * 1024 * 1024), args.race, args.encoding)
     elif args.command == "import-capture":
         manifest = json.loads(read_limited(args.manifest, 64 * 1024))
         parse_id = adapter.import_capture(manifest, read_limited(args.zip), args.encoding)
@@ -167,7 +177,7 @@ def main(argv=None):
         store = Store(root)
         result = run(args, store)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if result["status"] in {"QUARANTINED", "ERROR", "NO_COMPATIBLE_RACE", "MODEL_ERROR"} else 0
+        return 1 if result["status"] in {"QUARANTINED", "ERROR", "NO_COMPATIBLE_RACE", "MODEL_ERROR", "MISMATCH"} else 0
     except (
         ValueError,
         TypeError,

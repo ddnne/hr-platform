@@ -163,3 +163,18 @@ uv run python -m hr_platform.cli capture-log --from '2026-09-28T00:00:00+09:00' 
 - 対象式別の購入券へ適用し、全額返還対象の券は返還だけを計上する。通常的中払戻との混在、全競走無効との混在、重複式別、不明額は拒否する。
 - `special_payout_yen` は `payout_yen` の内数。損益やROIへ二重加算しない。
 - 元入力と版を保存し、訂正も既存の精算履歴・利用可能時刻の規則に従う。
+
+### 保存した公式成績ページとCSVの払戻照合
+
+```sh
+uv run python -m hr_platform.cli --root private/real check-payout \
+  --race-zip private/inbox/race.zip --html private/inbox/result.html \
+  --race 'YYYYMMDD:競馬場:競走番号' --encoding utf-8-sig
+```
+
+通信せず、成績ページ見出しの競走識別と、払戻表の買い目・金額をレースCSVに照合する。
+原本と詳細はprivate内へ保存し、標準出力は状態・レポートのパスだけ。
+`MATCHED_UNQUALIFIED` は掲載内容の一致であり、取得元の真正性、返還の網羅性、結果の最終性の証明ではない。
+入力は手元の取得記録と対応する保存ファイルを使う。オッズ観測・Paper判断・精算は生成しない。
+不一致は `MISMATCH`、不明な表現や別競走は `QUARANTINED`。
+特払い・返還などの例外HTMLは未適合であり、数値へ推測変換しない。
