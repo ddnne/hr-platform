@@ -1,0 +1,42 @@
+lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.14.2"
+
+[[packages]]
+name = "cffi"
+version = "2.0.0"
+wheels = [{ url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/cffi-2.0.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl", hashes = { sha256 = "9ae1a61096321cef7248e02293f42d000fa87b73a3e795705a2444290590459d" } }]
+
+[[packages]]
+name = "clarabel"
+version = "0.11.1"
+wheels = [{ url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/clarabel-0.11.1-cp39-abi3-pyemscripten_2026_0_wasm32.whl", hashes = { sha256 = "fdfcfe9af9f0e385b81babdabdff92adb79d440424599156e19c058f30950a78" } }]
+
+[[packages]]
+name = "cvxpy-base"
+version = "1.8.2"
+wheels = [{ url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/cvxpy_base-1.8.2-py3-none-any.whl", hashes = { sha256 = "b11cb0fd5fec3f8b4df1e39de066341e734c67387b5f711d0c4c224f5d3b11bf" } }]
+
+[[packages]]
+name = "numpy"
+version = "2.4.6"
+wheels = [{ url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/numpy-2.4.6-cp314-cp314-pyemscripten_2026_0_wasm32.whl", hashes = { sha256 = "a292c1f5d7d8a2208cd5e94fc467604c131cabcd2fc14fed6eefde121e7fabdf" } }]
+
+[[packages]]
+name = "pycparser"
+version = "3.0"
+marker = "implementation_name != 'PyPy'"
+wheels = [
+    { url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pycparser-3.0-py3-none-any.whl", hashes = { sha256 = "0b4cbc12c42e25df55343342fb0da45b189181e4f360602f9721db2016fc3a4b" } },
+    { url = "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl", hashes = { sha256 = "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992" } },
+]
+
+[[packages]]
+name = "scipy"
+version = "1.18.0"
+wheels = [{ url = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/scipy-1.18.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl", hashes = { sha256 = "17ee329a957863516d1bb6a6aaa0c60576fac027e9cd3d43de27f58b5b599b50" } }]
+
+[[packages]]
+name = "workers-runtime-sdk"
+version = "1.9.1"
+wheels = [{ url = "https://files.pythonhosted.org/packages/e7/a9/b2d288c73728ccd9f50b8f0020c2fdd0b2f3f0d0d8efde56f2b2e64529d5/workers_runtime_sdk-1.9.1-py3-none-any.whl", upload-time = 2026-09-29T03:30:18Z, size = 38588, hashes = { sha256 = "1cb71387b2d67ac59ab84ab4d3151dea2205fb5ce22a08d0a0dda5cda34b5f2b" } }]
