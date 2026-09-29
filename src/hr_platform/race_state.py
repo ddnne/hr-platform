@@ -278,7 +278,12 @@ def validate_body_times(receipt, raw, now, limit=MAX_BYTES):
 
 def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/OddsTanFuku"):
     started = validate_body_times(receipt, raw, now)
-    url = urlsplit(receipt["url"])
+    validate_page_url(receipt["url"], race_id, path)
+    return identity([receipt["url"], started])
+
+
+def validate_page_url(value, race_id, path):
+    url = urlsplit(value)
     query = parse_qs(url.query, strict_parsing=True)
     date, _, number = race_id.split(":")
     datetime.strptime(date, "%Y%m%d")
@@ -294,7 +299,6 @@ def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/O
         or not re.fullmatch(r"[0-9]{2}", query["k_babaCode"][0])
     ):
         raise ValueError("STATE_RECEIPT_URL")
-    return identity([receipt["url"], started])
 
 
 class StateEvidence:

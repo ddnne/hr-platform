@@ -107,11 +107,15 @@ class Store:
         for key in (
             "scheduled_capture_at",
             "fetch_started_at",
-            "collector_received_at",
             "ingest_received_at",
         ):
             event[key] = stamp(event[key])
-        if not (event["fetch_started_at"] <= event["collector_received_at"] <= event["ingest_received_at"]):
+        received = event.get("collector_received_at")
+        event["collector_received_at"] = stamp(received) if received is not None else None
+        accepted = event.get("response_accepted", True)
+        if (event["fetch_started_at"] > event["ingest_received_at"]
+            or received is not None and not event["fetch_started_at"] <= event["collector_received_at"] <= event["ingest_received_at"]
+            or received is None and accepted and (event["status"] == 304 or event["status"] == 200 and raw is not None)):
             raise ValueError("CLOCK_ORDER")
         if event["dataset_kind"] not in {"SYNTHETIC", "DAILY_SNAPSHOT", "FINAL_ONLY"}:
             raise ValueError("DATASET_KIND")
@@ -120,7 +124,7 @@ class Store:
         attempt = event["attempt_id"]
         digest = sha(raw) if raw is not None else None
         # 304 is valid only against exactly the validator sent and its saved body.
-        if event["status"] == 304:
+        if event["status"] == 304 and accepted:
             prior = self.db.execute(
                 "SELECT event FROM attempts WHERE id=?", (event.get("validator_attempt"),)
             ).fetchone()
@@ -145,7 +149,7 @@ class Store:
                 "INSERT OR IGNORE INTO attempts VALUES(?,?,?)",
                 (attempt, canonical(event).decode(), fingerprint),
             )
-        if event["status"] not in (200, 304) or raw is None:
+        if not accepted or event["status"] not in (200, 304) or raw is None:
             return None
         obs = self.db.execute("SELECT * FROM observations WHERE id=?", (attempt,)).fetchone()
         if not obs:
@@ -276,6 +280,7 @@ class Store:
                 for a in planned
                 if not a.get("retry_of")
                 and 0 <= seconds(a["fetch_started_at"], slot) < 120
+                and a["collector_received_at"] is not None
                 and a["collector_received_at"] <= deadline
                 and self.db.execute(
                     "SELECT 1 FROM parses WHERE observation_id=? AND available_at<=?",
