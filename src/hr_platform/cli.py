@@ -1,4 +1,4 @@
-"""Private data CLI. Only collect-sample initiates finite provider requests."""
+"""Private data CLI. Finite provider requests use the shared sampling module."""
 
 import argparse
 import json
@@ -33,13 +33,17 @@ def private_root(value):
 
 def arguments():
     parser = argparse.ArgumentParser(
-        description="実データの非公開処理。collect-sampleのみ事前計画した少数の通信を行う。"
+        description="実データの非公開処理。collect-sample/paper-sessionは事前計画した少数の通信を行う。"
     )
     parser.add_argument("--root", default="private/real", help="Git対象外のprivate配下の保存先")
     commands = parser.add_subparsers(dest="command", required=True)
     sample = commands.add_parser("collect-sample", help="少数取得計画の1項目を実行・保存。待機/再配送では通信しない")
     sample.add_argument("--plan", required=True, help="事前に保存した有限取得計画JSON")
     sample.add_argument("--item", required=True)
+    session = commands.add_parser("paper-session", help="有限取得・固定Paper判断・公式精算を進める。常時起動はしない")
+    session.add_argument("--paper-plan", required=True)
+    session.add_argument("--sample-plan", required=True)
+    session.add_argument("--wait-seconds", type=int, default=0, help="次の枠まで待機できる時間。既定0、最大900秒")
     inspect = commands.add_parser("inspect", help="取得時刻不明のZIPを検査。観測履歴へは追加しない")
     inspect.add_argument("--zip", required=True)
     inspect.add_argument("--kind", choices=["DAILY_SNAPSHOT", "FINAL_ONLY"], required=True)
@@ -125,7 +129,11 @@ def arguments():
 
 def run(args, store):
     adapter = RealData(store)
-    if args.command == "collect-sample":
+    if args.command == "paper-session":
+        from .session import run as advance
+
+        report = advance(store, args.paper_plan, json.loads(read_limited(args.sample_plan, 64 * 1024)), args.wait_seconds)
+    elif args.command == "collect-sample":
         from .sampling import Samples
 
         report = Samples(store).capture(json.loads(read_limited(args.plan, 64 * 1024)), args.item)
