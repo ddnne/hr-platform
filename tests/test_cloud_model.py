@@ -25,6 +25,18 @@ def test_wrapper_uses_existing_model_and_does_not_claim_live_paper(config):
     assert result["runtime_versions"]["clarabel"] and result["duration_ms"] > 0
 
 
+def test_explicit_newton_selection_uses_shared_math_and_fails_closed(config):
+    p = payload(config)
+    p["config"]["solver"] = "WIN_EXACTA_NEWTON_V1"
+    result = json.loads(execute(json.dumps(p)))
+    assert result["status"] == "ANALYZED"
+    assert result["analysis"]["q_ref"] == analyze(**p)["q_ref"]
+    assert result["analysis"]["reference_diagnostics"]["solver"] == "WIN_EXACTA_NEWTON_V1"
+    assert not result["paper_decision_created"]
+    p["config"]["solver_max_iter"] = 1
+    assert json.loads(execute(json.dumps(p)))["status"] == "MODEL_ERROR"
+
+
 def test_nonadvancing_runtime_clock_does_not_claim_zero_computation_time(config, monkeypatch):
     from hr_platform import cloud_model
 

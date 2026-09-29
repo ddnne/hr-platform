@@ -11,7 +11,7 @@ import time
 import warnings
 
 MAX_INPUT_BYTES = 1024 * 1024
-VERSION = "python-worker-model-v2"
+VERSION = "python-worker-model-v3"
 
 
 def clock_timings(value):
@@ -47,7 +47,7 @@ def validate(payload):
     if type(config.get("solver_max_iter")) is not int or not 1 <= config["solver_max_iter"] <= 300:
         raise ValueError("ITERATION_LIMIT")
     if (
-        config.get("solver") != "CLARABEL"
+        config.get("solver") not in {"CLARABEL", "WIN_EXACTA_NEWTON_V1"}
         or config.get("target") not in {"quinella", "trio"}
         or not isinstance(config.get("references"), list)
         or not 1 <= len(config["references"]) <= 4
