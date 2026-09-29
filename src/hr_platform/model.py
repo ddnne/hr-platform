@@ -58,8 +58,11 @@ def reference(omega, market, quotes):
     odds = []
     for s in selections:
         quote = quotes[key(s)]
+        if not isinstance(quote, dict):
+            raise ModelError("UNUSABLE_ODDS")
         value = quote.get("odds")
-        if quote.get("display_status") != "FIXED" or value is None or not np.isfinite(value) or value < 1:
+        if (quote.get("display_status") != "FIXED" or type(value) not in {int, float}
+                or not np.isfinite(value) or value < 1):
             raise ModelError("UNUSABLE_ODDS")
         odds.append(value)
     inverse = 1 / np.array(odds)
@@ -329,9 +332,11 @@ def analyze(runners, markets, config):
     target, refs = config["target"], config["references"]
     if target == "quinella" and "exacta" not in refs or target == "trio" and "trifecta" not in refs:
         raise ModelError("JOINT_REFERENCE_MISSING")
+    # Validate the target before spending time on calibration; all entry points
+    # share the same quote checks, including JSON booleans masquerading as 1.
+    selections, a, v, _, odds = reference(omega, target, markets[target]["quotes"])
     qr, dr = fit(omega, markets, target, refs, config["lambda"], max_iter=config["solver_max_iter"])
     qm, dm = same_marginals(omega, qr, config["solver_max_iter"])
-    selections, a, v, _, odds = reference(omega, target, markets[target]["quotes"])
     direct_market = "exacta" if target == "quinella" else "trifecta"
     direct_selections, _, direct_v, _, _ = reference(omega, direct_market, markets[direct_market]["quotes"])
     direct = {s: 0.0 for s in selections}
