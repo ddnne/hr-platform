@@ -14,7 +14,7 @@ NARへ通信するコマンドは含めない。実データへの適合確認�
 個人研究の初回実験は、この静的診断を優先する。監視・バックアップ等の追加整備は不要。人が公式の通常操作で取得したオッズZIPとレースZIPを使う。
 
 ```sh
-uv run python -m hr_platform.cli diagnose --zip private/inbox/取得済み_odds.zip --race-zip private/inbox/取得済み_race.zip --kind DAILY_SNAPSHOT --encoding cp932
+PYTHONPATH=src uv run python -m hr_platform.cli diagnose --zip private/inbox/取得済み_odds.zip --race-zip private/inbox/取得済み_race.zip --kind DAILY_SNAPSHOT --encoding cp932
 ```
 
 文字コードは実ファイルで確認して指定する。`--race '<日付:競馬場:競走番号>'`は任意。未指定なら、レースID順で平地・頭数一致・必要な買い目の完全性を満たす最初の一競走を選び、値差や結果で選ばない。データ検査に失敗した場合はパーサの適合を確認し、戦略の失敗と混同しない。
@@ -30,7 +30,7 @@ uv run python -m hr_platform.cli diagnose --zip private/inbox/取得済み_odds.
 リポジトリのルートから実行する。ファイル名は手元の実際の名前へ置き換える。文字コードは実ファイルで確認して指定する。
 
 ```sh
-uv run python -m hr_platform.cli inspect \
+PYTHONPATH=src uv run python -m hr_platform.cli inspect \
   --zip private/inbox/取得済み_odds.zip \
   --race-zip private/inbox/取得済み_race.zip \
   --kind DAILY_SNAPSHOT --encoding cp932
@@ -55,7 +55,7 @@ npx wrangler r2 object get 'hr-platform-dev-private/manifests/<event_id>.json' \
   --remote --file private/inbox/capture.json
 npx wrangler r2 object get 'hr-platform-dev-private/raw/<sha256>' \
   --remote --file private/inbox/capture.zip
-uv run python -m hr_platform.cli import-capture \
+PYTHONPATH=src uv run python -m hr_platform.cli import-capture \
   --manifest private/inbox/capture.json --zip private/inbox/capture.zip --encoding cp932
 ```
 
@@ -73,12 +73,12 @@ uv run python -m hr_platform.cli import-capture \
 ## 3. 履歴、時点再現、再解析
 
 ```sh
-uv run python -m hr_platform.cli history --race '<日付:競馬場:競走番号>' --market quinella
-uv run python -m hr_platform.cli asof --race '<日付:競馬場:競走番号>' \
+PYTHONPATH=src uv run python -m hr_platform.cli history --race '<日付:競馬場:競走番号>' --market quinella
+PYTHONPATH=src uv run python -m hr_platform.cli asof --race '<日付:競馬場:競走番号>' \
   --market win --market exacta --market quinella --at '<タイムゾーン付き日時>'
-uv run python -m hr_platform.cli reparse --observation '<event_id>' \
+PYTHONPATH=src uv run python -m hr_platform.cli reparse --observation '<event_id>' \
   --version repair-v2 --encoding cp932
-uv run python -m hr_platform.cli metrics
+PYTHONPATH=src uv run python -m hr_platform.cli metrics
 ```
 
 どの照会も詳細結果は非公開ファイルへ保存する。as-ofは `available_at` までに使えた観測だけを返し、元の取得時刻・鮮度・既知の欠測を残す。
@@ -134,8 +134,8 @@ root内部のsymlink・共有ファイルへの書込みも拒否する。原本
 ```sh
 uv run python scripts/export_collector_log.py --from '2026-09-28T00:00:00+09:00' --until '2026-09-28T22:00:00+09:00'
 # 表示された private_export のパスを使う。
-uv run python -m hr_platform.cli import-log --file '<private_exportのパス>'
-uv run python -m hr_platform.cli capture-log --from '2026-09-28T00:00:00+09:00' --until '2026-09-28T22:00:00+09:00' --at '<照会時点のタイムゾーン付き日時>'
+PYTHONPATH=src uv run python -m hr_platform.cli import-log --file '<private_exportのパス>'
+PYTHONPATH=src uv run python -m hr_platform.cli capture-log --from '2026-09-28T00:00:00+09:00' --until '2026-09-28T22:00:00+09:00' --at '<照会時点のタイムゾーン付き日時>'
 ```
 
 - export、Wranglerのstdout/stderr、実行時間・D1使用量メタデータはGit対象外へ保存する。標準出力は状態と非公開ファイルのパスだけ。公開CIではexportと実CLIを停止する。
@@ -167,7 +167,7 @@ uv run python -m hr_platform.cli capture-log --from '2026-09-28T00:00:00+09:00' 
 ### 保存した公式成績ページとCSVの払戻照合
 
 ```sh
-uv run python -m hr_platform.cli --root private/real check-payout \
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/real check-payout \
   --race-zip private/inbox/race.zip --html private/inbox/result.html \
   --race 'YYYYMMDD:競馬場:競走番号' --encoding utf-8-sig
 ```
@@ -205,15 +205,15 @@ PYTHONPATH=src uv run python -m hr_platform.cli --root private/real diagnose \
 
 ## 公式単複ページの状態表示を保存する
 
-`import-state`は保存済みの公式単勝・複勝オッズHTMLと、自分の取得処理で記録したreceiptを取り込む。NARへの新たな通信はしない。現在の対応は「最終」見出しと「競走除外」の表示。空の変更欄は`NO_CHANGE_DISPLAYED`で、出走有効とは断定しない。未適合の見出し・変更表現は未知として残す。
+`import-state`は保存済みの公式単勝・複勝オッズHTMLと、自分の取得処理で記録したreceiptを取り込む。NARへの新たな通信はしない。現在の対応は「最終」「HH:MM現在」の見出しと「競走除外」の表示。空の変更欄は`NO_CHANGE_DISPLAYED`で、出走有効とは断定しない。未適合の見出し・変更表現は未知として残す。
 
 ```sh
-uv run python -m hr_platform.cli import-state \
+PYTHONPATH=src uv run python -m hr_platform.cli import-state \
   --html private/inbox/odds-page.html --receipt private/inbox/odds-page-receipt.json \
   --race '<日付:競馬場:競走番号>'
-uv run python -m hr_platform.cli state-asof \
+PYTHONPATH=src uv run python -m hr_platform.cli state-asof \
   --race '<日付:競馬場:競走番号>' --at '<照会時刻>'
-uv run python -m hr_platform.cli state-history \
+PYTHONPATH=src uv run python -m hr_platform.cli state-history \
   --race '<日付:競馬場:競走番号>' --at '<照会時刻>'
 ```
 
@@ -221,7 +221,9 @@ receiptには`url`、`status`（200）、`sha256`、`bytes`、`fetch_started_at`
 
 - 原本・receipt・状態観測・解析版を別に保持する。同じ取得の再配送は初回時刻を維持し、同じ原本の別時刻取得は別観測になる。
 - 利用可能時刻はローカルで原本・解析結果を保存した後の実時計。`state-asof`はその時点までの解析だけを返す。`state-history`で全観測・解析版を読戻せる。後の最終表示・除外表示・再解析を過去へ戻さない。
-- `FINAL_DISPLAYED`は表示オッズの最終扱いであり、競走終了・公式払戻の最終性を保証しない。市場の更新時刻はnullのまま。未知の「現在」表記の時刻を推測で転記しない。
+- `FINAL_DISPLAYED`は表示オッズの最終扱いであり、競走終了・公式払戻の最終性を保証しない。
+- `HH:MM現在`は`CLOCK_DISPLAYED`として、`displayed_time_of_day`に時刻だけを保持する。競走日・取得日から更新日を補わず、`source_updated_at`はnull、理由は`DISPLAY_DATE_UNQUALIFIED`。時刻表示だけでは発売中・中間オッズの適格性を確定しない。
+- 選択中の単複タブはOddsTanFukuのパスと競走情報で照合する。同じCSSクラスを持つライブ中継リンクは競走識別に使わない。旧版で隔離された原本は、v4で同じ`import-state`を実行すると新しい解析版となり、旧as-ofは維持される。
 - 状態欄・見出し等の明示的な非表示要素は隔離する。枠列にある公式HTMLのrowspanと非表示placeholderは馬番をずらさず扱う。
 - この段階では状態資料をオッズの既存観測へ結合せず、Paper判断・精算を生成しない。将来の中間表示・有効出走集合の適合と、判断時点の状態との照合が次の接続条件となる。
 

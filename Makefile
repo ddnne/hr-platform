@@ -1,4 +1,6 @@
 .PHONY: setup test demo check worker-test
+# Resolve this checkout even when macOS hides an editable-install .pth file.
+export PYTHONPATH := $(CURDIR)/src
 setup:
 	uv sync --frozen --python 3.12
 	npm ci

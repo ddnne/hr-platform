@@ -45,9 +45,67 @@ def test_final_and_exclusion_are_labels_not_completion_or_active_proof():
     assert not state["paper_eligible"] and not state["settlement_final"]
     assert state["source_updated_at"] is None and state["pre_race_evidence"] is None
     unknown = parse_state_page(page(stage="13:55現在", change="不明変更"), f.RACE)
-    assert unknown["odds_stage"] == "UNKNOWN" and not unknown["paper_eligible"]
+    assert unknown["odds_stage"] == "CLOCK_DISPLAYED" and not unknown["paper_eligible"]
+    assert unknown["displayed_time_of_day"] == "13:55"
+    assert unknown["reason"] == "DISPLAY_DATE_UNQUALIFIED"
     assert unknown["runners"]["2"]["status"] == "UNKNOWN_CHANGE"
     assert unknown["source_updated_at"] is None
+
+
+def test_live_video_link_is_not_the_selected_odds_navigation():
+    raw = page(stage="13:55現在", change="")
+    video = '<a class="cNaviBtn live" href="https://video.example/live">ライブ中継</a>'
+    assert parse_state_page(video.encode() + raw, f.RACE) == parse_state_page(raw, f.RACE)
+
+
+@pytest.mark.parametrize('href', [
+    '/KeibaWeb/TodayRaceInfo/OddsTanFuku?k_raceDate=2000%2F01%2F01&k_raceNo=1&k_babaCode=19',
+    'https://other.example/KeibaWeb/TodayRaceInfo/OddsTanFuku?k_raceDate=2000%2F01%2F01&k_raceNo=1&k_babaCode=19',
+    '/KeibaWeb/TodayRaceInfo/OddsTanFuku?k_raceDate=2000%2F01%2F01&k_raceNo=2&k_babaCode=19',
+])
+def test_duplicate_or_foreign_selected_odds_tabs_still_quarantine(store, href):
+    raw = f'<a class="cNaviBtn live" href="{href}">単・複</a>'.encode() + page()
+    assert StateEvidence(store).ingest(receipt(raw), raw, f.RACE)['status'] == 'QUARANTINED'
+
+
+@pytest.mark.parametrize('stage', ['24:00現在', '13:60現在', '13:55更新', '13:55現在最終'])
+def test_unknown_clock_heading_does_not_become_an_update_time(stage):
+    state = parse_state_page(page(stage=stage), f.RACE)
+    assert state['odds_stage'] == 'UNKNOWN'
+    assert state['displayed_time_of_day'] is None and state['source_updated_at'] is None
+    assert not state['paper_eligible'] and state['pre_race_evidence'] is None
+
+
+def test_clock_after_midnight_never_infers_update_date_from_race_or_receipt(store):
+    raw = page(stage='23:55現在', change='')
+    r = receipt(raw)
+    for i, field in enumerate(['fetch_started_at', 'headers_received_at', 'collector_received_at', 'raw_saved_at']):
+        r[field] = f'1999-12-31T15:05:0{i}+00:00'  # 2000-01-01 00:05 JST
+    store.clock = lambda: '1999-12-31T15:06:00+00:00'
+    state = StateEvidence(store).ingest(r, raw, f.RACE)
+    assert state['status'] == 'OBSERVED_UNQUALIFIED'
+    assert state['displayed_time_of_day'] == '23:55'
+    assert state['source_updated_at'] is None
+    assert state['reason'] == 'DISPLAY_DATE_UNQUALIFIED' and not state['paper_eligible']
+    assert all(runner['active'] is None for runner in state['runners'].values())
+
+
+def test_navigation_repair_is_available_only_after_reparse(store):
+    raw = b'<a class="cNaviBtn live" href="https://video.example/live">video</a>' + page(stage='13:55現在')
+    def old_parser(raw, race):
+        raise ValueError('STATE_CURRENT_LINK')
+    evidence = StateEvidence(store)
+    old = evidence.ingest(receipt(raw), raw, f.RACE, version='synthetic-old-navigation', parser=old_parser)
+    before = evidence.asof(f.RACE, old['available_at'])
+    assert old['status'] == 'QUARANTINED'
+    store.clock = lambda: f.at(8)
+    repaired = evidence.ingest(receipt(raw), raw, f.RACE)
+    assert repaired['status'] == 'OBSERVED_UNQUALIFIED' and repaired['odds_stage'] == 'CLOCK_DISPLAYED'
+    assert repaired['available_at'] == stamp(f.at(8))
+    assert evidence.asof(f.RACE, old['available_at']) == before
+    assert evidence.ingest(receipt(raw), raw, f.RACE) == repaired
+    assert store.db.execute('SELECT count(*) FROM race_state_observations').fetchone()[0] == 1
+    assert len(evidence.history(f.RACE, f.at(8))['history']) == 2
 
 
 def test_real_page_frame_span_with_hidden_placeholder_keeps_horse_columns():
