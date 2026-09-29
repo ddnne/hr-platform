@@ -5,6 +5,7 @@ const SOURCE = "nar-daily-odds";
 const URL = "https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=daily";
 const MAX_BYTES = 16 * 1024 * 1024;
 const INTERVAL = 120_000;
+const REQUEST_HEADERS = {"User-Agent": "hr-platform-personal-research/0.1", "Accept": "application/zip"};
 interface Manifest {
   event_id: string; scheduled_capture_at: string; fetch_started_at: string;
   headers_received_at: string; collector_received_at: string; raw_saved_at: string | null; raw_sha256: string; raw_bytes: number;
@@ -117,19 +118,30 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
   let httpStatus: number | null = null;
   let receivedAt: string | null = null;
   let headersAt: string | null = null;
+  let contentType: string | null = null;
+  let cfMitigated: string | null = null;
+  let denialBasis: string | null = null;
+  let errorBody: Uint8Array | null = null;
   let stage: "NETWORK" | "STORAGE" = "NETWORK";
   try {
     if (env.CAPTURE_SLOTS_JSON !== undefined
         && !sampleSlotAllowed(env.CAPTURE_SLOTS_JSON, scheduledTime, Date.now())) throw new Error("SAMPLE_WINDOW_EXPIRED");
     const response = await fetch(URL, {redirect: "manual", signal: controller.signal,
-      headers: prior?.etag ? {"If-None-Match": prior.etag} : {}});
+      headers: {...REQUEST_HEADERS, ...(prior?.etag ? {"If-None-Match": prior.etag} : {})}});
     httpStatus = response.status;
+    contentType = response.headers.get("content-type");
+    cfMitigated = response.headers.get("cf-mitigated");
     const received = Date.now();
     headersAt = iso(received);
-    if (response.status === 403 || response.status === 401 || response.headers.get("cf-mitigated") === "challenge"
-        || (response.status !== 200 && response.status !== 304 && response.status !== 429 && response.headers.get("content-type")?.includes("text/html"))) {
+    denialBasis = response.status === 403 || response.status === 401 ? "HTTP_AUTH_OR_FORBIDDEN"
+      : cfMitigated === "challenge" ? "CHALLENGE_HEADER"
+      : response.status !== 200 && response.status !== 304 && response.status !== 429
+        && contentType?.includes("text/html") ? "NON_SUCCESS_HTML" : null;
+    if (denialBasis !== null) {
       await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
-      await discard(response);
+      // The stop is durable before reading diagnostic bytes. Broken/oversized bodies cannot undo it.
+      try { errorBody = await boundedBody(response); receivedAt = iso(Date.now()); }
+      catch { await discard(response); }
       throw new Error("SOURCE_DENIED");
     }
     if (response.status === 429) {
@@ -141,6 +153,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
       // Save the wait before inspecting the body: a broken stream must not undo Retry-After.
       if (response.body) {
         const rateBody = await boundedBody(response);
+        errorBody = rateBody;
         receivedAt = iso(Date.now());
         if (/captcha|challenge/i.test(new TextDecoder().decode(rateBody.subarray(0, 8192)))) {
           await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
@@ -151,7 +164,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
     }
     if (response.status !== 200 && response.status !== 304) {
       if (response.body) {
-        const errorBody = await boundedBody(response);
+        errorBody = await boundedBody(response);
         receivedAt = iso(Date.now());
         if (/captcha|<html|<!doctype html/i.test(new TextDecoder().decode(errorBody.subarray(0, 8192)))) {
           await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
@@ -180,6 +193,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
       const body = await boundedBody(response);
       receivedAt = iso(Date.now());
       if (body[0] !== 0x50 || body[1] !== 0x4b) {
+        errorBody = body;
         // Any HTML/interstitial on the ZIP path stops the source for manual investigation.
         await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
         throw new Error("NON_ZIP_OR_CHALLENGE");
@@ -213,6 +227,24 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
     const code = error instanceof Error && allowed.has(error.message) ? error.message : stage === "STORAGE" ? "STORAGE_ERROR" : controller.signal.aborted ? "FETCH_TIMEOUT" : "NETWORK_ERROR";
     await env.INDEX.prepare("UPDATE captures SET status=?,http_status=?,duration_ms=?,error_code=?,headers_received_at=?,collector_received_at=? WHERE event_id=?")
       .bind(code === "STORAGE_ERROR" ? "STORAGE_ERROR" : "FAILED", httpStatus, Date.now() - now, code, headersAt, receivedAt, eventId).run();
+    // Private diagnostic metadata only. Never turn an error response into an odds observation.
+    // Keep the original stop/wait outcome even if this optional evidence write fails.
+    try {
+      await env.RAW.put(`failure-metadata/${eventId}.json`, JSON.stringify({
+        schema: "collector-failure-metadata-v1", event_id: eventId,
+        request_profile_headers: REQUEST_HEADERS, http_status: httpStatus,
+        fetch_started_at: iso(now), headers_received_at: headersAt,
+        content_type: contentType?.slice(0, 512) ?? null,
+        cf_mitigated: cfMitigated?.slice(0, 128) ?? null,
+        header_value_truncated: (contentType?.length ?? 0) > 512 || (cfMitigated?.length ?? 0) > 128,
+        denial_basis: denialBasis, error_code: code, recorded_at: iso(Date.now()),
+        body_bytes: errorBody?.byteLength ?? null,
+        body_prefix_base64: errorBody === null ? null : btoa(String.fromCharCode(...errorBody.subarray(0, 8192))),
+        body_prefix_truncated: errorBody === null ? null : errorBody.byteLength > 8192
+      }));
+    } catch {
+      console.log(JSON.stringify({component: "collector", status: "FAILURE_METADATA_WRITE_FAILED"}));
+    }
     // No response payload, raw odds, URLs, or credentials in public/runtime logs.
     console.log(JSON.stringify({component: "collector", status: code}));
   } finally { clearTimeout(timer); }
