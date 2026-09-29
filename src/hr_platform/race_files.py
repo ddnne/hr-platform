@@ -95,7 +95,7 @@ PAYOUT_HEADERS = [
     "レース名",
     *[c for _, selection, amount, popularity in PAYOUT_GROUPS for c in [*selection, amount, popularity]],
 ]
-VERSION = "nar-race-manual-20260916-v1"
+VERSION = "nar-race-manual-20260916-v2"
 
 
 def normalize(value):
@@ -226,7 +226,8 @@ def parse_race_bundle(raw, encoding="utf-8-sig"):
         race["result_present"] = bool(
             race["race_results"]
             or race["payout_tickets"]
-            or any(h["result_fields"] for h in race["horses"].values())
+            or any(any(value for name, value in h["result_fields"].items() if name != "人気")
+                   for h in race["horses"].values())
         )
     if not races:
         raise ValueError("EMPTY_RACES")
