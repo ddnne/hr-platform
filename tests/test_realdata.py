@@ -12,13 +12,14 @@ from hr_platform.realdata import RealData, completeness, validate_manifest, file
 from hr_platform.store import Store
 
 
-def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", horse_count=4):
+def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", horse_count=4, popularity=False):
     key = {"競馬場": "SYNTHETIC", "競走年月日": "20000101", "レース番号": "1"}
     race = {**key, "発走時刻": "1414", "芝ダート区分": "ダート", "頭数": "4"}
     if finished:
         race["上がり3F"] = "38.2"
     horse = [
-        {**key, "馬番": str(n), "枠番": str(n), "着順": str(n) if finished else ""}
+        {**key, "馬番": str(n), "枠番": str(n), "着順": str(n) if finished else "",
+         "人気": str(n) if popularity else ""}
         for n in range(1, horse_count + 1)
     ]
     paybacks = [{**key, **r} for r in (payout_rows or [])]
@@ -327,3 +328,10 @@ def test_receipt_id_cannot_adopt_existing_synthetic_or_other_attempt(store):
     with pytest.raises(ValueError, match="CAPTURE_IMPORT_CONFLICT"):
         adapter.import_capture(receipt, f.archive(), "utf-8-sig")
     assert store.db.execute("SELECT count(*) FROM capture_imports").fetchone()[0] == 0
+
+
+def test_popularity_alone_does_not_prove_results_or_pre_race():
+    race = parse_race_bundle(race_archive(popularity=True))["races"][f.RACE]
+    assert not race["result_present"]
+    assert race["status"] == "UNKNOWN" and race["pre_race_evidence"] is None
+    assert all(h["result_fields"]["人気"] for h in race["horses"].values())

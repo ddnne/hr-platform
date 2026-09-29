@@ -63,3 +63,12 @@ def test_realfile_shape_failure_is_not_reported_as_strategy_failure(store, confi
     report = run(store, config, odds=b"invalid ZIP")
     assert report["status"] == "QUARANTINED"
     assert store.metrics()["raw_objects"] == 2
+
+
+def test_inconsistent_reference_constraints_are_not_success(store, config, monkeypatch):
+    monkeypatch.setattr("hr_platform.diagnostic.analyze", lambda *args: {
+        "identification": {"status": "INCONSISTENT"}})
+    report = run(store, config)
+    assert report["status"] == "MODEL_ERROR"
+    assert report["reason"] == "REFERENCE_CONSTRAINTS_INCONSISTENT"
+    assert not report["paper_eligible"]
