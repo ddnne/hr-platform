@@ -10,7 +10,8 @@
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "COLLECTION_ENABLED": "false",
-    "SOURCE_APPROVED": "false"
+    "SOURCE_APPROVED": "false",
+    "CAPTURE_SLOTS_JSON": "[]"
   },
   "d1_databases": [{
     "binding": "INDEX",

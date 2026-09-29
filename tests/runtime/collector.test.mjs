@@ -5,7 +5,7 @@ import { build } from 'esbuild';
 import { Miniflare, Log, LogLevel, convertV4MiniflareOptions } from 'miniflare';
 
 // The test-only HTTP harness is never the production Worker entrypoint.
-const bundle = await build({stdin: {contents: `import production,{capture,retryAfter} from './workers/ingestion/index.ts';
+const bundle = await build({stdin: {contents: `import production,{capture,retryAfter,sampleSlotAllowed} from './workers/ingestion/index.ts';
 export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='/tick'){
  const fault=u.searchParams.get('fault');
  if(fault==='cancel403'||fault==='cancel429') globalThis.fetch=async()=>new Response(
@@ -21,17 +21,28 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  put:async(key,value)=>{if(key.startsWith('manifests/') && ++manifestWrites===2) throw new Error('manifest failure');
  return env.RAW.put(key,value);}}} : env;
  await capture(Number(u.searchParams.get('t')),bindings); return new Response('ok');}
+ if(u.pathname==='/scheduled'){
+ const t=Number(u.searchParams.get('t')),originalNow=Date.now;
+ const late=u.searchParams.get('late')==='true';
+ const bindings=late?{...env,INDEX:{batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
+ const statement=env.INDEX.prepare(sql);
+ if(sql.startsWith('SELECT etag')) return {first:async()=>{const value=await statement.first();Date.now=()=>t+120001;return value;}};
+ return statement;}}}:env;
+ if(u.searchParams.get('expired')==='true') Date.now=()=>t+120001;
+ try{await production.scheduled({scheduledTime:t},bindings);}finally{Date.now=originalNow;}
+ return new Response('ok');}
+ if(u.pathname==='/sample-check') return Response.json(sampleSlotAllowed(u.searchParams.get('plan'),Number(u.searchParams.get('t')),Number(u.searchParams.get('now'))));
  if(u.pathname==='/retry') return Response.json(retryAfter(u.searchParams.get('v'),1000));
  return production.fetch();}};`, resolveDir: process.cwd(), sourcefile: 'harness.ts'},
  bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
 const schema = await readFile('migrations/0001_capture.sql', 'utf8') + await readFile('migrations/0002_processing_metrics.sql', 'utf8');
 const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1, 2, 3]); // raw capture only, not a parser success fixture
 
-async function runtime(responses, enabled=true) {
+async function runtime(responses, enabled=true, extraBindings={}) {
  let requests = [];
  const mf = new Miniflare(convertV4MiniflareOptions({modules: true, script: bundle.outputFiles[0].text,
   compatibilityDate: '2026-09-28', compatibilityFlags: ['nodejs_compat'],
-  bindings: {COLLECTION_ENABLED: String(enabled), SOURCE_APPROVED: String(enabled)},
+  bindings: {COLLECTION_ENABLED: String(enabled), SOURCE_APPROVED: String(enabled), ...extraBindings},
   d1Databases: ['INDEX'], r2Buckets: ['RAW'], log: new Log(LogLevel.NONE),
   outboundService: async req => {requests.push({url:req.url,etag:req.headers.get('if-none-match')});
     const item = responses.shift(); if(!item) throw new Error('unexpected outbound request');
@@ -186,5 +197,67 @@ test('failed metric write does not invalidate a published observation or its val
   await r.reset();await r.tick(2);
   assert.equal(r.requests[1].etag,'"v1"');
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,2);
+ }finally{await r.mf.dispose();}
+});
+
+test('finite sample schedule validates dates, spacing and late delivery',async()=>{
+ const r=await runtime([]);const start=1_800_000_000_000;
+ const check=async(plan,t=start,now=start)=>{
+  const u=new URL('http://local/sample-check');u.searchParams.set('plan',typeof plan==='string'?plan:JSON.stringify(plan));
+  u.searchParams.set('t',t);u.searchParams.set('now',now);
+  return (await r.mf.dispatchFetch(u)).json();
+ };
+ try{
+  assert.equal(await check([start,start+300_000]),true);
+  assert.equal(await check([start,start+300_000],start+300_000,start+300_001),true);
+  assert.equal(await check([start],start,start+120_000),true);
+  for(const plan of [[],[start,start+300_000,start+600_000],[start,start],
+    [start,start+120_000],[start+300_000,start],[start+1],[''+start],{},'bad',null]){
+    assert.equal(await check(plan),false);
+  }
+  assert.equal(await check([start],start,start-1),false);
+  assert.equal(await check([start],start,start+120_001),false);
+  assert.equal(await check([start],start+300_000,start+300_000),false);
+  assert.equal(await check([start],start,NaN),false);
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('production scheduled handler blocks empty plan and limits delivery to approved slot',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ for(const plan of ['[]',JSON.stringify([start,start+300_000])]){
+  const r=await runtime([{body:zip}],true,{CAPTURE_SLOTS_JSON:plan});
+  try{
+   const scheduled=async t=>assert.equal((await r.mf.dispatchFetch(`http://local/scheduled?t=${t}`)).status,200);
+   await scheduled(start-300_000);await scheduled(start+600_000);
+   assert.equal(r.requests.length,0);
+   await scheduled(start);await scheduled(start);
+   assert.equal(r.requests.length,plan==='[]'?0:1);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,plan==='[]'?0:1);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('D1 delay cannot start HTTP beyond the finite sample window',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ const r=await runtime([],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start])});
+ try{
+  assert.equal((await r.mf.dispatchFetch(`http://local/scheduled?t=${start}&late=true`)).status,200);
+  assert.equal(r.requests.length,0);
+  const record=await r.db.prepare('SELECT status,error_code FROM captures').first();
+  assert.equal(record.status,'FAILED');assert.equal(record.error_code,'SAMPLE_WINDOW_EXPIRED');
+ }finally{await r.mf.dispose();}
+});
+
+test('expired approved slot repairs stored manifest without another request',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ const r=await runtime([{body:zip}],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start])});
+ try{
+  assert.equal((await r.mf.dispatchFetch(`http://local/tick?t=${start}&fault=publish`)).status,200);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'STORAGE_ERROR');
+  assert.equal((await r.mf.dispatchFetch(`http://local/scheduled?t=${start}&expired=true`)).status,200);
+  assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'RAW_STORED');
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
  }finally{await r.mf.dispose();}
 });
