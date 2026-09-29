@@ -265,7 +265,7 @@ uvx --with 'uv==0.12.3' --from 'workers-py==1.17.4' pywrangler dev \
 ```
 
 準備先は新しいGit対象外ディレクトリを指定する。ビルド対象の `src/` にはモデルと入口の
-明示した4ファイルだけをコピーする。仮想環境や実データは置かない。
+明示したPythonファイルだけをコピーする。仮想環境や実データは置かない。
 依存内のテストデータ・型定義・pycは `python_modules.exclude` で配布から外す。
 数学実装を別言語へ複製せず、依存版は `workers/research/pylock.toml` に固定する。
 科学計算パッケージはRPC呼出し内で読み込む。起動時のimportではSciPyの乱数初期化が失敗した。
@@ -287,4 +287,45 @@ v2では進まない内部時計のduration_msをnullにする。経過時間は
 2026-09-29にローカルworkerd、30日にCloudflare上の実RPCで合成入力と保存済み実断面を計算した。
 依存版を揃えたnative比較でも実断面1件は確率差の基準外で、実行環境による差が残る。
 クラウドで合成1＋実8件の計算・CPU時間を確認したが、全頭数・券種・同時実行は未検証。
-取得・クラウド内保存・Paperへの接続は残る。詳しい検証範囲は [status.md](status.md)。
+原本解析と履歴の入口は下記。収集からの自動起動・状態判定・Paperへの接続は残る。
+詳しい検証範囲は [status.md](status.md)。
+
+
+## Cloudflare内の原本解析と履歴
+
+`prepare_python_worker.py --with-storage --out private/新規ビルド先` は、既存devの
+R2 `RAW` とD1 `INDEX`を設定へ加える。クラウドの変更前には対象を確認し、
+`migrations/0003_odds_history.sql`を適用する。この準備コマンド自体は配置・取得を行わない。
+公開URL・preview・Cronなしを維持する。HTTPは404で、サービスバインディングからだけ呼ぶ。
+
+```js
+const result = JSON.parse(await env.RESEARCH.odds(JSON.stringify({
+  operation: "normalize", observation_id: existingObservationId
+})));
+```
+
+- `normalize`：既存の`raw_observations`とR2原本を読む。取得処理は呼ばない。
+  観測IDは収集Workerの`nar-daily-odds:<予定時刻>`、または取得証跡付き取込みの
+  `nar-mac-import:<receiptのSHA256>`。Mac由来は`IMPORTED_MAC_RECEIPT`として区別する。
+- `history`：`race_id, at`と任意の`limit`（1〜50）、`cursor`を渡す。
+  内容が約1MiBに達した場合もページを分ける。`next_cursor`がある間、同じ`at`で続ける。
+  原本・観測・解析版・利用可能時刻を返す。
+- `asof`：`race_id, markets, at`と任意の`max_age`（秒）を渡す。
+  指定時点で使えた最新の解析版を選び、元の受信時刻と鮮度を残す。
+  後の解析で削除された競走・市場を旧版から復活させない。
+
+CSVの行解析はローカルと共通。v2は競走別の本体と小さなmanifestをR2へ保存する。
+全競走の保存・索引化が終わるまで利用可能にせず、D1の公開UPDATE文の実行時刻を
+`available_at`にする。旧v1の履歴も読み出せる。同値の別観測は残し、同一イベントの再送は増やさない。
+競走ブロックが離れて再登場するCSVはv2のクラウド解析では未対応として拒否する。
+後続行の異常や保存中断で未公開になった本体を判断入力へ流さない。原本は残る。
+
+出走・発売状態との結合、取得計画の欠測判定、モデル・Paperの自動起動はまだない。
+`gap_coverage=UNQUALIFIED_CAPTURE_PLAN`、`gaps=null`、`paper_eligible=false`を返す。
+`FINAL_ONLY`は履歴へ残すがas-ofの判断入力へ出さない。解析RPCの成功だけではPaper適格性を意味しない。
+返値、実験計画、取得証跡は非公開保存する。合成試験とMac原本の取込みは収集Workerの取得成功数に数えない。
+
+実ZIP1個のクラウド解析ではwall約66秒・CPU約2.2秒を実測した。
+呼出し元のタイムアウトは処理中止を意味しないため、同じ観測ID/解析版のD1状態と履歴を先に確認する。
+今回も60秒で呼出し元が待機を打ち切った後、保存完了と履歴/as-ofの読戻しを確認した。
+実測は1原本に限る。全データ量・頭数・同時実行での制限適合を保証するものではない。
