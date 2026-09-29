@@ -95,6 +95,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
     return; // no re-fetch on event redelivery; a later slot is a new attempt
   }
   const now = Date.now();
+  if (env.CAPTURE_SLOTS_JSON !== undefined && !sampleSlotAllowed(env.CAPTURE_SLOTS_JSON, scheduledTime, now)) return;
   const claim = await env.INDEX.prepare(`UPDATE source_control SET next_allowed_at=?,owner_event_id=?
     WHERE source=? AND blocked=0 AND next_allowed_at<=?`).bind(now + INTERVAL, eventId, SOURCE, now).run();
   if (!claim.meta.changes) {
@@ -118,6 +119,8 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
   let headersAt: string | null = null;
   let stage: "NETWORK" | "STORAGE" = "NETWORK";
   try {
+    if (env.CAPTURE_SLOTS_JSON !== undefined
+        && !sampleSlotAllowed(env.CAPTURE_SLOTS_JSON, scheduledTime, Date.now())) throw new Error("SAMPLE_WINDOW_EXPIRED");
     const response = await fetch(URL, {redirect: "manual", signal: controller.signal,
       headers: prior?.etag ? {"If-None-Match": prior.etag} : {}});
     httpStatus = response.status;
@@ -206,7 +209,7 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
     }
     await publish(env, manifest, processingStarted);
   } catch (error) {
-    const allowed = new Set(["SOURCE_DENIED", "RATE_LIMITED", "HTTP_ERROR", "UNBOUND_304", "BODY_LIMIT", "BODY_EMPTY", "NON_ZIP_OR_CHALLENGE"]);
+    const allowed = new Set(["SAMPLE_WINDOW_EXPIRED", "SOURCE_DENIED", "RATE_LIMITED", "HTTP_ERROR", "UNBOUND_304", "BODY_LIMIT", "BODY_EMPTY", "NON_ZIP_OR_CHALLENGE"]);
     const code = error instanceof Error && allowed.has(error.message) ? error.message : stage === "STORAGE" ? "STORAGE_ERROR" : controller.signal.aborted ? "FETCH_TIMEOUT" : "NETWORK_ERROR";
     await env.INDEX.prepare("UPDATE captures SET status=?,http_status=?,duration_ms=?,error_code=?,headers_received_at=?,collector_received_at=? WHERE event_id=?")
       .bind(code === "STORAGE_ERROR" ? "STORAGE_ERROR" : "FAILED", httpStatus, Date.now() - now, code, headersAt, receivedAt, eventId).run();
@@ -215,9 +218,21 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
   } finally { clearTimeout(timer); }
 }
 
+/** Finite sample plan: at most two minute-aligned UTC slots, >=5 minutes apart. */
+export function sampleSlotAllowed(plan: string, scheduled: number, now: number): boolean {
+  let slots: unknown;
+  try { slots = JSON.parse(plan); } catch { return false; }
+  if (!Array.isArray(slots) || slots.length < 1 || slots.length > 2
+      || !slots.every(t => Number.isSafeInteger(t) && t > 0 && t % 60_000 === 0)
+      || (slots.length === 2 && slots[1] - slots[0] < 300_000)) return false;
+  return Number.isFinite(now) && slots.includes(scheduled) && now >= scheduled && now - scheduled <= 120_000;
+}
+
 export default {
   async fetch(): Promise<Response> { return new Response("Not found", {status: 404}); },
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (!sampleSlotAllowed(env.CAPTURE_SLOTS_JSON, controller.scheduledTime, controller.scheduledTime)
+        || Date.now() < controller.scheduledTime) return;
     await capture(controller.scheduledTime, env);
   }
 } satisfies ExportedHandler<Env>;
