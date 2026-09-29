@@ -1,4 +1,4 @@
-"""Offline CLI. Real payloads and query results stay below the ignored private root."""
+"""Private data CLI. Only collect-sample initiates finite provider requests."""
 
 import argparse
 import json
@@ -33,10 +33,13 @@ def private_root(value):
 
 def arguments():
     parser = argparse.ArgumentParser(
-        description="実ZIPの非公開検査・取得記録の取込み。ネットワーク通信なし。"
+        description="実データの非公開処理。collect-sampleのみ事前計画した少数の通信を行う。"
     )
     parser.add_argument("--root", default="private/real", help="Git対象外のprivate配下の保存先")
     commands = parser.add_subparsers(dest="command", required=True)
+    sample = commands.add_parser("collect-sample", help="少数取得計画の1項目を実行・保存。待機/再配送では通信しない")
+    sample.add_argument("--plan", required=True, help="事前に保存した有限取得計画JSON")
+    sample.add_argument("--item", required=True)
     inspect = commands.add_parser("inspect", help="取得時刻不明のZIPを検査。観測履歴へは追加しない")
     inspect.add_argument("--zip", required=True)
     inspect.add_argument("--kind", choices=["DAILY_SNAPSHOT", "FINAL_ONLY"], required=True)
@@ -122,7 +125,11 @@ def arguments():
 
 def run(args, store):
     adapter = RealData(store)
-    if args.command == "inspect":
+    if args.command == "collect-sample":
+        from .sampling import Samples
+
+        report = Samples(store).capture(json.loads(read_limited(args.plan, 64 * 1024)), args.item)
+    elif args.command == "inspect":
         report = adapter.inspect(read_limited(args.zip), Path(args.zip).name, args.kind, args.encoding)
         if args.race_zip and report.get("content_type") == "odds":
             race = adapter.inspect(
