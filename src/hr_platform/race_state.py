@@ -247,7 +247,7 @@ def parse_state_page(raw, race_id):
     }
 
 
-def validate_receipt(receipt, raw, race_id, now):
+def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/OddsTanFuku"):
     if (
         receipt.get("status") != 200
         or receipt.get("sha256") != sha(raw)
@@ -264,7 +264,7 @@ def validate_receipt(receipt, raw, race_id, now):
         url.scheme != "https"
         or url.netloc != "www.keiba.go.jp"
         or url.fragment
-        or url.path != "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
+        or url.path != path
         or set(query) != {"k_raceDate", "k_raceNo", "k_babaCode"}
         or query["k_raceDate"] != [f"{date[:4]}/{date[4:6]}/{date[6:]}"]
         or query["k_raceNo"] != [number]
@@ -282,37 +282,46 @@ def validate_receipt(receipt, raw, race_id, now):
 
 
 class StateEvidence:
+    # Fixed subclasses may share the observation/publication timeline, but use
+    # separate tables and parsers so result evidence never enters odds state.
+    table_prefix = "race_state"
+    receipt_path = "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
+    version = VERSION
+    parser = staticmethod(parse_state_page)
+
     def __init__(self, store):
         self.store = store
-        store.db.executescript(SCHEMA)
+        store.db.executescript(SCHEMA.replace("race_state", self.table_prefix))
 
     def published(self, parse_id):
-        row = self.store.db.execute("SELECT * FROM race_state_parses WHERE id=?", (parse_id,)).fetchone()
+        row = self.store.db.execute(f"SELECT * FROM {self.table_prefix}_parses WHERE id=?", (parse_id,)).fetchone()
         if row["available_at"] is None:
             available = stamp(self.store.clock())
             if available < row["parsed_at"]:
                 raise ValueError("STATE_CLOCK_ORDER")
             with self.store.db:
                 self.store.db.execute(
-                    "UPDATE race_state_parses SET available_at=? WHERE id=? AND available_at IS NULL",
+                    f"UPDATE {self.table_prefix}_parses SET available_at=? WHERE id=? AND available_at IS NULL",
                     (available, parse_id),
                 )
-            row = self.store.db.execute("SELECT * FROM race_state_parses WHERE id=?", (parse_id,)).fetchone()
+            row = self.store.db.execute(f"SELECT * FROM {self.table_prefix}_parses WHERE id=?", (parse_id,)).fetchone()
         return {
             **json.loads(self.store.read_body(row["report_hash"], "reports")),
             "available_at": row["available_at"],
         }
 
-    def ingest(self, receipt, raw, race_id, version=VERSION, parser=parse_state_page):
+    def ingest(self, receipt, raw, race_id, version=None, parser=None):
+        version = version or self.version
+        parser = parser or self.parser
         now = stamp(self.store.clock())
-        event = validate_receipt(receipt, raw, race_id, now)
+        event = validate_receipt(receipt, raw, race_id, now, self.receipt_path)
         digest, receipt_hash = sha(raw), identity(receipt)
-        old = self.store.db.execute("SELECT * FROM race_state_observations WHERE id=?", (event,)).fetchone()
+        old = self.store.db.execute(f"SELECT * FROM {self.table_prefix}_observations WHERE id=?", (event,)).fetchone()
         if old and (old["receipt_hash"] != receipt_hash or old["race_id"] != race_id):
             raise ValueError("STATE_EVENT_CONFLICT")
         parse_id = identity([event, version])
         existing = self.store.db.execute(
-            "SELECT id FROM race_state_parses WHERE id=?", (parse_id,)
+            f"SELECT id FROM {self.table_prefix}_parses WHERE id=?", (parse_id,)
         ).fetchone()
         if existing:
             return self.published(parse_id)
@@ -323,11 +332,11 @@ class StateEvidence:
             raise ValueError("STATE_CLOCK_ORDER")
         with self.store.db:
             self.store.db.execute(
-                "INSERT OR IGNORE INTO race_state_observations VALUES(?,?,?,?,?,?)",
+                f"INSERT OR IGNORE INTO {self.table_prefix}_observations VALUES(?,?,?,?,?,?)",
                 (event, race_id, digest, receipt_hash, stamp(receipt["collector_received_at"]), saved_at),
             )
         registered = self.store.db.execute(
-            "SELECT * FROM race_state_observations WHERE id=?", (event,)
+            f"SELECT * FROM {self.table_prefix}_observations WHERE id=?", (event,)
         ).fetchone()
         if registered["receipt_hash"] != receipt_hash or registered["race_id"] != race_id:
             raise ValueError("STATE_EVENT_CONFLICT")
@@ -356,7 +365,7 @@ class StateEvidence:
         report_hash = self.store.body(canonical(report), "reports")
         with self.store.db:
             self.store.db.execute(
-                "INSERT OR IGNORE INTO race_state_parses VALUES(?,?,?,?,?,?)",
+                f"INSERT OR IGNORE INTO {self.table_prefix}_parses VALUES(?,?,?,?,?,?)",
                 (parse_id, event, version, parsed_at, None, report_hash),
             )
         return self.published(parse_id)
@@ -364,8 +373,8 @@ class StateEvidence:
     def asof(self, race_id, at):
         at = stamp(at)
         row = self.store.db.execute(
-            """SELECT p.report_hash,p.available_at FROM race_state_parses p
-            JOIN race_state_observations o ON o.id=p.observation_id
+            f"""SELECT p.report_hash,p.available_at FROM {self.table_prefix}_parses p
+            JOIN {self.table_prefix}_observations o ON o.id=p.observation_id
             WHERE o.race_id=? AND p.available_at<=?
             ORDER BY o.received_at DESC,p.available_at DESC,p.id DESC LIMIT 1""",
             (race_id, at),
@@ -388,8 +397,8 @@ class StateEvidence:
     def history(self, race_id, at):
         at = stamp(at)
         rows = self.store.db.execute(
-            """SELECT p.report_hash,p.available_at FROM race_state_parses p
-            JOIN race_state_observations o ON o.id=p.observation_id
+            f"""SELECT p.report_hash,p.available_at FROM {self.table_prefix}_parses p
+            JOIN {self.table_prefix}_observations o ON o.id=p.observation_id
             WHERE o.race_id=? AND p.available_at<=?
             ORDER BY o.received_at,p.available_at,p.id""",
             (race_id, at),

@@ -224,3 +224,26 @@ receiptには`url`、`status`（200）、`sha256`、`bytes`、`fetch_started_at`
 - `FINAL_DISPLAYED`は表示オッズの最終扱いであり、競走終了・公式払戻の最終性を保証しない。市場の更新時刻はnullのまま。未知の「現在」表記の時刻を推測で転記しない。
 - 状態欄・見出し等の明示的な非表示要素は隔離する。枠列にある公式HTMLのrowspanと非表示placeholderは馬番をずらさず扱う。
 - この段階では状態資料をオッズの既存観測へ結合せず、Paper判断・精算を生成しない。将来の中間表示・有効出走集合の適合と、判断時点の状態との照合が次の接続条件となる。
+
+## 公式払戻の取込みと既存Paperの精算
+
+保存した公式 `RaceMarkTable` の成績表・払戻表と取得記録を使う。記録形式は状態表示と同じで、URL・本文ハッシュ・サイズ・取得開始・ヘッダー受信・本文受信・原本保存の各時計を検証する。
+
+```sh
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/research import-payout \
+  --html private/input/result.html --receipt private/input/result-receipt.json --race RACE_ID
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/research payout-history \
+  --race RACE_ID --at AS_OF_TIME
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/research payout-asof \
+  --race RACE_ID --at AS_OF_TIME
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/research settle-payout \
+  --decision EXISTING_DECISION_ID --evidence IMPORTED_EVIDENCE_ID
+```
+
+- `import-payout` は原本・取得記録・観測・解析版を専用テーブルへ保存。利用可能時刻は保存後の実時計。同じ取得の再配送は冪等で、同値でも別時刻の取得は別観測になる。成績情報は判断入力の市場断面・事前状態へ追加しない。
+- 自動適合範囲は、数値着順に同着がなく、通常の掲載払戻が整合する馬連・三連複。払戻額は100円当たりの掲載額を使う。除外馬を含む馬番号の組合せは100円返還とする。公式の根拠は [source_capabilities.md](source_capabilities.md)。
+- 取消は発売前なので返還へ変換せず、その馬を購入した判断は精算エラーにする。中止は出走済みで返還なし。枠式・重勝式、同着、特払い、不成立、未知の表現・欠けた行はこのアダプターで適合扱いにしない。既存精算器の正規化済み例外処理と合成テストは維持する。
+- `settle-payout` は保存済みの判断だけを精算する。判断を新規生成しない。別競走・利用可能時刻の逆転・未適合証拠を拒否し、同じ解析版の再精算は同じ記録を返す。訂正は新しい原本・解析版として残す。
+- 標準出力は状態と非公開レポートのパスのみ。原本・台帳・レポートはGit対象外。実データCLIは公開CIで使用しない。
+
+実物の1競走で除外表示・通常払戻の取込み、再配送、as-of、再読出しを確認した。実時間Paper判断はまだなく、実際の購入判断に対する精算は未実施。合成判断で払戻・返還・外れ・取消時停止を試験した。
