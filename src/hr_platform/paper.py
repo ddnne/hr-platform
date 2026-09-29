@@ -72,6 +72,11 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
         raise ValueError("PAPER_CONFIG")
     if config["max_tickets_per_race"] != 1 or config["target"] in config["references"]:
         raise ValueError("PAPER_CONFIG")
+    reference_policy = config.get("reference_constraint_policy", "require_feasible")
+    if reference_policy not in {"require_feasible", "allow_inconsistent_shadow"} or (
+        reference_policy == "allow_inconsistent_shadow" and config["mode"] != "EXPLORATORY_SHADOW"
+    ):
+        raise ValueError("REFERENCE_CONSTRAINT_POLICY")
     experiment = config["version"]
     config_hash = identity(config)
     with store.db:
@@ -102,12 +107,16 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
     now = ready_at
     reason = eligibility(view, config, schedule, now)
     result = None
+    assumptions = []
     if reason is None:
         content = {h: x["content"] for h, x in view["markets"].items()}
         try:
             result = analyzer(content[config["target"]]["state"]["runners"], content, config)
             if result["identification"]["status"] == "INCONSISTENT":
-                reason = "MODEL_ERROR"
+                if reference_policy == "require_feasible":
+                    reason = "REFERENCE_INCONSISTENT"
+                else:
+                    assumptions.append("INCONSISTENT_REFERENCES_SOFT_CALIBRATION")
         except ModelError as exc:
             reason = (
                 "DATA_MISSING"
@@ -165,6 +174,8 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                 if view["markets"] and len({x["observation_id"] for x in view["markets"].values()}) == 1
                 else "market_times",
                 "freshness_basis": config["freshness_basis"],
+                "reference_constraint_policy": reference_policy,
+                "research_assumptions": assumptions,
                 "input_view": view,
                 "diagnostics": result,
                 "code_version": "0.1.0",

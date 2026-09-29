@@ -48,8 +48,14 @@ def compare(store, config, at):
         reasons = Counter()
         input_kinds = Counter()
         source_kinds = Counter()
+        reference_statuses = Counter()
+        assumptions = Counter()
         for decision in decisions:
             reasons[decision["reason"] or "PAPER_BET"] += 1
+            identification = (decision.get("diagnostics") or {}).get("identification", {})
+            reference_status = identification.get("status", "NOT_COMPUTED")
+            reference_statuses[reference_status] += 1
+            assumptions.update(decision.get("research_assumptions", []))
             kinds = {x["event"]["dataset_kind"] for x in decision["input_view"]["markets"].values()}
             input_kinds.update(kinds or {"NO_INPUT"})
             records = [json.loads(row[0]) for row in store.db.execute(
@@ -73,6 +79,8 @@ def compare(store, config, at):
             entries.append({
                 "race_id": decision["race_id"], "decision_id": decision["id"],
                 "asof_at": decision["asof_at"], "status": status, "stake_yen": stake,
+                "reference_constraint_status": reference_status,
+                "research_assumptions": decision.get("research_assumptions", []),
                 "settlement": latest,
                 "payout_yen": latest["payout_yen"] if settled else 0 if not stake else None,
                 "refund_yen": latest["refund_yen"] if settled else 0 if not stake else None,
@@ -98,6 +106,8 @@ def compare(store, config, at):
             "race_count": len(entries), "bet_count": len(entries) - no_bet,
             "no_bet_count": no_bet, "skip_rate": no_bet / len(entries) if entries else None,
             "reason_counts": dict(reasons), "input_kind_counts": dict(input_kinds),
+            "reference_constraint_status_counts": dict(reference_statuses),
+            "research_assumption_counts": dict(assumptions),
             "settlement_source_counts": dict(source_kinds), "pending_count": len(pending),
             "complete": not pending and bool(entries), "stake_yen": stake,
             "payout_yen": paid, "refund_yen": refunds, "profit_yen": profit,

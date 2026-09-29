@@ -178,3 +178,27 @@ uv run python -m hr_platform.cli --root private/real check-payout \
 入力は手元の取得記録と対応する保存ファイルを使う。オッズ観測・Paper判断・精算は生成しない。
 不一致は `MISMATCH`、不明な表現や別競走は `QUARANTINED`。
 特払い・返還などの例外HTMLは未適合であり、数値へ推測変換しない。
+
+## 参照市場が整合しない場合の研究方針
+
+`configs/research.yaml` は従来の設定を保持し、Qsetが空なら `REFERENCE_INCONSISTENT` で見送る。
+数値計算に失敗した場合の `MODEL_ERROR` とは区別する。既存台帳を再分類・書換えしない。
+
+新しい探索版 `configs/research-shadow.yaml`（`IRCD-v0.4-exploratory-002`）は、
+`reference_constraint_policy: allow_inconsistent_shadow` を明示する。
+Qref/Qmargの数値検証が通った場合に限り、Qsetが空でも仮定付きの研究用判断へ進める。
+各判断に `INCONSISTENT_REFERENCES_SOFT_CALIBRATION` を残し、比較表でも不整合と仮定の件数を表示する。
+この方針は `EXPLORATORY_SHADOW` 専用で、`FROZEN_PAPER` へそのまま流用すると拒否する。
+
+- 元のε、`INCONSISTENT`、nullの識別上下限、参照残差・最小必要誤差・感度診断を保持する。
+- λ・重み・判断時刻・金額・閾値は従来設定と同じ。競走ごとにεを広げない。
+- 三モデルは同じ入力・競走集合で比較する。数値失敗、欠測、鮮度、競走状態、締切の条件は維持する。
+- この変更は保存済みサンプルの不整合を見て設計した探索方針である。過去サンプルを事前登録済み評価や過去のPaper判断へ変更しない。新しい実時間判断だけを新実験版へ記録する。
+- 静的診断・過去as-of診断は、この設定でもPaperを生成しない。不整合のstatusは `REFERENCE_INCONSISTENT`、CLI終了コードは非0のまま。
+
+```sh
+# 保存したZIPによる構造の診断。購入・過去判断の生成はしない。
+PYTHONPATH=src uv run python -m hr_platform.cli --root private/real diagnose \
+  --zip private/inbox/odds.zip --race-zip private/inbox/race.zip \
+  --kind DAILY_SNAPSHOT --encoding utf-8-sig --config configs/research-shadow.yaml
+```

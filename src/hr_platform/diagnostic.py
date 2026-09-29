@@ -7,7 +7,7 @@ from .model import analyze, reference, states, matrix, key, ModelError
 from .race_files import normalize
 from .realdata import RealData
 
-VERSION = "static-market-diagnostic-v3"
+VERSION = "static-market-diagnostic-v4"
 
 
 def diagnose(store, odds_raw, odds_name, race_raw, race_name, kind, encoding, config, race_id=None):
@@ -102,7 +102,7 @@ def diagnose(store, odds_raw, odds_name, race_raw, race_name, kind, encoding, co
     try:
         report.update(status="STATIC_DIAGNOSTIC", analysis=analyze(runners, markets, config))
         if report["analysis"]["identification"]["status"] == "INCONSISTENT":
-            report.update(status="MODEL_ERROR", reason="REFERENCE_CONSTRAINTS_INCONSISTENT")
+            report.update(status="REFERENCE_INCONSISTENT", reason="REFERENCE_CONSTRAINTS_INCONSISTENT")
     except ModelError:
         report.update(status="MODEL_ERROR", reason="MODEL_DID_NOT_PRODUCE_VALID_DISTRIBUTION")
     report.update(duration_ms=(time.perf_counter() - started) * 1000, analyzed_at=stamp(store.clock()))
