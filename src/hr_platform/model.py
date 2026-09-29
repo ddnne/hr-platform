@@ -8,7 +8,7 @@ from scipy import sparse
 from scipy.optimize import linprog
 from scipy.special import logsumexp
 
-VERSION = "top3-kl-v1"
+VERSION = "top3-kl-v2"
 MODELED = {"win", "exacta", "quinella", "trifecta", "trio"}
 
 
@@ -232,10 +232,54 @@ def bounds(omega, markets, refs, target, selection, epsilon=1e-6):
     }
 
 
+def reference_consistency(omega, markets, refs, target):
+    """Minimum common absolute probability slack; independent of KL regularization."""
+    if target in refs or not refs or len(set(refs)) != len(refs):
+        raise ModelError("REFERENCE_CONFIG")
+    references = {h: reference(omega, h, markets[h]["quotes"]) for h in refs}
+    a = sparse.vstack([references[h][1] for h in refs], format="csr")
+    v = np.concatenate([references[h][2] for h in refs])
+    slack = sparse.csr_matrix(-np.ones((len(v), 1)))
+    begin = time.perf_counter()
+    result = linprog(
+        np.r_[np.zeros(len(omega)), 1.0],
+        A_ub=sparse.vstack([sparse.hstack([a, slack]), sparse.hstack([-a, slack])]),
+        b_ub=np.r_[v, -v], A_eq=np.array([np.r_[np.ones(len(omega)), 0.0]]),
+        b_eq=[1.0], bounds=(0, None), method="highs",
+    )
+    if not result.success or result.x is None or not np.isfinite(result.x).all():
+        raise ModelError("CONSISTENCY_LP_FAILED")
+    q, epsilon = result.x[:-1], float(result.x[-1])
+    if (q.min() < -1e-8 or epsilon < -1e-8 or abs(q.sum() - 1) > 1e-8
+            or np.max(abs(a @ q - v)) > epsilon + 1e-8):
+        raise ModelError("CONSISTENCY_WITNESS_INVALID")
+    report = {
+        "minimum_uniform_absolute_slack": max(0.0, epsilon),
+        "units": "probability_not_odds",
+        "per_market_max_residual": {
+            h: float(np.max(abs(references[h][1] @ q - references[h][2]))) for h in refs
+        },
+        "solver": "scipy_highs", "duration_ms": (time.perf_counter() - begin) * 1000,
+        "interpretation": "reference_compatibility_not_price_edge_or_cause",
+        "strategy_threshold_changed": False,
+    }
+    if "win" in refs and "exacta" in refs:
+        wins, _, vw, _, _ = references["win"]
+        pairs, _, ve, _, _ = references["exacta"]
+        gaps = [float(vw[i] - sum(ve[j] for j, pair in enumerate(pairs) if pair[0] == horse[0]))
+                for i, horse in enumerate(wins)]
+        report["win_exacta_first_place"] = {
+            "max_absolute_gap": max(map(abs, gaps)), "l1_gap": sum(map(abs, gaps)),
+            "necessary_slack_lower_bound": max(map(abs, gaps)) / len(wins),
+        }
+    return report
+
+
 def dependence(omega, q, qmarg):
     runners = sorted(set(x for s in omega for x in s))
     z = np.array([[float(h in s[:a]) for s in omega] for h in runners for a in (1, 2, 3)])
-    mu = z @ q
+    # Explicit reduction avoids spurious dense BLAS floating-point warnings on macOS.
+    mu = np.einsum("ik,k->i", z, q, optimize=False)
     joint = np.einsum("ik,k,jk->ij", z, q, z, optimize=False)
     cov = joint - np.outer(mu, mu)
     sd = np.sqrt(np.maximum(mu * (1 - mu), 0))
@@ -295,6 +339,7 @@ def analyze(runners, markets, config):
         )
     best = max(range(len(rows)), key=lambda i: rows[i]["implied_edge_at_quote"])
     identification = bounds(omega, markets, refs, target, selections[best], config["identification_epsilon"])
+    consistency = reference_consistency(omega, markets, refs, target)
     sensitivity = []
     for value in config["sensitivity_lambdas"]:
         qs, ds = fit(omega, markets, target, refs, value, max_iter=config["solver_max_iter"])
@@ -321,6 +366,7 @@ def analyze(runners, markets, config):
         "reference_diagnostics": dr,
         "marginal_diagnostics": dm,
         "identification": identification,
+        "reference_consistency": consistency,
         "identification_selection": key(selections[best]),
         "sensitivity": sensitivity,
         "weight_sensitivity": weight_variants,
