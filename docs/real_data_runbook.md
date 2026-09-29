@@ -202,3 +202,25 @@ PYTHONPATH=src uv run python -m hr_platform.cli --root private/real diagnose \
   --zip private/inbox/odds.zip --race-zip private/inbox/race.zip \
   --kind DAILY_SNAPSHOT --encoding utf-8-sig --config configs/research-shadow.yaml
 ```
+
+## 公式単複ページの状態表示を保存する
+
+`import-state`は保存済みの公式単勝・複勝オッズHTMLと、自分の取得処理で記録したreceiptを取り込む。NARへの新たな通信はしない。現在の対応は「最終」見出しと「競走除外」の表示。空の変更欄は`NO_CHANGE_DISPLAYED`で、出走有効とは断定しない。未適合の見出し・変更表現は未知として残す。
+
+```sh
+uv run python -m hr_platform.cli import-state \
+  --html private/inbox/odds-page.html --receipt private/inbox/odds-page-receipt.json \
+  --race '<日付:競馬場:競走番号>'
+uv run python -m hr_platform.cli state-asof \
+  --race '<日付:競馬場:競走番号>' --at '<照会時刻>'
+uv run python -m hr_platform.cli state-history \
+  --race '<日付:競馬場:競走番号>' --at '<照会時刻>'
+```
+
+receiptには`url`、`status`（200）、`sha256`、`bytes`、`fetch_started_at`、`headers_received_at`、`collector_received_at`、`raw_saved_at`を使う。時刻はタイムゾーン付きの実測値。公式OddsTanFukuのURL、原本ハッシュ・サイズ、時計の順序を検査し、HTMLの選択中の競走リンクと見出しで日付・競走・競馬場を照合する。receiptは自分の取得記録を信頼するもので、第三者提供ファイルの真正性を保証するものではない。
+
+- 原本・receipt・状態観測・解析版を別に保持する。同じ取得の再配送は初回時刻を維持し、同じ原本の別時刻取得は別観測になる。
+- 利用可能時刻はローカルで原本・解析結果を保存した後の実時計。`state-asof`はその時点までの解析だけを返す。`state-history`で全観測・解析版を読戻せる。後の最終表示・除外表示・再解析を過去へ戻さない。
+- `FINAL_DISPLAYED`は表示オッズの最終扱いであり、競走終了・公式払戻の最終性を保証しない。市場の更新時刻はnullのまま。未知の「現在」表記の時刻を推測で転記しない。
+- 状態欄・見出し等の明示的な非表示要素は隔離する。枠列にある公式HTMLのrowspanと非表示placeholderは馬番をずらさず扱う。
+- この段階では状態資料をオッズの既存観測へ結合せず、Paper判断・精算を生成しない。将来の中間表示・有効出走集合の適合と、判断時点の状態との照合が次の接続条件となる。

@@ -58,6 +58,16 @@ def arguments():
     payout.add_argument("--html", required=True)
     payout.add_argument("--race", required=True)
     payout.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
+    state = commands.add_parser("import-state", help="公式単複ページの状態表示と取得記録を非公開保存")
+    state.add_argument("--html", required=True)
+    state.add_argument("--receipt", required=True)
+    state.add_argument("--race", required=True)
+    state_query = commands.add_parser("state-asof", help="その時点で解析済みだった公式状態表示を読戻し")
+    state_query.add_argument("--race", required=True)
+    state_query.add_argument("--at", required=True)
+    state_history = commands.add_parser("state-history", help="利用可能だった公式状態表示の全観測・解析版を読戻し")
+    state_history.add_argument("--race", required=True)
+    state_history.add_argument("--at", required=True)
     log = commands.add_parser("import-log", help="D1の成功・失敗・待機ログを非公開で取込み")
     log.add_argument("--file", required=True)
     log_query = commands.add_parser("capture-log", help="取得状態の履歴を時点指定で再読出し")
@@ -124,6 +134,17 @@ def run(args, store):
         manifest = json.loads(read_limited(args.manifest, 64 * 1024))
         parse_id = adapter.import_capture(manifest, read_limited(args.zip), args.encoding)
         report = dict(store.db.execute("SELECT * FROM parses WHERE id=?", (parse_id,)).fetchone())
+    elif args.command in {"import-state", "state-asof", "state-history"}:
+        from .race_state import StateEvidence
+
+        states = StateEvidence(store)
+        if args.command == "import-state":
+            report = states.ingest(json.loads(read_limited(args.receipt, 64 * 1024)),
+                                   read_limited(args.html, 2 * 1024 * 1024), args.race)
+        elif args.command == "state-history":
+            report = states.history(args.race, args.at)
+        else:
+            report = states.asof(args.race, args.at)
     elif args.command == "import-log":
         report = CaptureLog(store).ingest(json.loads(read_limited(args.file)))
     elif args.command == "capture-log":
