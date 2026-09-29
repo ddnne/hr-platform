@@ -133,3 +133,77 @@ def test_early_call_does_not_consume_due_time_decision(collected, config):
     assert collected.db.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
     collected.clock = lambda: f.at(4, 20)
     assert len(decide(collected, f.RACE, f.schedule(), config)) == 3
+
+
+@pytest.mark.parametrize("amount", [70, 80])
+def test_special_payout_replay_and_refund_priority(collected, config, amount):
+    d = next(x for x in decide(collected, f.RACE, f.schedule(), config) if x["model"] == "reference")
+    collected.clock = lambda: f.at(21)
+    special = [{"market": "quinella", "payout_per_100": amount}]
+    pay = f.payout("special", tickets=[], special_payouts=special)
+    result = settle(collected, d["id"], pay)
+    assert result["payout_yen"] == result["special_payout_yen"] == amount
+    assert result["refund_yen"] == 0 and result["profit_yen"] == amount - 100
+    assert settle(collected, d["id"], pay) == result
+    assert json.loads(collected.read_body(result["source_hash"], "receipts")) == pay
+    refunded = settle(collected, d["id"], f.payout(
+        "special-with-refund", special_payouts=special,
+        tickets=[{"market": "quinella", "selection": d["selection"], "refund_per_100": 100}],
+    ))
+    assert refunded["refund_yen"] == 100
+    assert refunded["special_payout_yen"] == refunded["payout_yen"] == 0
+    assert refunded["profit_yen"] == 0
+
+
+@pytest.mark.parametrize("overrides", [
+    {"final": False}, {"complete_markets": []},
+])
+def test_special_payout_stays_pending_without_completeness(collected, config, overrides):
+    d = next(x for x in decide(collected, f.RACE, f.schedule(), config) if x["model"] == "reference")
+    collected.clock = lambda: f.at(21)
+    pay = f.payout(tickets=[], special_payouts=[{"market": "quinella", "payout_per_100": 70}], **overrides)
+    result = settle(collected, d["id"], pay)
+    assert result["status"] == "PENDING"
+    assert result["payout_yen"] is result["special_payout_yen"] is result["profit_yen"] is None
+
+
+@pytest.mark.parametrize("overrides,error", [
+    ({"special_payouts": [{"market": "quinella", "payout_per_100": 0}]}, "AMOUNT"),
+    ({"special_payouts": [{"market": "unknown", "payout_per_100": 70}]}, "MARKET"),
+    ({"special_payouts": [{"market": "quinella", "payout_per_100": 70}] * 2}, "MARKET"),
+    ({"void": True}, "CONFLICT"),
+    ({"tickets": [{"market": "quinella", "selection": "1-2", "payout_per_100": 100}]}, "CONFLICT"),
+    ({"tickets": [{"market": "quinella", "selection": "1-2", "refund_per_100": 50}]}, "CONFLICT"),
+])
+def test_special_payout_invalid_inputs_do_not_settle(collected, config, overrides, error):
+    d = decide(collected, f.RACE, f.schedule(), config)[0]
+    collected.clock = lambda: f.at(21)
+    pay = f.payout(tickets=[], special_payouts=[{"market": "quinella", "payout_per_100": 70}])
+    pay.update(overrides)
+    with pytest.raises(ValueError, match="SPECIAL_PAYOUT_" + error):
+        settle(collected, d["id"], pay)
+    assert collected.db.execute("SELECT count(*) FROM settlements").fetchone()[0] == 0
+
+
+def test_special_payout_does_not_apply_to_other_market(collected, config):
+    decisions = decide(collected, f.RACE, f.schedule(), config)
+    collected.clock = lambda: f.at(21)
+    for decision in decisions:
+        result = settle(collected, decision["id"], f.payout(
+            tickets=[], special_payouts=[{"market": "exacta", "payout_per_100": 80}],
+        ))
+        assert result["payout_yen"] == result["special_payout_yen"] == 0
+        assert result["profit_yen"] == -decision["stake_yen"]
+
+
+def test_special_payout_never_pays_no_bet(collected, config):
+    config["daily_stake_limit_yen_per_model"] = 0
+    decisions = decide(collected, f.RACE, f.schedule(), config)
+    collected.clock = lambda: f.at(21)
+    for decision in decisions:
+        result = settle(collected, decision["id"], f.payout(
+            tickets=[], special_payouts=[{"market": "quinella", "payout_per_100": 70}],
+        ))
+        assert result["status"] == "NO_BET"
+        assert result["payout_yen"] == result["special_payout_yen"] == result["profit_yen"] == 0
+        assert result["roi"] is None
