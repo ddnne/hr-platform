@@ -58,6 +58,17 @@ def arguments():
     payout.add_argument("--html", required=True)
     payout.add_argument("--race", required=True)
     payout.add_argument("--encoding", choices=["utf-8-sig", "cp932"], required=True)
+    payout_import = commands.add_parser("import-payout", help="公式成績HTMLから馬連・三連複の払戻と除外返還を保存")
+    payout_import.add_argument("--html", required=True)
+    payout_import.add_argument("--receipt", required=True)
+    payout_import.add_argument("--race", required=True)
+    payout_settle = commands.add_parser("settle-payout", help="保存済み公式払戻で既存のPaper判断を精算")
+    payout_settle.add_argument("--decision", required=True)
+    payout_settle.add_argument("--evidence", required=True)
+    for name in ("payout-asof", "payout-history"):
+        payout_query = commands.add_parser(name, help="公式払戻の利用可能時点と解析履歴を読戻し")
+        payout_query.add_argument("--race", required=True)
+        payout_query.add_argument("--at", required=True)
     state = commands.add_parser("import-state", help="公式単複ページの状態表示と取得記録を非公開保存")
     state.add_argument("--html", required=True)
     state.add_argument("--receipt", required=True)
@@ -134,6 +145,19 @@ def run(args, store):
         manifest = json.loads(read_limited(args.manifest, 64 * 1024))
         parse_id = adapter.import_capture(manifest, read_limited(args.zip), args.encoding)
         report = dict(store.db.execute("SELECT * FROM parses WHERE id=?", (parse_id,)).fetchone())
+    elif args.command in {"import-payout", "settle-payout", "payout-asof", "payout-history"}:
+        from .official_payout import PayoutEvidence
+
+        payouts = PayoutEvidence(store)
+        if args.command == "import-payout":
+            report = payouts.ingest(json.loads(read_limited(args.receipt, 64 * 1024)),
+                                    read_limited(args.html, 2 * 1024 * 1024), args.race)
+        elif args.command == "settle-payout":
+            report = payouts.settle_decision(args.decision, args.evidence)
+        elif args.command == "payout-history":
+            report = payouts.history(args.race, args.at)
+        else:
+            report = payouts.asof(args.race, args.at)
     elif args.command in {"import-state", "state-asof", "state-history"}:
         from .race_state import StateEvidence
 
