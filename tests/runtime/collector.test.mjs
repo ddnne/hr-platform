@@ -19,6 +19,9 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  ? {bind:()=>({run:async()=>{throw new Error('metric failure');}})} : env.INDEX.prepare(sql)}}
  : fault==='manifest' ? {...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),
  put:async(key,value)=>{if(key.startsWith('manifests/') && ++manifestWrites===2) throw new Error('manifest failure');
+ return env.RAW.put(key,value);}}}
+ : fault==='failureEvidence' ? {...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),
+ put:async(key,value)=>{if(key.startsWith('failure-metadata/')) throw new Error('evidence failure');
  return env.RAW.put(key,value);}}} : env;
  await capture(Number(u.searchParams.get('t')),bindings); return new Response('ok');}
  if(u.pathname==='/scheduled'){
@@ -45,7 +48,8 @@ async function runtime(responses, enabled=true, extraBindings={}) {
   compatibilityDate: '2026-09-28', compatibilityFlags: ['nodejs_compat'],
   bindings: {COLLECTION_ENABLED: String(enabled), SOURCE_APPROVED: String(enabled), ...extraBindings},
   d1Databases: ['INDEX'], r2Buckets: ['RAW'], log: new Log(LogLevel.NONE),
-  outboundService: async req => {requests.push({url:req.url,etag:req.headers.get('if-none-match')});
+  outboundService: async req => {requests.push({url:req.url,etag:req.headers.get('if-none-match'),
+    userAgent:req.headers.get('user-agent'),accept:req.headers.get('accept')});
     const item = responses.shift(); if(!item) throw new Error('unexpected outbound request');
     return new Response(item.body ?? null, {status:item.status ?? 200, headers:item.headers});}
  }));
@@ -290,5 +294,56 @@ test('Cron offset does not extend the planned minute deadline',async()=>{
   await r.mf.dispatchFetch(`http://local/scheduled?t=${start+56_000}&now=${start+120001}`);
   assert.equal(r.requests.length,0);
   assert.equal((await r.db.prepare('SELECT count(*) n FROM captures').first()).n,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('identified ZIP request and failure metadata distinguish HTML from explicit challenge',async()=>{
+ for(const challenge of [false,true]){
+  const headers={'content-type':'text/html','set-cookie':'SYNTHETIC_COOKIE_MUST_NOT_BE_RECORDED'};
+  if(challenge) headers['cf-mitigated']='challenge';
+  const r=await runtime([{status:404,headers,body:'SYNTHETIC_PRIVATE_ERROR_BODY'}]);
+  try{
+   await r.tick(1);await r.reset();await r.tick(1);await r.tick(2);
+   assert.equal(r.requests.length,1);
+   assert.equal(r.requests[0].userAgent,'hr-platform-personal-research/0.1');
+   assert.equal(r.requests[0].accept,'application/zip');
+   const raw=await r.mf.getR2Bucket('RAW');
+   const text=await (await raw.get('failure-metadata/nar-daily-odds:1.json')).text();
+   const report=JSON.parse(text);
+   assert.equal(report.http_status,404);
+   assert.equal(report.denial_basis,challenge?'CHALLENGE_HEADER':'NON_SUCCESS_HTML');
+   assert.equal(report.content_type,'text/html');assert.equal(report.body_prefix_truncated,false);
+   assert.equal(Buffer.from(report.body_prefix_base64,'base64').toString(),'SYNTHETIC_PRIVATE_ERROR_BODY');
+   assert.ok(!text.includes('SYNTHETIC_COOKIE')&&!text.includes('SYNTHETIC_PRIVATE_ERROR_BODY'));
+   assert.equal((await raw.list({prefix:'failure-metadata/'})).objects.length,1);
+   assert.equal((await raw.list({prefix:'raw/'})).objects.length,0);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+   assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('failed diagnostic metadata write cannot remove the source stop',async()=>{
+ const r=await runtime([{status:403}]);
+ try{
+  await r.mf.dispatchFetch('http://local/tick?t=1&fault=failureEvidence');
+  await r.reset();await r.tick(2);
+  assert.equal(r.requests.length,1);
+  const row=await r.db.prepare('SELECT status,error_code FROM captures WHERE event_id=?').bind('nar-daily-odds:1').first();
+  assert.equal(row.status,'FAILED');assert.equal(row.error_code,'SOURCE_DENIED');
+  assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('private failure evidence retains at most 8 KiB and reports truncation',async()=>{
+ const r=await runtime([{status:404,headers:{'content-type':'text/html'},body:'X'.repeat(9000)}]);
+ try{
+  await r.tick(1);
+  const raw=await r.mf.getR2Bucket('RAW');
+  const report=await (await raw.get('failure-metadata/nar-daily-odds:1.json')).json();
+  assert.equal(report.body_bytes,9000);
+  assert.equal(report.body_prefix_truncated,true);
+  assert.equal(Buffer.from(report.body_prefix_base64,'base64').byteLength,8192);
+  assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
  }finally{await r.mf.dispose();}
 });
