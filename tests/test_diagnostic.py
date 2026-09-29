@@ -72,3 +72,30 @@ def test_inconsistent_reference_constraints_are_not_success(store, config, monke
     assert report["status"] == "MODEL_ERROR"
     assert report["reason"] == "REFERENCE_CONSTRAINTS_INCONSISTENT"
     assert not report["paper_eligible"]
+
+
+@pytest.mark.parametrize('problem,reason', [('zero', 'UNUSABLE_ODDS'), ('missing', 'INCOMPLETE_MARKET')])
+def test_quality_reports_distinguish_rows_from_values(store, config, monkeypatch, problem, reason):
+    original = f.markets
+    def changed(*args, **kwargs):
+        markets = original(*args, **kwargs)
+        if problem == 'zero':
+            markets['exacta']['quotes']['1-2']['odds'] = 0.0
+        else:
+            del markets['exacta']['quotes']['1-2']
+        return markets
+    monkeypatch.setattr(f, 'markets', changed)
+    report = run(store, config)
+    assert report['status'] == 'NO_COMPATIBLE_RACE'
+    exclusion = report['excluded_before_selection'][0]
+    assert exclusion['reason'] == 'MARKET_QUALITY'
+    issue = exclusion['issues'][0]
+    assert issue['market'] == 'exacta' and issue['reason'] == reason
+    assert issue['expected_rows'] == 12
+    if problem == 'zero':
+        assert issue['observed_rows'] == 12 and issue['missing_selections'] == []
+        assert issue['unusable_selections'][0]['raw_odds'] == '0.0'
+        assert issue['marker_meaning'] == 'NOT_INFERRED_FROM_DISPLAY_VALUE'
+    else:
+        assert issue['observed_rows'] == 11 and issue['missing_selections'] == ['1-2']
+        assert issue['unusable_selections'] == []
