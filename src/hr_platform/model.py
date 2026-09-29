@@ -8,7 +8,7 @@ from scipy import sparse
 from scipy.optimize import linprog
 from scipy.special import logsumexp
 
-VERSION = "top3-kl-v2"
+VERSION = "top3-kl-v3"
 MODELED = {"win", "exacta", "quinella", "trifecta", "trio"}
 
 
@@ -137,6 +137,28 @@ def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_ite
     diagnostics["references"] = refs
     diagnostics["weights"] = weights.tolist()
     return result, diagnostics
+
+
+
+def win_exacta_unregularized(omega, markets, win_weight=0.5):
+    """Analytic lambda=0 forward-KL fit, with maximum-entropy third place.
+
+    Let a_ij be normalized exacta probabilities, a_i their first-place marginal,
+    and w_i normalized win probabilities. KL chain rule gives
+    r_i = win_weight*w_i + (1-win_weight)*a_i, p_ij = r_i*a_ij/a_i.
+    This is a diagnostic limit, not a replacement for the regularized model.
+    """
+    if not np.isfinite(win_weight) or not 0 < win_weight < 1:
+        raise ModelError("REFERENCE_WEIGHTS")
+    winners, _, w, _, _ = reference(omega, "win", markets["win"]["quotes"])
+    pairs, _, a, _, _ = reference(omega, "exacta", markets["exacta"]["quotes"])
+    first = {h[0]: 0.0 for h in winners}
+    for (i, _), value in zip(pairs, a):
+        first[i] += float(value)
+    r = {h[0]: win_weight * value + (1 - win_weight) * first[h[0]]
+         for h, value in zip(winners, w)}
+    joint = {(i, j): float(value) * r[i] / first[i] for (i, j), value in zip(pairs, a)}
+    return np.array([joint[(i, j)] / (len(winners) - 2) for i, j, _ in omega])
 
 
 def same_marginals(omega, qref, max_iter=300):
@@ -337,6 +359,21 @@ def analyze(runners, markets, config):
                 "valid_log": valid,
             }
         )
+    calibration = None
+    if target == "quinella" and set(refs) == {"win", "exacta"}:
+        q0 = win_exacta_unregularized(omega, markets)
+        p0 = a @ q0
+        calibration = {
+            "basis": "ANALYTIC_UNREGULARIZED_FORWARD_KL_LIMIT",
+            "win_weight": 0.5,
+            "third_place_basis": "MAX_ENTROPY_UNIDENTIFIED_BY_WIN_EXACTA",
+            "probabilities": p0.tolist(),
+            "interpretation": "ALGEBRAIC_PROBABILITY_DIFFERENCE_NOT_CAUSAL_OR_PROFIT",
+        }
+        for row, baseline in zip(rows, p0):
+            row["p_unregularized"] = float(baseline)
+            row["reference_market_adjustment"] = float(baseline - row["p_direct"])
+            row["regularization_adjustment"] = float(row["p_ref"] - baseline)
     best = max(range(len(rows)), key=lambda i: rows[i]["implied_edge_at_quote"])
     identification = bounds(omega, markets, refs, target, selections[best], config["identification_epsilon"])
     consistency = reference_consistency(omega, markets, refs, target)
@@ -367,6 +404,7 @@ def analyze(runners, markets, config):
         "marginal_diagnostics": dm,
         "identification": identification,
         "reference_consistency": consistency,
+        "calibration_decomposition": calibration,
         "identification_selection": key(selections[best]),
         "sensitivity": sensitivity,
         "weight_sensitivity": weight_variants,

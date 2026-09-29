@@ -144,3 +144,52 @@ def test_max_entropy_boundary_support():
     actual, d = same_marginals(omega, known)
     np.testing.assert_allclose(actual, known, atol=1e-12)
     assert d["marginal_error"] <= 1e-12
+
+
+@pytest.mark.parametrize('weight', [0.25, 0.5, 0.75])
+def test_unregularized_projection_matches_independent_convex_solution(weight):
+    import cvxpy as cp
+    from hr_platform.model import win_exacta_unregularized
+
+    omega = states([1, 2, 3, 4])
+    markets = f.markets('nonuniform')
+    markets['win']['quotes']['1']['odds'] = 1.2  # intentionally inconsistent references
+    q0 = win_exacta_unregularized(omega, markets, weight)
+    pairs = sorted({s[:2] for s in omega})
+    pair_mass = cp.Variable(len(pairs), nonneg=True)
+    expansion = np.array([[0.5 if state[:2] == pair else 0 for pair in pairs] for state in omega])
+    q = expansion @ pair_mass
+    objective = 0
+    for market, w in [('win', weight), ('exacta', 1 - weight)]:
+        _, a, v, _, _ = reference(omega, market, markets[market]['quotes'])
+        objective += w * cp.sum(cp.kl_div(v, a @ q))
+    problem = cp.Problem(cp.Minimize(objective), [cp.sum(q) == 1])
+    problem.solve(solver='CLARABEL', tol_gap_abs=1e-11, tol_feas=1e-11, tol_gap_rel=1e-11)
+    assert problem.status == cp.OPTIMAL
+    for market in ('win', 'exacta', 'quinella'):
+        _, a = matrix(omega, market)
+        np.testing.assert_allclose(a @ q0, a @ q.value, atol=2e-6)
+    assert q0.min() > 0 and q0.sum() == pytest.approx(1)
+    # The third-place distribution is a stated maximum-entropy choice, not extra evidence.
+    for i, j, k in omega:
+        values = [q0[n] for n, state in enumerate(omega) if state[:2] == (i, j)]
+        assert max(values) == min(values)
+
+
+def test_calibration_decomposition_excludes_target_and_preserves_direct(config):
+    from hr_platform.model import win_exacta_unregularized
+
+    markets = f.markets('nonuniform')
+    omega = states([1, 2, 3, 4])
+    q0 = win_exacta_unregularized(omega, markets)
+    _, a = matrix(omega, 'quinella')
+    np.testing.assert_allclose(a @ q0, a @ f.distribution('nonuniform'), atol=1e-12)
+    markets['quinella']['quotes']['1-2']['odds'] *= 5
+    np.testing.assert_array_equal(q0, win_exacta_unregularized(omega, markets))
+    markets['win']['quotes']['1']['odds'] = 1.2
+    result = analyze([1, 2, 3, 4], markets, config)
+    for row in result['rows']:
+        assert row['p_ref'] - row['p_direct'] == pytest.approx(
+            row['reference_market_adjustment'] + row['regularization_adjustment'], abs=1e-15)
+    assert max(abs(r['reference_market_adjustment']) for r in result['rows']) > 1e-3
+    assert result['identification']['status'] == 'INCONSISTENT'
