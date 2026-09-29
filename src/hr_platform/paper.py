@@ -65,9 +65,25 @@ def select(rows, model, tolerance):
     return min((row for edge, row in candidates if best - edge <= tolerance), key=lambda r: r["selection"])
 
 
+def register_experiment(store, config):
+    experiment, config_hash = config["version"], identity(config)
+    with store.db:
+        store.db.execute("INSERT OR IGNORE INTO experiments VALUES(?,?)", (experiment, config_hash))
+        registered = store.db.execute(
+            "SELECT config_hash FROM experiments WHERE id=?", (experiment,)
+        ).fetchone()[0]
+        if registered != config_hash:
+            raise ValueError("EXPERIMENT_CONFIG_CHANGED")
+    return config_hash
+
+
 def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
     """Persist exactly once per race/experiment/model; all models share one input cohort."""
     clock = clock or store.clock
+    if "input_policy" in config:
+        from .prospective import validate_policy
+
+        validate_policy(config)
     if config["mode"] not in {"EXPLORATORY_SHADOW", "FROZEN_PAPER"} or config["stake_yen"] != 100:
         raise ValueError("PAPER_CONFIG")
     if config["max_tickets_per_race"] != 1 or config["target"] in config["references"]:
@@ -78,14 +94,7 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
     ):
         raise ValueError("REFERENCE_CONSTRAINT_POLICY")
     experiment = config["version"]
-    config_hash = identity(config)
-    with store.db:
-        store.db.execute("INSERT OR IGNORE INTO experiments VALUES(?,?)", (experiment, config_hash))
-        registered = store.db.execute(
-            "SELECT config_hash FROM experiments WHERE id=?", (experiment,)
-        ).fetchone()[0]
-        if registered != config_hash:
-            raise ValueError("EXPERIMENT_CONFIG_CHANGED")
+    config_hash = register_experiment(store, config)
     existing = store.db.execute(
         "SELECT body FROM decisions WHERE experiment=? AND race_id=? ORDER BY model", (experiment, race_id)
     ).fetchall()
@@ -103,11 +112,16 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
     if seconds(ready_at, asof) < 0:
         # Early cron calls do not consume the immutable due-time decision.
         return [{"race_id": race_id, "experiment": experiment, "status": "NOT_DUE", "asof_at": asof}]
-    view = store.asof(race_id, [config["target"], *config["references"]], asof, config["max_age_seconds"])
+    if "input_policy" in config:
+        from .prospective import build_view
+
+        view = build_view(store, race_id, schedule, config, asof)
+    else:
+        view = store.asof(race_id, [config["target"], *config["references"]], asof, config["max_age_seconds"])
     now = ready_at
     reason = eligibility(view, config, schedule, now)
     result = None
-    assumptions = []
+    assumptions = list(view.get("research_assumptions", []))
     if reason is None:
         content = {h: x["content"] for h, x in view["markets"].items()}
         try:
@@ -193,7 +207,8 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                     canonical(record).decode(),
                 ),
             )
-            decisions.append(record)
+            # Match the persisted JSON representation on first delivery and replay.
+            decisions.append(json.loads(canonical(record)))
     return decisions
 
 

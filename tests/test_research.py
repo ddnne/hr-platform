@@ -61,3 +61,22 @@ def test_daily_final_state_and_unknown_are_separated(store):
     assert len(report["excluded_points"]["quinella"]) == 2
     assert all(x["exclusion_reason"] == "RACE_NOT_PRE_RACE"
                for x in report["excluded_points"]["quinella"])
+
+
+
+def test_reparse_removal_is_shared_by_asof_latest_and_trajectory(store):
+    from hr_platform.parser import parse_odds
+
+    store.ingest(f.event('a', 0), f.archive())
+    before = trajectory(store, f.RACE, ['quinella'], f.at(3))
+    def corrected(*args):
+        races = parse_odds(*args)
+        del races[f.RACE]['markets']['quinella']
+        return races
+    store.clock = lambda: f.at(4)
+    store.reparse('a', 'synthetic-market-removal', corrected)
+    assert trajectory(store, f.RACE, ['quinella'], f.at(3)) == before
+    assert not trajectory(store, f.RACE, ['quinella'], f.at(4))['history']['quinella']
+    assert store.latest(f.RACE, 'quinella') is None
+    # Audit history still contains the withdrawn interpretation.
+    assert len(store.history(f.RACE, 'quinella', f.at(4))) == 1

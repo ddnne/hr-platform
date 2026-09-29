@@ -329,3 +329,37 @@ CSVの行解析はローカルと共通。v2は競走別の本体と小さなman
 呼出し元のタイムアウトは処理中止を意味しないため、同じ観測ID/解析版のD1状態と履歴を先に確認する。
 今回も60秒で呼出し元が待機を打ち切った後、保存完了と履歴/as-ofの読戻しを確認した。
 実測は1原本に限る。全データ量・頭数・同時実行での制限適合を保証するものではない。
+
+## 競走情報の履歴と将来のPaper計画
+
+以下は取得済み原本のローカル処理。ネットワーク取得・Cron設定・デプロイは行わない。
+原本、receipt、レポート、計画IDは`private/`配下に保持する。
+
+```sh
+uv run python -m hr_platform.cli --root private/real import-metadata \
+  --zip private/取得済みrace.zip --receipt private/取得記録.json --date YYYYMMDD
+uv run python -m hr_platform.cli --root private/real metadata-history \
+  --date YYYYMMDD --at '利用可能時刻の上限'
+uv run python -m hr_platform.cli --root private/real paper-plan \
+  --race '日付:競馬場:競走番号' --config configs/research-shadow.yaml
+uv run python -m hr_platform.cli --root private/real paper-tick --plan '保存された計画ID'
+```
+
+`import-metadata`は当日RaceDataDownloadのUTF-8 BOM ZIPと、URL/status/sha256/bytes/filename/
+fetch_started_at/headers_received_at/collector_received_at/raw_saved_atを持つreceiptを検証する。
+一つのZIPを一観測として保存し、競走別読出しで内部配分する。月次・取得時刻不明のZIPは対象外。
+同値の再観測は残り、同じイベント/解析版の再配送は増えない。`metadata-asof`も利用できる。
+同じreceiptと原本の再解析は`MetadataEvidence.ingest(..., version=新しい版)`を使い、
+利用可能時刻は再解析時点として記録する。全解析版の履歴は保持する。
+
+`paper-plan`は利用可能な競走情報から予定を決め、判断時刻前にだけ新規登録する。
+返値の`private_report`を開くと計画IDが分かる。同一実験の設定変更や過去時刻への新規登録はエラー。
+登録完了が基準時刻を越えた計画は見送りにする。未判断の`paper-plan`/`paper-tick`は、
+現在までに判明した予定変更を履歴付きで反映する。変更後の基準時刻が過去なら遡って購入しない。
+`paper-tick`は早ければ`NOT_DUE`で台帳を作らず、判断後の再実行は既存の三モデル判断を返す。
+遅延・欠測・古い証跡・最終表示などは見送りとして固定する。後で届いた原本で見送りを取り消さない。
+
+実データでは判断までに、同じ保存先へ対象/参照オッズ、`import-state`による単複表示、
+新鮮な`import-metadata`を取得証跡付きで取り込む必要がある。予定登録だけでは入力はそろわない。
+方針・仮定は[実験計画](experiment_plan.md#取得証跡を使う将来のpaper入力)を参照。
+この処理のCloudflare配置・自動収集接続はまだ行っていない。
