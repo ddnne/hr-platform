@@ -3,6 +3,7 @@ from datetime import timedelta
 import math
 from .common import canonical, identity, instant, stamp, seconds
 from .model import analyze, ModelError
+from .parser import MARKETS
 
 
 def eligibility(view, config, schedule, decision_at):
@@ -221,17 +222,42 @@ def settle(store, decision_id, payout):
             x = r.get(field, 0)
             if not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0:
                 raise ValueError("PAYOUT_AMOUNT")
+    # Explicit normalized official evidence only: never infer special payout from zero odds.
+    special = {}
+    for item in payout.get("special_payouts", []):
+        market, amount = item["market"], item["payout_per_100"]
+        if market not in MARKETS.values() or market in special:
+            raise ValueError("SPECIAL_PAYOUT_MARKET")
+        if type(amount) is not int or amount not in {70, 80}:
+            raise ValueError("SPECIAL_PAYOUT_AMOUNT")
+        special[market] = amount
+    if special and payout.get("void"):
+        raise ValueError("SPECIAL_PAYOUT_CONFLICT")
+    for row in rows:
+        if row["market"] in special and (
+            row.get("payout_per_100", 0) != 0 or row.get("refund_per_100", 0) not in {0, 100}
+        ):
+            raise ValueError("SPECIAL_PAYOUT_CONFLICT")
     stake = decision["stake_yen"]
     paid = refund = 0
+    special_paid = False
     status = "NO_BET" if stake == 0 else "PENDING"
     if stake and payout.get("final") and decision["target"] in payout.get("complete_markets", []):
         if payout.get("void"):
             refund = stake
         else:
+            if decision["target"] in special:
+                paid = special[decision["target"]] * stake / 100
+                special_paid = True
             for r in rows:
                 if (r["market"], r["selection"]) == (decision["target"], decision["selection"]):
-                    paid = r.get("payout_per_100", 0) * stake / 100
                     refund = r.get("refund_per_100", 0) * stake / 100
+                    if special_paid:
+                        if refund:
+                            paid = 0
+                            special_paid = False
+                    else:
+                        paid = r.get("payout_per_100", 0) * stake / 100
         status = "SETTLED"
     record = {
         "decision_id": decision_id,
@@ -244,6 +270,7 @@ def settle(store, decision_id, payout):
         "status": status,
         "stake_yen": stake,
         "payout_yen": paid if status != "PENDING" else None,
+        "special_payout_yen": (paid if special_paid else 0) if status != "PENDING" else None,
         "refund_yen": refund if status != "PENDING" else None,
         "profit_yen": paid + refund - stake if status != "PENDING" else None,
         "roi": (paid + refund - stake) / stake if stake and status == "SETTLED" else None,
