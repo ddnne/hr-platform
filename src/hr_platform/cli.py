@@ -79,6 +79,19 @@ def arguments():
     state_history = commands.add_parser("state-history", help="利用可能だった公式状態表示の全観測・解析版を読戻し")
     state_history.add_argument("--race", required=True)
     state_history.add_argument("--at", required=True)
+    metadata = commands.add_parser("import-metadata", help="取得記録付きの当日レースZIPを一度保存し競走別に読出し")
+    metadata.add_argument("--zip", required=True)
+    metadata.add_argument("--receipt", required=True)
+    metadata.add_argument("--date", required=True, help="YYYYMMDD")
+    for name in ("metadata-asof", "metadata-history"):
+        query = commands.add_parser(name, help="競走情報の利用可能時点と全解析履歴を読戻し")
+        query.add_argument("--date", required=True)
+        query.add_argument("--at", required=True)
+    plan = commands.add_parser("paper-plan", help="将来の競走・判断時刻・研究仮定を事前固定。取得や購入はしない")
+    plan.add_argument("--race", required=True)
+    plan.add_argument("--config", default="configs/research.yaml")
+    tick = commands.add_parser("paper-tick", help="事前固定した判断を一度実施。基準時刻前はNOT_DUE")
+    tick.add_argument("--plan", required=True)
     log = commands.add_parser("import-log", help="D1の成功・失敗・待機ログを非公開で取込み")
     log.add_argument("--file", required=True)
     log_query = commands.add_parser("capture-log", help="取得状態の履歴を時点指定で再読出し")
@@ -169,6 +182,24 @@ def run(args, store):
             report = states.history(args.race, args.at)
         else:
             report = states.asof(args.race, args.at)
+    elif args.command in {"import-metadata", "metadata-asof", "metadata-history"}:
+        from .race_metadata import MetadataEvidence
+
+        metadata = MetadataEvidence(store)
+        if args.command == "import-metadata":
+            report = metadata.ingest(json.loads(read_limited(args.receipt, 64 * 1024)),
+                                     read_limited(args.zip), args.date)
+        elif args.command == "metadata-history":
+            report = metadata.history(args.date, args.at)
+        else:
+            report = metadata.asof(args.date, args.at)
+    elif args.command in {"paper-plan", "paper-tick"}:
+        from .prospective import enroll, tick
+
+        if args.command == "paper-plan":
+            report = enroll(store, args.race, yaml.safe_load(read_limited(args.config, 64 * 1024)))
+        else:
+            report = tick(store, args.plan)
     elif args.command == "import-log":
         report = CaptureLog(store).ingest(json.loads(read_limited(args.file)))
     elif args.command == "capture-log":

@@ -11,17 +11,10 @@ def trajectory(store, race_id, markets, at):
     histories = {}
     excluded = {}
     for market in markets:
-        observations = {}
-        for item in store.history(race_id, market, cutoff):
-            if item["received_at"] > cutoff:
-                continue
-            key = item["observation_id"]
-            previous = observations.get(key)
-            if previous is None or (item["available_at"], item["parse_id"]) > (
-                previous["available_at"], previous["parse_id"]
-            ):
-                observations[key] = item
-        points = sorted(observations.values(), key=lambda x: (x["received_at"], x["observation_id"]))
+        # Resolve the observation's current parse before looking for a market:
+        # deleted markets/races must not reappear in path features.
+        points = [x for x in store.history(race_id, market, cutoff, current_only=True)
+                  if x["received_at"] <= cutoff]
         for item in points:
             item["age_seconds"] = seconds(cutoff, item["received_at"])
         histories[market] = []

@@ -238,19 +238,21 @@ class Store:
                 )
         return parse_id
 
-    def history(self, race_id, market, until=None):
+    def history(self, race_id, market, until=None, *, current_only=False):
+        cutoff = stamp(until) if until else "9999-12-31T23:59:59.999999+00:00"
         rows = self.db.execute(
             """SELECT s.*, p.version,p.parsed_at,p.available_at,o.id observation_id,
           o.raw_hash,o.raw_saved_at,o.received_at,o.basis,a.event FROM snapshots s
           JOIN parses p ON p.id=s.parse_id JOIN observations o ON o.id=p.observation_id
-          JOIN attempts a ON a.id=o.id WHERE s.race_id=? AND s.market=? AND p.available_at IS NOT NULL
+          JOIN attempts a ON a.id=o.id WHERE s.race_id=? AND s.market=? AND p.available_at<=?
+          AND (NOT ? OR NOT EXISTS (SELECT 1 FROM parses newer
+            WHERE newer.observation_id=p.observation_id AND newer.available_at<=?
+            AND (newer.available_at,newer.id)>(p.available_at,p.id)))
           ORDER BY o.received_at,p.available_at,p.id""",
-            (race_id, market),
+            (race_id, market, cutoff, current_only, cutoff),
         ).fetchall()
         result = []
         for row in rows:
-            if until and row["available_at"] > stamp(until):
-                continue
             item = dict(row)
             item["event"] = json.loads(item["event"])
             item["content"] = json.loads(self.read_body(item["body_hash"], "normalized"))
@@ -287,17 +289,11 @@ class Store:
         return result
 
     def asof(self, race_id, markets, at, max_age=300):
-        revisions = {}
-        for row in self.db.execute("""SELECT observation_id,id FROM parses WHERE available_at<=?
-                ORDER BY available_at,id""", (stamp(at),)):
-            revisions[row["observation_id"]] = row["id"]
-        histories = {h: [x for x in self.history(race_id, h, at)
-                         if revisions.get(x["observation_id"]) == x["parse_id"]] for h in markets}
-        return asof_view(histories,
-                         markets, at, max_age, self.gaps(at))
+        histories = {h: self.history(race_id, h, at, current_only=True) for h in markets}
+        return asof_view(histories, markets, at, max_age, self.gaps(at))
 
     def latest(self, race_id, market):
-        rows = self.history(race_id, market)
+        rows = self.history(race_id, market, current_only=True)
         return rows[-1] if rows else None
 
     def metrics(self):

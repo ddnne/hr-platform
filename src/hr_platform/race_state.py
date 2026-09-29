@@ -5,6 +5,7 @@ Unverified headings and empty change fields never establish PRE_RACE or active r
 """
 
 from datetime import datetime
+import csv
 from html.parser import HTMLParser
 import json
 import re
@@ -257,15 +258,26 @@ def parse_state_page(raw, race_id):
     }
 
 
-def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/OddsTanFuku"):
+def validate_body_times(receipt, raw, now, limit=MAX_BYTES):
     if (
         receipt.get("status") != 200
         or receipt.get("sha256") != sha(raw)
         or type(receipt.get("bytes")) is not int
         or receipt["bytes"] != len(raw)
-        or len(raw) > MAX_BYTES
+        or len(raw) > limit
     ):
         raise ValueError("STATE_RECEIPT_BODY")
+    fields = ("fetch_started_at", "headers_received_at", "collector_received_at", "raw_saved_at")
+    if any(not isinstance(receipt.get(k), str) for k in fields):
+        raise ValueError("STATE_RECEIPT_TIME")
+    times = [stamp(receipt[k]) for k in fields]
+    if times != sorted(times) or times[-1] > now:
+        raise ValueError("STATE_RECEIPT_TIME")
+    return times[0]
+
+
+def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/OddsTanFuku"):
+    started = validate_body_times(receipt, raw, now)
     url = urlsplit(receipt["url"])
     query = parse_qs(url.query, strict_parsing=True)
     date, _, number = race_id.split(":")
@@ -282,26 +294,28 @@ def validate_receipt(receipt, raw, race_id, now, path="/KeibaWeb/TodayRaceInfo/O
         or not re.fullmatch(r"[0-9]{2}", query["k_babaCode"][0])
     ):
         raise ValueError("STATE_RECEIPT_URL")
-    fields = ("fetch_started_at", "headers_received_at", "collector_received_at", "raw_saved_at")
-    if any(not isinstance(receipt.get(k), str) for k in fields):
-        raise ValueError("STATE_RECEIPT_TIME")
-    times = [stamp(receipt[k]) for k in fields]
-    if times != sorted(times) or times[-1] > now:
-        raise ValueError("STATE_RECEIPT_TIME")
-    return identity([receipt["url"], times[0]])
+    return identity([receipt["url"], started])
 
 
 class StateEvidence:
     # Fixed subclasses may share the observation/publication timeline, but use
     # separate tables and parsers so result evidence never enters odds state.
     table_prefix = "race_state"
+    scope_key = "race_id"
     receipt_path = "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
     version = VERSION
     parser = staticmethod(parse_state_page)
 
     def __init__(self, store):
         self.store = store
-        store.db.executescript(SCHEMA.replace("race_state", self.table_prefix))
+        store.db.executescript(SCHEMA.replace("race_state", self.table_prefix).replace("race_id", self.scope_key))
+
+    def validate(self, receipt, raw, scope, now):
+        return validate_receipt(receipt, raw, scope, now, self.receipt_path)
+
+    def verify_parsed(self, parsed, receipt):
+        if parsed["venue_code"] != parse_qs(urlsplit(receipt["url"]).query)["k_babaCode"][0]:
+            raise ValueError("STATE_VENUE_CODE")
 
     def published(self, parse_id):
         row = self.store.db.execute(f"SELECT * FROM {self.table_prefix}_parses WHERE id=?", (parse_id,)).fetchone()
@@ -324,10 +338,10 @@ class StateEvidence:
         version = version or self.version
         parser = parser or self.parser
         now = stamp(self.store.clock())
-        event = validate_receipt(receipt, raw, race_id, now, self.receipt_path)
+        event = self.validate(receipt, raw, race_id, now)
         digest, receipt_hash = sha(raw), identity(receipt)
         old = self.store.db.execute(f"SELECT * FROM {self.table_prefix}_observations WHERE id=?", (event,)).fetchone()
-        if old and (old["receipt_hash"] != receipt_hash or old["race_id"] != race_id):
+        if old and (old["receipt_hash"] != receipt_hash or old[self.scope_key] != race_id):
             raise ValueError("STATE_EVENT_CONFLICT")
         parse_id = identity([event, version])
         existing = self.store.db.execute(
@@ -348,7 +362,7 @@ class StateEvidence:
         registered = self.store.db.execute(
             f"SELECT * FROM {self.table_prefix}_observations WHERE id=?", (event,)
         ).fetchone()
-        if registered["receipt_hash"] != receipt_hash or registered["race_id"] != race_id:
+        if registered["receipt_hash"] != receipt_hash or registered[self.scope_key] != race_id:
             raise ValueError("STATE_EVENT_CONFLICT")
         report = {
             "id": parse_id,
@@ -356,17 +370,16 @@ class StateEvidence:
             "version": version,
             "raw_hash": digest,
             "receipt_hash": receipt_hash,
-            "race_id": race_id,
+            self.scope_key: race_id,
             "received_at": stamp(receipt["collector_received_at"]),
             "paper_eligible": False,
             "status": "OBSERVED_UNQUALIFIED",
         }
         try:
             parsed = parser(raw, race_id)
-            if parsed["venue_code"] != parse_qs(urlsplit(receipt["url"]).query)["k_babaCode"][0]:
-                raise ValueError("STATE_VENUE_CODE")
+            self.verify_parsed(parsed, receipt)
             report.update(parsed)
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, csv.Error):
             report.update(status="QUARANTINED", reason="STATE_PAGE_UNQUALIFIED")
         parsed_at = stamp(self.store.clock())
         if parsed_at < saved_at:
@@ -385,7 +398,7 @@ class StateEvidence:
         row = self.store.db.execute(
             f"""SELECT p.report_hash,p.available_at FROM {self.table_prefix}_parses p
             JOIN {self.table_prefix}_observations o ON o.id=p.observation_id
-            WHERE o.race_id=? AND p.available_at<=?
+            WHERE o.{self.scope_key}=? AND p.available_at<=?
             ORDER BY o.received_at DESC,p.available_at DESC,p.id DESC LIMIT 1""",
             (race_id, at),
         ).fetchone()
@@ -398,7 +411,7 @@ class StateEvidence:
             else None
         )
         return {
-            "race_id": race_id,
+            self.scope_key: race_id,
             "asof_at": at,
             "evidence": evidence,
             "age_seconds": seconds(at, evidence["received_at"]) if evidence else None,
@@ -409,12 +422,12 @@ class StateEvidence:
         rows = self.store.db.execute(
             f"""SELECT p.report_hash,p.available_at FROM {self.table_prefix}_parses p
             JOIN {self.table_prefix}_observations o ON o.id=p.observation_id
-            WHERE o.race_id=? AND p.available_at<=?
+            WHERE o.{self.scope_key}=? AND p.available_at<=?
             ORDER BY o.received_at,p.available_at,p.id""",
             (race_id, at),
         ).fetchall()
         return {
-            "race_id": race_id,
+            self.scope_key: race_id,
             "asof_at": at,
             "history": [
                 {
