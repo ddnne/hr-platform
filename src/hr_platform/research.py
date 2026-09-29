@@ -82,7 +82,7 @@ def research_asof(store, race_id, schedule, config, analyzer=analyze):
             result = analyzer(content[config["target"]]["state"]["runners"], content, config)
             report["analysis"] = result
             if result["identification"]["status"] == "INCONSISTENT":
-                report.update(status="MODEL_ERROR", reason="INCONSISTENT")
+                report.update(status="REFERENCE_INCONSISTENT", reason="INCONSISTENT")
         except ModelError:
             report.update(status="MODEL_ERROR", reason="MODEL_ERROR")
     report["analyzed_at"] = stamp(store.clock())

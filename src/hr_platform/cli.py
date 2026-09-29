@@ -177,7 +177,9 @@ def main(argv=None):
         store = Store(root)
         result = run(args, store)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if result["status"] in {"QUARANTINED", "ERROR", "NO_COMPATIBLE_RACE", "MODEL_ERROR", "MISMATCH"} else 0
+        return 1 if result["status"] in {
+            "QUARANTINED", "ERROR", "NO_COMPATIBLE_RACE", "MODEL_ERROR", "MISMATCH", "REFERENCE_INCONSISTENT"
+        } else 0
     except (
         ValueError,
         TypeError,
