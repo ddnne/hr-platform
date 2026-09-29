@@ -29,6 +29,7 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  if(sql.startsWith('SELECT etag')) return {first:async()=>{const value=await statement.first();Date.now=()=>t+120001;return value;}};
  return statement;}}}:env;
  if(u.searchParams.get('expired')==='true') Date.now=()=>t+120001;
+ if(u.searchParams.has('now')) Date.now=()=>Number(u.searchParams.get('now'));
  try{await production.scheduled({scheduledTime:t},bindings);}finally{Date.now=originalNow;}
  return new Response('ok');}
  if(u.pathname==='/sample-check') return Response.json(sampleSlotAllowed(u.searchParams.get('plan'),Number(u.searchParams.get('t')),Number(u.searchParams.get('now'))));
@@ -259,5 +260,35 @@ test('expired approved slot repairs stored manifest without another request',asy
   assert.equal(r.requests.length,1);
   assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'RAW_STORED');
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('Cron second offsets share one planned minute and keep actual receipt clocks',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ const r=await runtime([{body:zip}],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start])});
+ try{
+  const scheduled=async(t,now)=>r.mf.dispatchFetch(`http://local/scheduled?t=${t}&now=${now}`);
+  await scheduled(start-1,start+57_000);
+  await scheduled(start+60_000,start+61_000);
+  await scheduled(start+56_000,start+55_999);
+  assert.equal(r.requests.length,0);
+  await scheduled(start+56_000,start+57_000);
+  await scheduled(start+58_000,start+59_000);
+  assert.equal(r.requests.length,1);
+  const row=await r.db.prepare('SELECT * FROM captures').first();
+  assert.equal(row.event_id,`nar-daily-odds:${start}`);
+  assert.equal(row.scheduled_capture_at,new Date(start).toISOString());
+  assert.equal(row.fetch_started_at,new Date(start+57_000).toISOString());
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('Cron offset does not extend the planned minute deadline',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ const r=await runtime([],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start])});
+ try{
+  await r.mf.dispatchFetch(`http://local/scheduled?t=${start+56_000}&now=${start+120001}`);
+  assert.equal(r.requests.length,0);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM captures').first()).n,0);
  }finally{await r.mf.dispose();}
 });
