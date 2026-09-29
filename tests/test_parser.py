@@ -48,3 +48,16 @@ def test_schema_encoding_duplicates_and_limits():
 def test_correct_header_cp932_and_unordered():
     raw = rewrite(f.archive(), lambda b: b.decode("utf-8-sig").encode("cp932"))
     assert "1-2" in parse_odds(raw, {}, "cp932")[f.RACE]["markets"]["quinella"]["quotes"]
+
+
+def test_grouped_stream_matches_full_parser_but_rejects_split_race_blocks():
+    from hr_platform.parser import iter_odds_races
+
+    rows = next(iter(unzip(f.archive()).values())).splitlines(keepends=True)
+    second = [line.replace(b'SYNTHETIC', b'SYNTHETIC_TWO') for line in rows[1:]]
+    raw = rewrite(f.archive(), lambda _: b''.join(rows + second))
+    assert dict(iter_odds_races(raw, {})) == parse_odds(raw, {})
+    split = rewrite(f.archive(), lambda _: b''.join(rows[:2] + second + rows[2:]))
+    assert len(parse_odds(split, {})) == 2
+    with pytest.raises(ValueError, match='NONCONTIGUOUS_RACE'):
+        dict(iter_odds_races(split, {}))

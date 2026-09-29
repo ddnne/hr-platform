@@ -14,6 +14,7 @@ import time
 import uuid
 from .common import canonical, identity, sha, stamp, seconds, utcnow, instant
 from .parser import parse_odds, VERSION
+from .history import asof_view
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -286,20 +287,14 @@ class Store:
         return result
 
     def asof(self, race_id, markets, at, max_age=300):
-        selected = {}
-        for market in markets:
-            candidates = [
-                x for x in self.history(race_id, market, at) if x["event"]["dataset_kind"] != "FINAL_ONLY"
-            ]
-            if candidates:
-                # New observation dominates reparse of an older observation.
-                item = max(candidates, key=lambda x: (x["received_at"], x["available_at"], x["parse_id"]))
-                item["age_seconds"] = seconds(at, item["received_at"])
-                selected[market] = item
-        reason = "DATA_MISSING" if len(selected) != len(markets) else None
-        if any(x["age_seconds"] < 0 or x["age_seconds"] > max_age for x in selected.values()):
-            reason = "STALE"
-        return {"asof_at": stamp(at), "markets": selected, "reason": reason, "gaps": self.gaps(at)}
+        revisions = {}
+        for row in self.db.execute("""SELECT observation_id,id FROM parses WHERE available_at<=?
+                ORDER BY available_at,id""", (stamp(at),)):
+            revisions[row["observation_id"]] = row["id"]
+        histories = {h: [x for x in self.history(race_id, h, at)
+                         if revisions.get(x["observation_id"]) == x["parse_id"]] for h in markets}
+        return asof_view(histories,
+                         markets, at, max_age, self.gaps(at))
 
     def latest(self, race_id, market):
         rows = self.history(race_id, market)

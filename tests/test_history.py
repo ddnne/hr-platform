@@ -116,6 +116,26 @@ def test_later_reparse_does_not_replace_newer_observation(store):
     )
 
 
+@pytest.mark.parametrize('remove', ['market', 'race'])
+def test_reparse_removal_does_not_resurrect_old_market_or_race(store, remove):
+    store.ingest(f.event('a', 0), f.archive())
+    before = store.asof(f.RACE, ['win', 'quinella'], f.at(3))
+    def corrected(*args):
+        races = parse_odds(*args)
+        if remove == 'market':
+            del races[f.RACE]['markets']['quinella']
+        else:
+            del races[f.RACE]
+        return races
+    store.clock = lambda: f.at(4)
+    store.reparse('a', 'synthetic-correction', corrected)
+    assert store.asof(f.RACE, ['win', 'quinella'], f.at(3)) == before
+    after = store.asof(f.RACE, ['win', 'quinella'], f.at(4))
+    assert after['reason'] == 'DATA_MISSING' and 'quinella' not in after['markets']
+    if remove == 'race':
+        assert not after['markets']
+
+
 def test_retry_never_erases_original_missing_slot(store):
     store.plan([f.at(0)])
     store.ingest(f.event("failure", 0, 503))

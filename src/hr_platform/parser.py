@@ -102,19 +102,19 @@ def number(value):
     return result if math.isfinite(result) and result >= 1 else None
 
 
-def parse_odds(raw, race_states, encoding="utf-8-sig"):
+def odds_rows(raw, race_states, encoding="utf-8-sig"):
     if encoding not in {"utf-8-sig", "cp932"}:
         raise ValueError("ENCODING_UNQUALIFIED")
     files = unzip(raw)
     odds_files = [v for k, v in files.items() if k.endswith("_odds.csv")]
     if len(odds_files) != 1 or len(files) != 1:
         raise ValueError("ODDS_FILE_COUNT")
-    reader = csv.reader(io.StringIO(odds_files[0].decode(encoding, errors="strict")))
+    reader = csv.reader(io.TextIOWrapper(io.BytesIO(odds_files[0]), encoding=encoding, errors="strict", newline=""))
     if next(reader, None) != HEADERS:
         raise ValueError("SCHEMA_CHANGED")
-    races = {}
-    seen = set()
+    any_rows = False
     for row in reader:
+        any_rows = True
         if len(row) != len(HEADERS):
             raise ValueError("SCHEMA_ROW_WIDTH")
         venue, date, race_no, label, *rest = row
@@ -130,9 +130,6 @@ def parse_odds(raw, race_states, encoding="utf-8-sig"):
         if market in UNORDERED:
             selection = tuple(sorted(selection))
         key = "-".join(str(x) for x in selection)
-        if (race_id, market, key) in seen:
-            raise ValueError("DUPLICATE_SELECTION_NOT_HISTORY")
-        seen.add((race_id, market, key))
         state = race_states.get(race_id)
         if state is None:
             # Retain odds but never infer active runners or pre-race status from odds.
@@ -143,10 +140,8 @@ def parse_odds(raw, race_states, encoding="utf-8-sig"):
                 "runners": [],
                 "discipline": "UNKNOWN",
             }
-        race = races.setdefault(race_id, {"state": state, "markets": {}})
-        quotes = race["markets"].setdefault(market, {"source_updated_at": None, "quotes": {}})
         price, maximum = number(rest[3]), number(rest[4])
-        quotes["quotes"][key] = {
+        quote = {
             "odds": price,
             "odds_max": maximum,
             "display_status": "FIXED"
@@ -158,6 +153,42 @@ def parse_odds(raw, race_states, encoding="utf-8-sig"):
             "raw_max": rest[4],
             "popularity": rest[5] or None,
         }
-    if not races:
+        yield race_id, state, market, key, quote
+    if not any_rows:
         raise ValueError("EMPTY_ODDS")
+
+
+def add_quote(race, market, key, quote):
+    quotes = race["markets"].setdefault(market, {"source_updated_at": None, "quotes": {}})["quotes"]
+    if key in quotes:
+        raise ValueError("DUPLICATE_SELECTION_NOT_HISTORY")
+    quotes[key] = quote
+
+
+def parse_odds(raw, race_states, encoding="utf-8-sig"):
+    races = {}
+    for race_id, state, market, key, quote in odds_rows(raw, race_states, encoding):
+        race = races.setdefault(race_id, {"state": state, "markets": {}})
+        add_quote(race, market, key, quote)
     return races
+
+
+def iter_odds_races(raw, race_states, encoding="utf-8-sig"):
+    """Bound memory by one race. Non-contiguous race blocks are unqualified.
+
+    Cloud publication happens only after this iterator is fully consumed, so
+    malformed later rows never expose an incomplete archive as available.
+    """
+    from itertools import groupby
+
+    seen = set()
+    for race_id, rows in groupby(odds_rows(raw, race_states, encoding), key=lambda row: row[0]):
+        if race_id in seen:
+            raise ValueError("NONCONTIGUOUS_RACE")
+        seen.add(race_id)
+        race = None
+        for _, state, market, key, quote in rows:
+            if race is None:
+                race = {"state": state, "markets": {}}
+            add_quote(race, market, key, quote)
+        yield race_id, race

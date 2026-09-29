@@ -138,24 +138,35 @@ def test_actual_solver_failure_has_static_response_without_warning(config, capsy
     assert not recwarn
 
 
-def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize('with_storage', [False, True])
+def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(tmp_path, monkeypatch, with_storage):
     path = Path("scripts/prepare_python_worker.py").resolve()
     spec = importlib.util.spec_from_file_location("prepare_python_worker", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     root = tmp_path / "stage"
     monkeypatch.setattr(module, "private_root", lambda _: root)
-    assert module.prepare("ignored-test") == root
+    assert module.prepare("ignored-test", with_storage) == root
     assert {p.relative_to(root / "src").as_posix() for p in (root / "src").rglob("*") if p.is_file()} == {
         "entry.py",
         "hr_platform/__init__.py",
         "hr_platform/model.py",
         "hr_platform/cloud_model.py",
+        "hr_platform/cloud_history.py",
+        "hr_platform/history.py",
+        "hr_platform/common.py",
+        "hr_platform/parser.py",
     }
     assert (root / "src/hr_platform/model.py").read_bytes() == Path("src/hr_platform/model.py").read_bytes()
     config = json.loads((root / "wrangler.jsonc").read_text())
     assert not config["workers_dev"] and not config["preview_urls"] and config["triggers"]["crons"] == []
-    assert not {"r2_buckets", "d1_databases", "services"} & config.keys()
+    assert 'services' not in config
+    if with_storage:
+        actual = json.loads(Path('wrangler.jsonc').read_text())
+        assert config['r2_buckets'] == actual['r2_buckets']
+        assert config['d1_databases'][0]['database_id'] == actual['d1_databases'][0]['database_id']
+    else:
+        assert not {'r2_buckets', 'd1_databases'} & config.keys()
     assert config["python_modules"]["exclude"] == ["**/*.pyc", "**/tests/**", "**/*.pyi"]
     with pytest.raises(ValueError, match="FRESH_BUILD"):
         module.prepare("ignored-test")
