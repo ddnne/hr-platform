@@ -34,7 +34,8 @@ def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", hors
             writer = csv.DictWriter(text, headers)
             writer.writeheader()
             writer.writerows(rows)
-            z.writestr(f"20000101_{suffix}.csv", text.getvalue().encode(encoding))
+            entry = zipfile.ZipInfo(f"20000101_{suffix}.csv", (2000, 1, 1, 0, 0, 0))
+            z.writestr(entry, text.getvalue().encode(encoding))
     return output.getvalue()
 
 

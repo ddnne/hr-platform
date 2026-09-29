@@ -137,6 +137,10 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                 if str(exc) in {"INCOMPLETE_MARKET", "UNUSABLE_ODDS", "REFERENCE_MISSING"}
                 else "MODEL_ERROR"
             )
+        except Exception:
+            # Unexpected solver/model failures consume this fixed decision as a
+            # no-bet too. They must not leave it open for a later price retry.
+            reason = "MODEL_ERROR"
     completed = stamp(clock())
     # Recheck deadline after computation, never present start time as completion.
     after_reason = eligibility(view, config, schedule, completed)

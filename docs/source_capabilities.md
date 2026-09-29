@@ -34,7 +34,7 @@ robotsは申請制度や認可そのものではない（[RFC 9309 §1](https://
 | CloudflareからNARへの直接取得 | 失敗2件、成功ZIP/観測0件。収集false、空枠、Cronなし、公開URL/previewなしで停止中。Mac原本のクラウド取込み・解析実績はstatusへ別記 |
 | 公開境界 | 原本・実データ・詳細出力・台帳・SecretsをGit/CI/PRに出さない |
 
-Macでは承認済みの有限サンプル経路を使用し、Cloudflareの停止状態を変えない。ローカルの要求は `collect-sample` に集約し、同じprivate rootで間隔・停止状態を共有する。リダイレクトや自動再試行は行わず、拒否・CAPTCHAで停止、429はRetry-After以上待機する。未取得期間を後の断面で埋めない。[実データ手順](real_data_runbook.md)
+Macでは承認済みの有限サンプル経路を使用し、Cloudflareの停止状態を変えない。`collect-sample`と`paper-session`は同じ取得処理を使い、同じprivate rootで間隔・停止状態を共有する。リダイレクトや自動再試行は行わず、拒否・CAPTCHAで停止、429はRetry-After以上待機する。未取得期間を後の断面で埋めない。[実データ手順](real_data_runbook.md)
 
 ## 状態・払戻の実物確認
 
