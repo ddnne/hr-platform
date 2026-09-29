@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 from .common import canonical, identity, sha, stamp, seconds
 
-VERSION = "nar-odds-page-state-v3"
+VERSION = "nar-odds-page-state-v4"
 MAX_BYTES = 2 * 1024 * 1024
 HEADERS = [
     "枠",
@@ -91,7 +91,13 @@ class OddsPage(HTMLParser):
         frame_cell = (
             self.inside and self.row == [] and (tag == "td" or self.cell and self.cell["tag"] == "td")
         )
-        current_link = tag == "a" and {"cNaviBtn", "live"}.issubset(attrs.get("class", "").split())
+        # "live" also marks the unrelated video link. Identify the selected
+        # odds tab by its path; validate its origin and race below.
+        current_link = (
+            tag == "a"
+            and {"cNaviBtn", "live"}.issubset(attrs.get("class", "").split())
+            and urlsplit(attrs.get("href", "")).path == "/KeibaWeb/TodayRaceInfo/OddsTanFuku"
+        )
         protected = (
             tag == "h4"
             or self.heading is not None
@@ -201,6 +207,7 @@ def parse_state_page(raw, race_id):
     if len(headings) != 1:
         raise ValueError("STATE_ODDS_HEADING")
     final = headings[0] == "単勝・複勝オッズ(最終)"
+    clock = re.fullmatch(r"単勝・複勝オッズ\(((?:[01][0-9]|2[0-3]):[0-5][0-9])現在\)", headings[0])
     header = page.rows[0]
     labels = [compact(c["text"]) for c in header]
     if (
@@ -237,8 +244,11 @@ def parse_state_page(raw, race_id):
         "venue_code": query["k_babaCode"][0],
         "scheduled_start_at": identities[0][1],
         "odds_heading": headings[0],
-        "odds_stage": "FINAL_DISPLAYED" if final else "UNKNOWN",
-        "reason": "FINAL_ODDS_DISPLAYED" if final else "ODDS_STAGE_UNQUALIFIED",
+        "odds_stage": "FINAL_DISPLAYED" if final else "CLOCK_DISPLAYED" if clock else "UNKNOWN",
+        "reason": "FINAL_ODDS_DISPLAYED" if final else "DISPLAY_DATE_UNQUALIFIED" if clock else "ODDS_STAGE_UNQUALIFIED",
+        # The heading contains a time of day, not an unambiguous update date.
+        # Neither the race date nor the receipt date establishes that date.
+        "displayed_time_of_day": clock[1] if clock else None,
         "runners": runners,
         "source_updated_at": None,
         "pre_race_evidence": None,
