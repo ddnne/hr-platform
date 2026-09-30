@@ -10,9 +10,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "triggers": {
-    "crons": [
-      "* * * * *"
-    ]
+    "crons": []
   },
   "observability": {
     "enabled": true,
@@ -22,7 +20,7 @@
     "cpu_ms": 10000
   },
   "vars": {
-    "ARCHIVE_ENABLED": "true",
+    "ARCHIVE_ENABLED": "false",
     "BACKFILL_DAYS": "7305",
     "ARCHIVE_MIN_INTERVAL_MS": "60000",
     "ARCHIVE_SLOT_WINDOW_MS": "120000",
