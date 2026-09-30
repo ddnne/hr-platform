@@ -22,6 +22,7 @@ INTERVAL = 120
 FORMAT = "nar-finite-local-v1"
 ZIP_URLS = {k: "https://www.keiba.go.jp/KeibaWeb/DataDownload/" + v + "?type=daily"
             for k, v in {"odds": "OddsDataDownload", "race": "RaceDataDownload"}.items()}
+ZIP_KINDS = {*ZIP_URLS, "monthly_odds"}
 PAGE_PATHS = {"state": "/KeibaWeb/TodayRaceInfo/OddsTanFuku",
               "payout": "/KeibaWeb/TodayRaceInfo/RaceMarkTable"}
 HEADERS = ("Content-Type", "Date", "Retry-After", "cf-mitigated", "Content-Disposition")
@@ -58,6 +59,14 @@ def validate_plan(plan):
             if item["url"] != ZIP_URLS[kind] or not re.fullmatch(r"\d{8}", item["scope"]):
                 raise ValueError("SAMPLE_URL")
             datetime.strptime(item["scope"], "%Y%m%d")
+        elif kind == "monthly_odds":
+            if not re.fullmatch(r"\d{6}", item["scope"]):
+                raise ValueError("SAMPLE_MONTH")
+            month = datetime.strptime(item["scope"], "%Y%m")
+            expected = (ZIP_URLS["odds"].split("?")[0]
+                        + f"?type=monthly&k_year={month.year}&k_month={month.month}")
+            if item["url"] != expected:
+                raise ValueError("SAMPLE_URL")
         elif kind in PAGE_PATHS:
             validate_page_url(item["url"], item["scope"], PAGE_PATHS[kind])
         else:
@@ -83,7 +92,7 @@ def open_response(item):
     enabled()
     request = urllib.request.Request(item["url"], headers={
         "User-Agent": "hr-platform-personal-research/0.1",
-        "Accept": "application/zip" if item["kind"] in ZIP_URLS else "text/html",
+        "Accept": "application/zip" if item["kind"] in ZIP_KINDS else "text/html",
     })
     try:
         return urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
@@ -164,10 +173,22 @@ class Samples:
                 return {"status": "INCOMPLETE_ATTEMPT_STOP"}
             if control["stopped"]:
                 return {"status": "SOURCE_STOPPED"}
-            if now < stamp(item["at"]) or control["next_at"] and now < control["next_at"]:
-                return {"status": "WAIT", "next_at": max(stamp(item["at"]), control["next_at"] or "")}
             if now >= stamp(item["until"]):
                 return {"status": "SAMPLE_WINDOW_EXPIRED"}
+            if item["kind"] == "monthly_odds":
+                # At most one monthly request per day, including failed attempts.
+                # The previous window's end bounds the actual request time.
+                previous = self.store.db.execute("""SELECT body FROM sample_requests
+                    WHERE json_extract(body,'$.kind')='monthly_odds'
+                    ORDER BY julianday(json_extract(body,'$.until')) DESC LIMIT 1""").fetchone()
+                if previous:
+                    next_monthly = stamp((instant(json.loads(previous[0])["until"])
+                                          + timedelta(days=1)).isoformat())
+                    if now < next_monthly:
+                        return {"status": "WAIT", "next_at": max(next_monthly, stamp(item["at"]),
+                                                                  control["next_at"] or "")}
+            if now < stamp(item["at"]) or control["next_at"] and now < control["next_at"]:
+                return {"status": "WAIT", "next_at": max(stamp(item["at"]), control["next_at"] or "")}
             self.store.db.execute("INSERT INTO sample_requests VALUES(?,?,?,NULL)",
                                   (key, plan_id, canonical(item).decode()))
             return {"status": "RESERVED", "reserved_at": now}
@@ -192,7 +213,7 @@ class Samples:
                 self.control(stop=True)
             if status == 429:
                 self.control(next_at=after(receipt["headers_received_at"], headers["Retry-After"]))
-            limit = (MAX_COMPRESSED if item["kind"] in ZIP_URLS else MAX_BYTES) if status == 200 else 8192
+            limit = (MAX_COMPRESSED if item["kind"] in ZIP_KINDS else MAX_BYTES) if status == 200 else 8192
             chunks, size = [], 0
             while size <= limit:
                 if time.monotonic() - begin > 30:
@@ -215,8 +236,10 @@ class Samples:
                 receipt["outcome"] = "BODY_LIMIT"
             elif status == 429:
                 receipt["outcome"] = "RATE_LIMITED"
-            elif item["kind"] in ZIP_URLS:
-                match = re.search(r"(\d{8}_\d{10}_" + item["kind"] + r"\.zip)", headers["Content-Disposition"] or "")
+            elif item["kind"] in ZIP_KINDS:
+                suffix = "odds" if item["kind"] == "monthly_odds" else item["kind"]
+                match = re.search(r"(\d{" + str(len(item["scope"])) + r"}_\d{10}_" + suffix + r"\.zip)",
+                                  headers["Content-Disposition"] or "")
                 receipt["filename"] = match[1] if match else None
                 receipt["accepted"] = bool(match and match[1].startswith(item["scope"] + "_") and raw.startswith(b"PK\x03\x04"))
                 receipt["outcome"] = "RAW_STORED" if receipt["accepted"] else "BODY_UNQUALIFIED"
@@ -270,6 +293,15 @@ class Samples:
             if not receipt["accepted"]:
                 return result
             report = dict(self.store.db.execute("SELECT * FROM parses WHERE id=?", (parsed,)).fetchone())
+        elif item["kind"] == "monthly_odds":
+            if not receipt["accepted"]:
+                return result
+            from .realdata import RealData
+
+            # Monthly finals are inspected assets, never live odds observations.
+            report = RealData(self.store).inspect(raw, receipt["filename"], "FINAL_ONLY", "utf-8-sig")
+            return {**result, "status": "QUARANTINED" if report["status"] == "QUARANTINED" else "INSPECTED",
+                    "inspection": report}
         else:
             if not receipt["accepted"]:
                 return result

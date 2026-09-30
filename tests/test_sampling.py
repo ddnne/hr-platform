@@ -80,6 +80,82 @@ def test_capture_replay_same_body_future_change_history_and_reopen(store):
     reopened.close()
 
 
+def monthly_plan(minute=4):
+    return {"format": FORMAT, "requests": [{
+        "id": "monthly", "kind": "monthly_odds", "scope": "200001",
+        "url": ZIP_URLS["odds"].replace("type=daily", "type=monthly&k_year=2000&k_month=1"),
+        "at": f.at(minute), "until": f.at(minute, 90)}]}
+
+
+def test_monthly_inspection_is_separate_replayable_and_shares_limits(store):
+    calls = []
+    def opener(item):
+        calls.append(item)
+        filename = "200001_0946706400_odds.zip" if item["kind"] == "monthly_odds" else "20000101_0946706400_odds.zip"
+        return Response(headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    samples = Samples(store, opener)
+    monthly = monthly_plan()
+    samples.register(monthly)
+    daily = plan(("odds",), (5,))
+    samples.register(daily)
+    store.clock = lambda: f.at(4)
+    captured = samples.capture(monthly, "monthly")
+    assert captured["status"] == "INSPECTED"
+    assert captured["inspection"]["recipe"]["dataset_kind"] == "FINAL_ONLY"
+    assert not captured["inspection"]["paper_eligible"]
+    assert captured["inspection"]["source_updated_at"] is None
+    assert samples.capture(monthly, "monthly") == captured
+    assert store.metrics()["observations"] == 0
+    assert not store.history(f.RACE, "quinella")
+    store.clock = lambda: f.at(5)
+    assert samples.capture(daily, "sample-0")["status"] == "WAIT"
+    store.clock = lambda: f.at(6)
+    assert samples.capture(daily, "sample-0")["status"] == "PARSED"
+    later = monthly_plan(8)
+    samples.register(later)
+    store.clock = lambda: f.at(8)
+    assert samples.capture(later, "monthly")["next_at"] == stamp(f.at(1445, 30))
+    store.clock = lambda: f.at(10)
+    assert samples.capture(later, "monthly")["status"] == "SAMPLE_WINDOW_EXPIRED"
+    tomorrow = monthly_plan(1446)
+    samples.register(tomorrow)
+    store.clock = lambda: f.at(1446)
+    assert samples.capture(tomorrow, "monthly")["status"] == "INSPECTED"
+    assert len(calls) == 3 and store.metrics()["observations"] == 1
+    assert store.db.execute("SELECT count(*) FROM asset_inspections").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("scope", "200013"), ("scope", "20000101"), ("scope", "199912"),
+    ("url", ZIP_URLS["odds"]), ("url", "https://other.example/monthly"),
+])
+def test_monthly_scope_and_route_are_explicit(field, value):
+    p = monthly_plan()
+    p["requests"][0][field] = value
+    with pytest.raises(ValueError):
+        validate_plan(p)
+
+
+@pytest.mark.parametrize("status,filename,expected", [
+    (403, "200001_0946706400_odds.zip", "SOURCE_DENIED"),
+    (200, "199912_0946706400_odds.zip", "BODY_UNQUALIFIED"),
+    (200, "20000101_0946706400_odds.zip", "BODY_UNQUALIFIED"),
+])
+def test_monthly_failure_retains_receipt_and_stops_daily(store, status, filename, expected):
+    samples = Samples(store, lambda _: Response(status=status, headers={"Content-Disposition": filename}))
+    p = monthly_plan()
+    daily = plan(("odds",), (8,))
+    samples.register(p)
+    samples.register(daily)
+    store.clock = lambda: f.at(4)
+    result = samples.capture(p, "monthly")
+    assert result["status"] == expected
+    assert samples.capture(p, "monthly") == result
+    store.clock = lambda: f.at(8)
+    assert samples.capture(daily, "sample-0")["status"] == "SOURCE_STOPPED"
+    assert store.metrics()["observations"] == 0
+
+
 @pytest.mark.parametrize("status,body,headers,expected", [
     (403, b"denied", {}, "SOURCE_DENIED"), (404, b"missing", {}, "SOURCE_DENIED"),
     (302, b"redirect", {"Location": "https://other.example/"}, "SOURCE_DENIED"),
