@@ -8,9 +8,8 @@ market synchronization or a sales channel deadline. Unknown update times stay nu
 """
 
 from copy import deepcopy
-from datetime import timedelta
 import json
-from .common import canonical, identity, instant, seconds, stamp
+from .common import canonical, identity, paper_asof, seconds, stamp
 from .race_metadata import MetadataEvidence
 from .race_state import StateEvidence
 
@@ -38,11 +37,6 @@ def configuration(base):
 def validate_policy(config):
     if config["mode"] != "EXPLORATORY_SHADOW" or config.get("input_policy") != POLICY:
         raise ValueError("PROSPECTIVE_POLICY")
-
-
-def cutoff(schedule, config):
-    return stamp((instant(schedule["scheduled_start_at"])
-                  - timedelta(seconds=config["asof_before_start_seconds"])).isoformat())
 
 
 def metadata_reason(race_id, evidence):
@@ -105,7 +99,7 @@ def register_plan(store, race_id, config):
         return old
     schedule = {"version": identity([race_id, start]), "scheduled_start_at": start,
                 "known_at": evidence["available_at"], "sales_close_at": None}
-    at = cutoff(schedule, config)
+    at = paper_asof(schedule, config, race_id)
     if not old and now >= at:
         raise ValueError("PROSPECTIVE_ENROLLMENT_TOO_LATE")
     revision = identity([key, evidence["id"], schedule])

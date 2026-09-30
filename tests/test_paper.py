@@ -72,9 +72,22 @@ def test_model_failure_keeps_collection(collected, config):
 
 
 def test_late_completion(collected, config):
-    moments = iter([f.at(4, 10), f.at(7)])
+    moments = iter([f.at(4, 10), f.at(4, 20), f.at(7)])
     records = decide(collected, f.RACE, f.schedule(), config, clock=lambda: next(moments))
     assert all(d["reason"] == "DECISION_TOO_LATE" for d in records)
+    assert all(d["model_completed_at"] < d["decision_at"] for d in records)
+
+
+def test_lock_wait_counts_toward_decision_deadline(collected, config):
+    now = [f.at(4, 20)]
+    def delayed_lock(sql):
+        if sql == "BEGIN IMMEDIATE":
+            now[0] = f.at(7)
+    collected.db.set_trace_callback(delayed_lock)
+    records = decide(collected, f.RACE, f.schedule(), config, clock=lambda: now[0])
+    collected.db.set_trace_callback(None)
+    assert all(d["reason"] == "DECISION_TOO_LATE" and d["stake_yen"] == 0 for d in records)
+    assert all(d["model_completed_at"] < d["decision_at"] for d in records)
 
 
 def test_settlement_pending_dead_heat_refund_void_corrections(collected, config):

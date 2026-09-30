@@ -1,8 +1,10 @@
 from copy import deepcopy
 import json
+from pathlib import Path
 import pytest
+import yaml
 from hr_platform import fixtures as f
-from hr_platform.common import canonical, sha, stamp
+from hr_platform.common import canonical, paper_asof, sha, stamp
 from hr_platform.paper import decide
 from hr_platform.prospective import POLICY, SCHEMA, build_view, configuration, current_plan, enroll, tick
 from hr_platform.race_metadata import MetadataEvidence
@@ -136,6 +138,39 @@ def test_all_three_models_use_same_derived_input_and_keep_raw_facts(planned):
     reopened = Store(store.root, clock=lambda: f.at(4, 30))
     assert tick(reopened, plan["id"])["decisions"] == records
     reopened.close()
+
+
+@pytest.mark.parametrize("offset,completion", [(180, 20), (120, 20), (120, 31)])
+def test_near_close_keeps_fixed_input_and_checks_completion(planned, offset, completion):
+    store, old_plan = planned
+    old_decisions = tick(store, old_plan["id"])["decisions"]
+    base = yaml.safe_load(Path("configs/research-shadow-near-close.yaml").read_text())
+    for venue in ("浦和", "船橋", "大井", "川崎"):
+        assert paper_asof(f.schedule(), base, f"20000101:{venue}:1") == stamp(f.at(12))
+    assert paper_asof(f.schedule(), base, "20000101:門別:1") == stamp(f.at(11))
+    if offset == 120:
+        base["asof_before_start_seconds_by_venue"]["SYNTHETIC"] = offset
+    plan = enroll(store, f.RACE, base)
+    minute = 14 - offset // 60
+    assert plan["asof_at"] == stamp(f.at(minute))
+    assert plan["schedule"]["sales_close_at"] is None
+    metadata(store, 9)
+    state(store, 9, stage="14:09現在")
+    store.ingest(f.event("near-close-before", 9, race_states={}), f.archive())
+    store.clock = lambda: f.at(minute, 10)
+    store.ingest(f.event("near-close-after", minute, race_states={},
+                        fetch_started_at=f.at(minute, 5), collector_received_at=f.at(minute, 5),
+                        ingest_received_at=f.at(minute, 10)), f.archive("nonuniform"))
+    moments = iter([f.at(minute, 15), f.at(minute, 20), f.at(minute, completion)])
+    records = decide(store, f.RACE, plan["schedule"], plan["config"], clock=lambda: next(moments))
+    for record in records:
+        assert record["asof_at"] == plan["asof_at"]
+        assert {m["observation_id"] for m in record["input_view"]["markets"].values()} == {"near-close-before"}
+        assert record["status"] == ("PAPER_BET" if completion <= 30 else "NO_BET")
+        if completion > 30:
+            assert record["reason"] == "DECISION_TOO_LATE"
+    assert tick(store, old_plan["id"])["decisions"] == old_decisions
+    assert tick(store, plan["id"])["decisions"] == records
 
 
 @pytest.mark.parametrize("stage,change,reason", [
