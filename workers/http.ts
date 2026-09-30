@@ -10,11 +10,11 @@ export async function discard(response: Response): Promise<void> {
   try { await response.body?.cancel(); } catch { /* already errored/closed */ }
 }
 
-export function retryAfter(value: string | null, now: number): number {
-  if (value === null) return now + INTERVAL;
+export function retryAfter(value: string | null, now: number, minimumWait = INTERVAL): number {
+  if (value === null) return now + minimumWait;
   const seconds = /^\d+$/.test(value.trim()) ? Number(value) : NaN;
   const at = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(value);
-  return Number.isFinite(at) ? Math.max(now + INTERVAL, at) : now + INTERVAL;
+  return Number.isFinite(at) ? Math.max(now + minimumWait, at) : now + minimumWait;
 }
 
 export async function boundedBody(response: Response, maximum = 16 * 1024 * 1024): Promise<Uint8Array> {

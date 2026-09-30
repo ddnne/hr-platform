@@ -3,7 +3,22 @@ import {WorkerEntrypoint} from "cloudflare:workers";
 import {boundedBody, discard, fetchPublic, retryAfter} from "../http";
 
 const SOURCE = "keibaodds-history";
-const INTERVAL = 300_000;
+const MINUTE = 60_000, DAY = 24 * 60 * MINUTE, JST_OFFSET = 9 * 60 * MINUTE;
+function settings(env: ArchiveEnv) {
+  const positive = (key: keyof ArchiveEnv) => {
+    const value = Number(env[key]);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`ARCHIVE_CONFIG:${key}`);
+    return value;
+  };
+  const config = {
+    days: positive("BACKFILL_DAYS"), interval: positive("ARCHIVE_MIN_INTERVAL_MS"),
+    window: positive("ARCHIVE_SLOT_WINDOW_MS"), timeout: positive("ARCHIVE_REQUEST_TIMEOUT_MS"),
+    lease: positive("ARCHIVE_REQUEST_LEASE_MS"), retryWait: positive("ARCHIVE_RETRY_WAIT_MS"),
+    maximumBytes: positive("ARCHIVE_MAX_BODY_BYTES"), displayTimes: positive("ARCHIVE_DISPLAY_TIMES"),
+  };
+  if (config.lease < config.window + config.timeout) throw new Error("ARCHIVE_CONFIG:lease");
+  return config;
+}
 const iso = (n: number) => new Date(n).toISOString();
 const bets = ["tanpuku", "huku", "wakuhuku", "wakuren", "wide", "umaren", "umatan", "trio", "tierce"];
 type Job = {day: string; page: number};
@@ -12,22 +27,26 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export function archiveUrl(job: Job): string {
+export function archiveUrl(job: Job, displayTimes: number): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(job.day) || iso(Date.parse(job.day)).slice(0,10) !== job.day
       || !Number.isInteger(job.page) || job.page < 1 || job.page > 100) throw new Error("ARCHIVE_JOB");
-  return "https://keibaodds.com/odds?" + new URLSearchParams({page: String(job.page), display_times: "24",
+  return "https://keibaodds.com/odds?" + new URLSearchParams({page: String(job.page), display_times: String(displayTimes),
     race_kind: "nar", race_date: job.day, date_limit: "4", time: "00:00"});
 }
 
-export function inspectPage(value: unknown, job: Job) {
+export function inspectPage(value: unknown, job: Job, displayTimes: number) {
   const data = object(value), info = object(data.nar_info), total = data.total_count;
-  if (data.race_kind !== "nar" || data.race_type !== "NAR_TODAY" || data.race_date !== job.day
+  // A date with no listed races uses null instead of the usual race array.
+  const empty = job.page === 1 && data.race_type === null && total === 0 && info.race_info === null
+    && [info.races, info.date_info, info.track_info].every(v => Array.isArray(v) && v.length === 0);
+  const raceValues = empty ? [] : info.race_info;
+  if (data.race_kind !== "nar" || (!empty && data.race_type !== "NAR_TODAY") || data.race_date !== job.day
       || info.race_date !== job.day || typeof total !== "number" || !Number.isInteger(total)
-      || total < 0 || total > 200 || !Array.isArray(info.race_info)
-      || info.race_info.length !== Math.min(2, Math.max(0, total - (job.page - 1) * 2))) {
+      || total < 0 || total > 200 || !Array.isArray(raceValues)
+      || raceValues.length !== Math.min(2, Math.max(0, total - (job.page - 1) * 2))) {
     throw new Error("ARCHIVE_SCOPE_OR_PAGINATION");
   }
-  const races = info.race_info.map((value: unknown) => {
+  const races = raceValues.map((value: unknown) => {
     const race = object(value), identity = object(race.race_info), odds = object(race.odds_info);
     if (race.race_type !== "NAR" || identity.race_date !== job.day || typeof identity.track !== "string"
         || typeof identity.race !== "number" || !Number.isInteger(identity.race)
@@ -35,7 +54,7 @@ export function inspectPage(value: unknown, job: Job) {
     const clocks = object(odds.time_odds_times), pops = object(odds.time_pops);
     const markets = Object.fromEntries(bets.filter(bet => bet in clocks).map(bet => {
       const labels = clocks[bet];
-      if (!Array.isArray(labels) || labels.length > 24 || !labels.every(t => typeof t === "string")) {
+      if (!Array.isArray(labels) || labels.length > displayTimes || !labels.every(t => typeof t === "string")) {
         throw new Error("ARCHIVE_LABELS");
       }
       const rows = pops[bet];
@@ -51,43 +70,64 @@ export function inspectPage(value: unknown, job: Job) {
   });
   if (new Set(races.map(r => r.race_id)).size !== races.length) throw new Error("ARCHIVE_DUPLICATE_RACE");
   return {total_count: total, pages: Math.ceil(total / 2), races,
+    coverage_status: total === 0 ? "NO_RACES_RETURNED" : "RACES_RETURNED",
     dataset_kind: "HISTORICAL_ARCHIVE", paper_eligible: false,
     source_updated_at: null, historical_available_at: null,
     timing_uncertainty: ["CLOCK_ONLY_LABELS", "PUBLICATION_DELAY_UNKNOWN"]};
 }
 
-async function seed(env: ArchiveEnv, now: number) {
-  const count = Number(env.BACKFILL_DAYS);
-  if (!Number.isInteger(count) || count < 1 || count > 366) throw new Error("ARCHIVE_DAY_LIMIT");
-  const today = Date.parse(iso(now + 9 * 3600_000).slice(0,10));
-  await env.INDEX.batch(Array.from({length: count}, (_, i) =>
-    env.INDEX.prepare("INSERT OR IGNORE INTO archive_jobs(day,page) VALUES(?,1)")
-      .bind(iso(today - (i + 1) * 86400_000).slice(0,10))));
+async function seed(env: ArchiveEnv, now: number, count: number) {
+  const today = Date.parse(iso(now + JST_OFFSET).slice(0,10));
+  const oldest = iso(today - count * DAY).slice(0,10);
+  const newest = iso(today - DAY).slice(0,10);
+  // The seeder inserts the entire range atomically; completed dates are retained.
+  const existing = await env.INDEX.prepare("SELECT min(day) oldest,max(day) newest FROM archive_jobs WHERE page=1")
+    .first<{oldest: string | null; newest: string | null}>();
+  if (existing?.oldest && existing.newest && existing.oldest <= oldest && existing.newest >= newest) return;
+  await env.INDEX.batch([env.INDEX.prepare(`WITH RECURSIVE days(offset) AS (
+    SELECT 1 UNION ALL SELECT offset+1 FROM days WHERE offset<?)
+    INSERT OR IGNORE INTO archive_jobs(day,page)
+    SELECT date(?, '-'||offset||' days'),1 FROM days`)
+      .bind(count, iso(today).slice(0,10))]);
 }
 
-export async function collectArchive(slot: number, env: ArchiveEnv) {
+export async function collectArchive(slot: number, env: ArchiveEnv, requestedDay?: string) {
   const now = Date.now();
   if (env.ARCHIVE_ENABLED !== "true") return {status: "DISABLED"};
-  if (!Number.isSafeInteger(slot) || slot % 60_000 || now < slot || now - slot > 120_000) return {status: "EXPIRED"};
+  const config = settings(env);
+  if (!Number.isSafeInteger(slot) || slot % MINUTE || now < slot || now - slot > config.window) return {status: "EXPIRED"};
   const event = `${SOURCE}:${slot}`;
   if (await env.INDEX.prepare("SELECT event_id FROM archive_attempts WHERE event_id=?").bind(event).first()) return {status: "REPLAY"};
   // Claim across manual calls and Cron; only one request can start per interval.
+  const leaseUntil = now + config.lease;
   const claim = await env.INDEX.prepare(`UPDATE source_control SET next_allowed_at=?,owner_event_id=?
-    WHERE source=? AND blocked=0 AND next_allowed_at<=?`).bind(now + INTERVAL, event, SOURCE, now).run();
+    WHERE source=? AND blocked=0 AND next_allowed_at<=? AND NOT EXISTS (
+      SELECT 1 FROM archive_attempts WHERE event_id=source_control.owner_event_id AND status='PENDING')`)
+    .bind(leaseUntil, event, SOURCE, now).run();
   if (!claim.meta.changes) return {status: "WAIT_OR_STOPPED"};
-  await seed(env, now);
-  const job = await env.INDEX.prepare("SELECT day,page FROM archive_jobs WHERE status='PENDING' ORDER BY day DESC,page LIMIT 1").first<Job>();
+  await seed(env, now, config.days);
+  // Internal range checks use the same queue, source control, receipts and transport.
+  const job = requestedDay === undefined
+    ? await env.INDEX.prepare("SELECT day,page FROM archive_jobs WHERE status='PENDING' ORDER BY day DESC,page LIMIT 1").first<Job>()
+    : await env.INDEX.prepare("SELECT day,page FROM archive_jobs WHERE status='PENDING' AND day=? ORDER BY page LIMIT 1")
+      .bind(requestedDay).first<Job>();
   if (!job) return {status: "IDLE"};
-  const url = archiveUrl(job);
+  const url = archiveUrl(job, config.displayTimes);
   await env.INDEX.prepare(`INSERT INTO archive_attempts(event_id,day,page,status,scheduled_at,reserved_at)
     VALUES(?,?,?,'PENDING',?,?)`).bind(event, job.day, job.page, iso(slot), iso(now)).run();
-  let stage = "NETWORK";
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000);
+  let stage = "NETWORK", retryAt = 0;
+  // Use the database clock at terminal publication, including slow object writes.
+  const release = () => env.INDEX.prepare(`UPDATE source_control SET next_allowed_at=max(
+    CASE WHEN next_allowed_at=? THEN 0 ELSE next_allowed_at END,
+    CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)+?,?)
+    WHERE source=? AND owner_event_id=?`)
+    .bind(leaseUntil, config.interval, retryAt, SOURCE, event);
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), config.timeout);
   const receipt: Record<string, unknown> = {schema: "archive-page-v2", event_id: event, url, ...job,
     reserved_at: iso(now), fetch_started_at: null, http_status: null, received_at: null, raw_saved_at: null,
     source_updated_at: null, historical_available_at: null, paper_eligible: false};
   try {
-    if (Date.now() - slot > 120_000) throw new Error("WINDOW_EXPIRED");
+    if (Date.now() - slot > config.window) throw new Error("WINDOW_EXPIRED");
     receipt.fetch_started_at = iso(Date.now());
     const response = await fetchPublic(url, "application/json", controller.signal);
     receipt.http_status = response.status;
@@ -99,10 +139,11 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
       throw new Error("SOURCE_DENIED");
     }
     if (response.status === 429) {
+      retryAt = retryAfter(response.headers.get("retry-after"), Date.now(), config.retryWait);
       await env.INDEX.prepare("UPDATE source_control SET next_allowed_at=max(next_allowed_at,?) WHERE source=?")
-        .bind(retryAfter(response.headers.get("retry-after"), Date.now()), SOURCE).run();
+        .bind(retryAt, SOURCE).run();
       try {
-        const body = new TextDecoder().decode(await boundedBody(response));
+        const body = new TextDecoder().decode(await boundedBody(response, config.maximumBytes));
         receipt.received_at = iso(Date.now());
         if (/captcha|cf-chl-/i.test(body)) {
           await env.INDEX.prepare("UPDATE source_control SET blocked=1 WHERE source=?").bind(SOURCE).run();
@@ -110,7 +151,7 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
       } catch {await discard(response);}
       throw new Error("RATE_LIMITED");
     }
-    const raw = await boundedBody(response);
+    const raw = await boundedBody(response, config.maximumBytes);
     receipt.received_at = iso(Date.now());
     receipt.fetch_duration_ms = Date.now() - Date.parse(String(receipt.fetch_started_at));
     receipt.raw_bytes = raw.byteLength;
@@ -128,7 +169,7 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
     // Preserve the original before parsing. Malformed/incomplete data remain re-readable.
     await env.RAW.put(`archive/receipts/${event}.json`, JSON.stringify(receipt));
     stage = "PARSE";
-    const inventory = inspectPage(JSON.parse(body), job);
+    const inventory = inspectPage(JSON.parse(body), job, config.displayTimes);
     receipt.parsed_at = iso(Date.now());
     const manifest = {...receipt, ...inventory};
     await env.RAW.put(`archive/manifests/${event}.json`, JSON.stringify(manifest));
@@ -138,7 +179,7 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
       .bind(receipt.fetch_started_at,receipt.headers_received_at,receipt.received_at,receipt.raw_saved_at,hash,raw.length,receipt.parsed_at,Date.now()-now,event),
       env.INDEX.prepare("UPDATE archive_jobs SET status='DONE' WHERE day=? AND page=?").bind(job.day,job.page)];
     if (job.page < inventory.pages) statements.push(env.INDEX.prepare("INSERT OR IGNORE INTO archive_jobs(day,page) VALUES(?,?)").bind(job.day,job.page+1));
-    await env.INDEX.batch(statements);
+    await env.INDEX.batch([...statements, release()]);
     return {status: "STORED", races: inventory.races.length, bytes: raw.length};
   } catch (error) {
     // Provider refusals and unexpected formats require inspection. Ordinary network
@@ -147,23 +188,22 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
     const code = stage === "NETWORK" && error instanceof Error && ["SOURCE_DENIED","RATE_LIMITED","NON_JSON_OR_CHALLENGE","HTTP_ERROR","BODY_LIMIT","WINDOW_EXPIRED"].includes(error.message)
       ? error.message : `${stage}_ERROR`;
     await env.RAW.put(`archive/receipts/${event}.json`, JSON.stringify({...receipt, error_code: code}));
-    await env.INDEX.prepare(`UPDATE archive_attempts SET status='FAILED',fetch_started_at=?,http_status=?,headers_received_at=?,received_at=?,
+    await env.INDEX.batch([env.INDEX.prepare(`UPDATE archive_attempts SET status='FAILED',fetch_started_at=?,http_status=?,headers_received_at=?,received_at=?,
       raw_saved_at=?,raw_sha256=?,raw_bytes=?,error_code=?,duration_ms=? WHERE event_id=?`)
       .bind(receipt.fetch_started_at,receipt.http_status,receipt.headers_received_at ?? null,receipt.received_at,receipt.raw_saved_at,
-        receipt.raw_sha256 ?? null,receipt.raw_bytes ?? null,code,Date.now()-now,event).run();
+        receipt.raw_sha256 ?? null,receipt.raw_bytes ?? null,code,Date.now()-now,event), release()]);
     return {status: code};
   } finally {
     clearTimeout(timer);
-    await env.INDEX.prepare("UPDATE source_control SET next_allowed_at=max(next_allowed_at,?) WHERE source=?")
-      .bind(Date.now() + INTERVAL, SOURCE).run();
+    // Terminal status and the wait above are atomic; no unprotected release here.
   }
 }
 
 export default class ArchiveWorker extends WorkerEntrypoint<ArchiveEnv> {
   async fetch() {return new Response("Not found", {status: 404});}
-  async collect(slot: number) {return collectArchive(slot, this.env);}
+  async collect(slot: number, requestedDay?: string) {return collectArchive(slot, this.env, requestedDay);}
   async scheduled(controller: ScheduledController) {
-    const result = await this.collect(Math.floor(controller.scheduledTime / 60_000) * 60_000);
+    const result = await this.collect(Math.floor(controller.scheduledTime / MINUTE) * MINUTE);
     console.log(JSON.stringify({component: "archive", ...result}));
   }
 }
