@@ -4,6 +4,7 @@ Only already-published raw observations can be parsed. Body hashes deduplicate
 content, while each observation and parser version keeps its own availability.
 """
 
+import asyncio
 import csv
 import json
 import math
@@ -12,7 +13,7 @@ from .common import canonical, identity, sha, stamp, utcnow
 from .history import asof_view
 from .parser import iter_odds_races, VERSION as PARSER_VERSION, MAX_COMPRESSED, MAX_EXPANDED
 
-VERSION = f"cloud-odds-v2:{PARSER_VERSION}"
+VERSION = f"cloud-odds-v3:{PARSER_VERSION}"
 HISTORY_PAGE_BYTES = 1024 * 1024
 PUBLICATION_CLOCK = "strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')"
 
@@ -21,9 +22,26 @@ def native(value):
     return value.to_py() if hasattr(value, "to_py") else value
 
 
+def storage_limits(policy):
+    # Missing policy preserves the serial behavior for existing local callers.
+    if policy is None:
+        return 1, MAX_EXPANDED
+    if (not isinstance(policy, dict) or set(policy) != {
+        'version', 'normalization_concurrency', 'normalization_batch_bytes', 'worker_cpu_ms'
+    } or policy['version'] != 'cloud-storage-v1'):
+        raise ValueError('STORAGE_POLICY')
+    concurrency, size = policy['normalization_concurrency'], policy['normalization_batch_bytes']
+    if (type(concurrency) is not int or not 1 <= concurrency <= 4
+            or type(size) is not int or not 0 < size <= MAX_EXPANDED
+            or type(policy['worker_cpu_ms']) is not int or policy['worker_cpu_ms'] <= 0):
+        raise ValueError('STORAGE_POLICY')
+    return concurrency, size
+
+
 class CloudHistory:
-    def __init__(self, bucket, database, clock=utcnow):
+    def __init__(self, bucket, database, clock=utcnow, *, storage_policy=None):
         self.bucket, self.db, self.clock = bucket, database, clock
+        self.concurrency, self.batch_bytes = storage_limits(storage_policy)
 
     async def first(self, sql, *args):
         return native(await self.db.prepare(sql).bind(*args).first())
@@ -32,7 +50,9 @@ class CloudHistory:
         await self.db.prepare(sql).bind(*args).run()
 
     async def body(self, key, limit):
-        obj = await self.bucket.get(key)
+        return await self.object_body(await self.bucket.get(key), limit)
+
+    async def object_body(self, obj, limit):
         if obj is None or obj.size > limit:
             raise ValueError("BODY_MISSING_OR_LIMIT")
         data = bytes(native(await obj.arrayBuffer()))
@@ -62,14 +82,24 @@ class CloudHistory:
         raw = await self.body(f"raw/{digest}", MAX_COMPRESSED)
         if sha(raw) != digest:
             raise ValueError("BODY_CORRUPT")
-        races, total = {}, 0
+        races, total, pending, pending_bytes = {}, 0, [], 0
         try:
             for race_id, race in iter_odds_races(raw, {}, encoding):
                 data = canonical(race)
                 total += len(data)
                 if total > MAX_EXPANDED:
                     raise ValueError("NORMALIZED_LIMIT")
-                races[race_id] = {'body_hash': await self.save_body(data), 'markets': list(race['markets'])}
+                if pending and pending_bytes + len(data) > self.batch_bytes:
+                    races.update(await self.save_race_batch(pending))
+                    pending, pending_bytes = [], 0
+                pending.append((race_id, list(race['markets']), data))
+                pending_bytes += len(data)
+                # One race larger than the budget is handled on its own, as in v2.
+                if len(pending) == self.concurrency or pending_bytes >= self.batch_bytes:
+                    races.update(await self.save_race_batch(pending))
+                    pending, pending_bytes = [], 0
+            if pending:
+                races.update(await self.save_race_batch(pending))
             digest = await self.save_body(canonical({'format': 'odds-races-v2', 'races': races}))
         except (ValueError, UnicodeError, KeyError, csv.Error) as exc:
             await self.run("INSERT OR IGNORE INTO odds_parses VALUES(?,?,?,?,'ERROR',?,NULL,NULL,?)",
@@ -97,11 +127,23 @@ class CloudHistory:
             raise ValueError('CLOCK_ORDER')
         return published
 
+    async def save_race_batch(self, pending):
+        # Wait for every storage operation even on failure. Nothing is published
+        # and no task is left writing after normalize returns an error.
+        results = await asyncio.gather(*(self.save_body(data) for _, _, data in pending),
+                                       return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return {race_id: {'body_hash': digest, 'markets': markets}
+                for (race_id, markets, _), digest in zip(pending, results)}
+
     async def save_body(self, data):
         digest = sha(data)
         key = f"odds-normalized/{digest}"
-        if await self.bucket.head(key):
-            if sha(await self.body(key, MAX_EXPANDED)) != digest:
+        existing = await self.bucket.get(key)
+        if existing is not None:
+            if sha(await self.object_body(existing, MAX_EXPANDED)) != digest:
                 raise ValueError("BODY_CORRUPT")
         else:
             await self.bucket.put(key, data.decode())

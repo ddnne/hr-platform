@@ -22,7 +22,8 @@ class Default(WorkerEntrypoint):
             request = json.loads(payload)
             if not isinstance(request, dict):
                 raise ValueError("INPUT_SCHEMA")
-            history = CloudHistory(self.env.RAW, self.env.INDEX)
+            history = CloudHistory(self.env.RAW, self.env.INDEX,
+                                   storage_policy=json.loads(self.env.STORAGE_POLICY_JSON))
             operation = request.pop("operation")
             if operation not in {"normalize", "history", "asof"}:
                 raise ValueError("OPERATION")

@@ -1,0 +1,6 @@
+{
+  "version": "cloud-storage-v1",
+  "normalization_concurrency": 3,
+  "normalization_batch_bytes": 1048576,
+  "worker_cpu_ms": 30000
+}
