@@ -419,7 +419,9 @@ PYTHONPATH=src uv run python -m hr_platform.cli --root private/real paper-sessio
 
 ## 9. 採用を取りやめた過去履歴の停止
 
-`hr-platform-dev-archive` は、上位50組に限られる第三者履歴の専用Workerだった。ユーザー指示により採用を取りやめ、取得データ・派生出力を削除した。`wrangler.archive.jsonc` は `ARCHIVE_ENABLED=false`、Cronなしで維持する。D1の同ソース停止フラグも保持し、旧計画・旧手順・再配送から再開しない。
+`hr-platform-dev-archive` は、上位50組に限られる第三者履歴の専用Workerだった。ユーザー指示により採用を取りやめ、取得データ・派生出力を削除した。専用の取得コード、Wrangler設定、専用テスト、ビルド処理も撤去した。配置済みWorkerの`ARCHIVE_ENABLED=false`・Cronなしと、D1の同ソース停止フラグを保持し、旧計画・旧手順・再配送から再開しない。
+
+適用済みのD1 migration `0004`・`0005`はスキーマの履歴として残す。これらのファイルを再開手順にせず、公式NAR側と共用するDB・R2・HTTP処理はそのまま使う。
 
 全量の過去中間オッズを取得できる経路は未確保。新しい取得先は、まず少数サンプルで出走馬に対応する対象・参照券種の全組合せを確認してから採用する。三連単基準には全三連単が必要。未掲載を無投票とみなして0埋めしない。
 
