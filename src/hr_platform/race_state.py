@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 from .common import canonical, identity, sha, stamp, seconds
 
-VERSION = "nar-odds-page-state-v4"
+VERSION = "nar-odds-page-state-v5"
 MAX_BYTES = 2 * 1024 * 1024
 HEADERS = [
     "枠",
@@ -179,12 +179,12 @@ def parse_state_page(raw, race_id):
         raise ValueError("STATE_PAGE_STRUCTURE")
     identities = []
     for h in page.headings:
-        m = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日\([^)]*\)(.+)第(\d+)競走(\d{2}:\d{2})発走", h)
+        m = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日\([^)]*\)(.+)第(\d+)競走(\d{2}:\d{2})発走(\(変更\))?", h)
         if m:
-            year, month, day, venue, number, start = m.groups()
+            year, month, day, venue, number, start, changed = m.groups()
             date = f"{year}{int(month):02}{int(day):02}"
             dt = datetime.strptime(date + start, "%Y%m%d%H:%M").replace(tzinfo=ZoneInfo("Asia/Tokyo"))
-            identities.append((f"{date}:{venue}:{int(number)}", dt.isoformat()))
+            identities.append((f"{date}:{venue}:{int(number)}", dt.isoformat(), changed is not None))
     if len(identities) != 1 or identities[0][0] != race_id:
         raise ValueError("STATE_RACE_IDENTITY")
     if len(page.current_links) != 1:
@@ -244,6 +244,7 @@ def parse_state_page(raw, race_id):
         "race_id": race_id,
         "venue_code": query["k_babaCode"][0],
         "scheduled_start_at": identities[0][1],
+        "schedule_change_displayed": identities[0][2],
         "odds_heading": headings[0],
         "odds_stage": "FINAL_DISPLAYED" if final else "CLOCK_DISPLAYED" if clock else "UNKNOWN",
         "reason": "FINAL_ODDS_DISPLAYED" if final else "DISPLAY_DATE_UNQUALIFIED" if clock else "ODDS_STAGE_UNQUALIFIED",
