@@ -14,7 +14,7 @@ from .paper import settle
 from .payout_check import ResultPage, parse_result_page
 from .race_state import StateEvidence, compact
 
-VERSION = "nar-result-payout-v1"
+VERSION = "nar-result-payout-v2"
 RULE_SOURCE = "https://www.keiba.go.jp/beginner/step6.html"
 STATUS_SOURCE = "https://www.keiba.go.jp/beginner/step2.html"
 HEADERS = [
@@ -169,7 +169,11 @@ def parse_payout_page(raw, race_id):
     ):
         raise ValueError("PAYOUT_GRADE_STRUCTURE")
     header = page.grade_rows[0]
-    if [compact(c["text"]) for c in header] != HEADERS or any(c["tag"] != "th" for c in header):
+    # Some published results omit the corner-order column. It is not used for
+    # finish positions or payments; keep every other column and row width exact.
+    labels = [compact(c["text"]) for c in header]
+    without_corners = [h for h in HEADERS if h != "コーナー通過順"]
+    if labels not in (HEADERS, without_corners) or any(c["tag"] != "th" for c in header):
         raise ValueError("PAYOUT_GRADE_HEADER")
     if len(page.race_links) != 1:
         raise ValueError("PAYOUT_RACE_LINK")
@@ -190,7 +194,7 @@ def parse_payout_page(raw, race_id):
         raise ValueError("PAYOUT_RACE_LINK")
     runners, ranks = {}, {}
     for row in page.grade_rows[1:]:
-        if len(row) != len(HEADERS) or any(c["tag"] != "td" for c in row):
+        if len(row) != len(header) or any(c["tag"] != "td" for c in row):
             raise ValueError("PAYOUT_GRADE_ROW")
         rank, horse = compact(row[0]["text"]), compact(row[2]["text"])
         if not re.fullmatch(r"[1-9][0-9]?", horse) or not 1 <= int(horse) <= 16 or horse in runners:
