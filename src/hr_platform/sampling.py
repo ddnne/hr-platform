@@ -20,6 +20,7 @@ from .realdata import filename_metadata
 
 INTERVAL = 120
 FORMAT = "nar-finite-local-v1"
+DAY_FORMAT = "nar-day-local-v1"
 ZIP_URLS = {k: "https://www.keiba.go.jp/KeibaWeb/DataDownload/" + v + "?type=daily"
             for k, v in {"odds": "OddsDataDownload", "race": "RaceDataDownload"}.items()}
 ZIP_KINDS = {*ZIP_URLS, "monthly_odds"}
@@ -42,10 +43,11 @@ def enabled():
 
 
 def validate_plan(plan):
-    if set(plan) != {"format", "requests"} or plan["format"] != FORMAT:
+    if set(plan) != {"format", "requests"} or plan["format"] not in {FORMAT, DAY_FORMAT}:
         raise ValueError("SAMPLE_PLAN")
     items = plan["requests"]
-    if not isinstance(items, list) or not 1 <= len(items) <= 6:
+    daily = plan["format"] == DAY_FORMAT
+    if not isinstance(items, list) or not 1 <= len(items) <= (86400 // INTERVAL if daily else 6):
         raise ValueError("SAMPLE_PLAN_LIMIT")
     names, times = set(), []
     for item in items:
@@ -55,6 +57,8 @@ def validate_plan(plan):
             raise ValueError("SAMPLE_ITEM_ID")
         names.add(item["id"])
         kind = item["kind"]
+        if daily and (kind != "odds" or item["scope"] != items[0]["scope"]):
+            raise ValueError("DAY_PLAN_SCOPE")
         if kind in ZIP_URLS:
             if item["url"] != ZIP_URLS[kind] or not re.fullmatch(r"\d{8}", item["scope"]):
                 raise ValueError("SAMPLE_URL")
@@ -72,6 +76,12 @@ def validate_plan(plan):
         else:
             raise ValueError("SAMPLE_KIND")
         at, until = stamp(item["at"]), stamp(item["until"])
+        if daily:
+            from zoneinfo import ZoneInfo
+
+            if any(instant(t).astimezone(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d") != item["scope"]
+                   for t in (at, until)):
+                raise ValueError("DAY_PLAN_DATE")
         if not 0 < seconds(until, at) <= INTERVAL:
             raise ValueError("SAMPLE_WINDOW")
         times.append(at)
@@ -151,7 +161,7 @@ class Samples:
         self.control(next_at=after(started, None))
         receipt = {"event_id": key, "url": item["url"], "kind": item["kind"],
                    "scheduled_capture_at": stamp(item["at"]), "fetch_started_at": started,
-                   "source_updated_at": None, "scope": "FINITE_LOCAL_SAMPLE",
+                   "source_updated_at": None, "scope": "DAY_LOCAL_CAPTURE" if plan["format"] == DAY_FORMAT else "FINITE_LOCAL_SAMPLE",
                    "status": None, "accepted": False, "http_attempted": False, "outcome": "SAMPLE_WINDOW_EXPIRED"}
         if started < now or started >= stamp(item["until"]):
             return self.finish(item, receipt)
@@ -283,7 +293,8 @@ class Samples:
                      "fetch_started_at": receipt["fetch_started_at"], "collector_received_at": receipt.get("collector_received_at"),
                      "ingest_received_at": ingested, "collector_receipt_recorded_at": receipt["recorded_at"], "status": receipt["status"],
                      "response_accepted": receipt["accepted"], "dataset_kind": "DAILY_SNAPSHOT",
-                     "source": "nar-local-finite-sample", "availability_basis": "LOCAL_COLLECTOR_RECEIPT",
+                     "source": "nar-local-day" if receipt["scope"] == "DAY_LOCAL_CAPTURE" else "nar-local-finite-sample",
+                     "availability_basis": "LOCAL_COLLECTOR_RECEIPT",
                      "receipt_hash": identity(receipt), "collector_raw_saved_at": receipt.get("raw_saved_at"),
                      "headers_received_at": receipt.get("headers_received_at"), "encoding": "utf-8-sig",
                      "file_name": receipt.get("filename"), "file_timestamp": filename_metadata(receipt.get("filename"))["file_timestamp"],

@@ -40,6 +40,18 @@ def arguments():
     sample = commands.add_parser("collect-sample", help="少数取得計画の1項目を実行・保存。待機/再配送では通信しない")
     sample.add_argument("--plan", required=True, help="事前に保存した有限取得計画JSON")
     sample.add_argument("--item", required=True)
+    day_plan = commands.add_parser("day-plan", help="当日全場の一括オッズを保存する有限計画を登録。通信なし")
+    day_plan.add_argument("--from", dest="start", required=True)
+    day_plan.add_argument("--until", required=True)
+    day_plan.add_argument("--config", default="configs/collection.json")
+    day = commands.add_parser("collect-day", help="一日分の計画を共通取得処理で進める。欠測を後から埋めない")
+    day.add_argument("--plan", required=True)
+    day.add_argument("--config", default="configs/collection.json")
+    day.add_argument("--wait-seconds", type=int, default=0)
+    watch = commands.add_parser("race-watch", help="全競走の保存状態・組合せ数・鮮度を時点指定で照会。通信なし")
+    watch.add_argument("--date", required=True)
+    watch.add_argument("--at", required=True)
+    watch.add_argument("--config", default="configs/collection.json")
     session = commands.add_parser("paper-session", help="有限取得・固定Paper判断・公式精算を進める。常時起動はしない")
     session.add_argument("--paper-plan", required=True)
     session.add_argument("--sample-plan", required=True)
@@ -129,7 +141,19 @@ def arguments():
 
 def run(args, store):
     adapter = RealData(store)
-    if args.command == "paper-session":
+    if args.command in {"day-plan", "collect-day", "race-watch"}:
+        from .day_collection import make_plan, run as collect_day, race_watch
+        from .sampling import Samples
+
+        config = json.loads(read_limited(args.config, 64 * 1024))
+        if args.command == "day-plan":
+            report = make_plan(args.start, args.until, config)
+            Samples(store).register(report)
+        elif args.command == "collect-day":
+            report = collect_day(store, json.loads(read_limited(args.plan, 1024 * 1024)), config, args.wait_seconds)
+        else:
+            report = race_watch(store, args.date, args.at, config)
+    elif args.command == "paper-session":
         from .session import run as advance
 
         report = advance(store, args.paper_plan, json.loads(read_limited(args.sample_plan, 64 * 1024)), args.wait_seconds)

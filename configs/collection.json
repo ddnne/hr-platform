@@ -1,0 +1,8 @@
+{
+  "version": "nar-day-collection-v1",
+  "interval_seconds": 120,
+  "capture_window_seconds": 90,
+  "max_age_seconds": 300,
+  "max_wait_seconds": 86400,
+  "sleep_seconds": 30
+}
