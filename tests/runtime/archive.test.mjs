@@ -168,3 +168,31 @@ test('an empty-date null array is retained without claiming historical coverage'
   }finally{await r.mf.dispose();}
  }
 });
+
+
+test('variable page sizes are followed until an empty page without assuming two races per page',async()=>{
+ const r=await runtime([{body:page('2026-09-29',[1])},{body:page('2026-09-29',[2])},
+  {body:page('2026-09-29',[3])},{body:page('2026-09-29',[])}]);
+ try{
+  for(let i=0;i<4;i++)assert.equal((await r.tick(start+i*120000)).status,'STORED');
+  const jobs=(await r.db.prepare("SELECT page,status FROM archive_jobs WHERE day='2026-09-29' ORDER BY page").all()).results;
+  assert.deepEqual(jobs,[1,2,3,4].map(page=>({page,status:'DONE'})));
+  assert.equal(r.requests.length,4);
+ }finally{await r.mf.dispose();}
+});
+
+test('a known metadata-only archive preserves missing odds and queues the next page',async()=>{
+ const data=page('2026-09-29',[1],3);
+ data.nar_info.race_info[0].odds_info={sikis:null,siki_odds_times:null};
+ const r=await runtime([{body:data}]);
+ try{
+  assert.equal((await r.tick()).status,'STORED');
+  const attempt=await r.db.prepare('SELECT * FROM archive_attempts').first();
+  const manifest=await (await r.raw.get('archive/manifests/'+attempt.event_id+'.json')).json();
+  assert.equal(manifest.races[0].odds_status,'ODDS_NOT_RETURNED');
+  assert.deepEqual(manifest.races[0].markets,{});
+  assert.equal(manifest.historical_available_at,null);assert.equal(manifest.paper_eligible,false);
+  assert.equal((await r.db.prepare("SELECT status FROM archive_jobs WHERE day='2026-09-29' AND page=2").first()).status,'PENDING');
+  assert.equal((await r.db.prepare("SELECT blocked FROM source_control WHERE source='keibaodds-history'").first()).blocked,0);
+ }finally{await r.mf.dispose();}
+});
