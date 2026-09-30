@@ -16,7 +16,7 @@ export function archiveUrl(job: Job): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(job.day) || iso(Date.parse(job.day)).slice(0,10) !== job.day
       || !Number.isInteger(job.page) || job.page < 1 || job.page > 100) throw new Error("ARCHIVE_JOB");
   return "https://keibaodds.com/odds?" + new URLSearchParams({page: String(job.page), display_times: "24",
-    race_kind: "nar", race_date: job.day, date_limit: "4"});
+    race_kind: "nar", race_date: job.day, date_limit: "4", time: "00:00"});
 }
 
 export function inspectPage(value: unknown, job: Job) {
@@ -83,7 +83,7 @@ export async function collectArchive(slot: number, env: ArchiveEnv) {
     VALUES(?,?,?,'PENDING',?,?)`).bind(event, job.day, job.page, iso(slot), iso(now)).run();
   let stage = "NETWORK";
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000);
-  const receipt: Record<string, unknown> = {schema: "archive-page-v1", event_id: event, url, ...job,
+  const receipt: Record<string, unknown> = {schema: "archive-page-v2", event_id: event, url, ...job,
     reserved_at: iso(now), fetch_started_at: null, http_status: null, received_at: null, raw_saved_at: null,
     source_updated_at: null, historical_available_at: null, paper_eligible: false};
   try {

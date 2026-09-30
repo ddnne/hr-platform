@@ -47,6 +47,7 @@ test('closed-day pagination stores originals; cadence and event replay do not fe
   assert.equal((await r.tick(start+600000)).status,'STORED');
   assert.equal(r.requests.length,2);
   assert.ok(r.requests[0].includes('race_date=2026-09-29')&&r.requests[1].includes('page=2'));
+  assert.ok(r.requests.every(url=>new URL(url).searchParams.get('time')==='00:00'));
   const attempts=(await r.db.prepare('SELECT * FROM archive_attempts ORDER BY scheduled_at').all()).results;
   assert.equal(attempts.length,2);
   assert.equal(attempts[0].fetch_started_at,new Date(start+20000).toISOString());
@@ -60,6 +61,11 @@ test('closed-day pagination stores originals; cadence and event replay do not fe
    assert.deepEqual(manifest.races[0].markets.umaren.map(x=>x.kind),['FINAL_ONLY','CLOCK_ONLY']);
   }
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  await r.db.prepare("UPDATE archive_jobs SET status='DONE'").run();
+  const migration=await readFile('migrations/0005_archive_day_window.sql','utf8');
+  await r.db.prepare(migration.replace(/^--.*$/gm,'')).run();
+  assert.equal((await r.db.prepare("SELECT count(*) n FROM archive_jobs WHERE status='DONE'").first()).n,0);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM archive_attempts').first()).n,2);
  }finally{await r.mf.dispose();}
 });
 

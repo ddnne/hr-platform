@@ -421,6 +421,7 @@ PYTHONPATH=src uv run python -m hr_platform.cli --root private/real paper-sessio
 
 - 初期範囲は過去7日。JSTで前日までを日付・ページ単位で順に保存し、毎日新しい前日分を追加する。完了ページを再取得しない。
 - Cronは5分ごとに確認し、取得処理の終了から5分以上空けて次の1ページを取得する。実際の取得間隔は5〜10分程度になる。並列取得やブラウザ描画は使わない。
+- 過去日の一覧にも`time=00:00`を指定する。指定なしでは先頭が時刻で移動するため、v1で完了したページは移行0005で一度だけ再取得待ちへ戻す。旧原本・試行は残り、v2 receiptのURLで新しい取得条件を確認できる。
 - 1ページに複数競走・券種が入る。画面の最大表示と同じ24時点を要求し、提供された本体を一度だけ保存する。人気順の組合せ欠落や、時点数の不足は補完しない。ページの保存完了を日全体の完全性の証明にせず、解析時に競走IDの重複・欠落と配布側の総件数の変化も確認する。
 - R2の `archive/raw/<sha256>` に原本、`archive/receipts/` に取得証跡、`archive/manifests/` に競走・券種・時刻ラベルの索引を保存。D1の `archive_attempts` と `archive_jobs` で履歴・再配送・進行状況を読む。
 - `available_at` は今回クラウドで保存・公開した時刻。過去の時刻ラベルを当時の利用可能時刻へ変換しない。`source_updated_at` と `historical_available_at` はnull、`paper_eligible=false`。最終ラベルは `FINAL_ONLY`、時刻だけのラベルは `CLOCK_ONLY`。
