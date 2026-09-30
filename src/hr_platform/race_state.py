@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 from .common import canonical, identity, sha, stamp, seconds
 
-VERSION = "nar-odds-page-state-v5"
+VERSION = "nar-odds-page-state-v6"
 MAX_BYTES = 2 * 1024 * 1024
 HEADERS = [
     "枠",
@@ -234,11 +234,12 @@ def parse_state_page(raw, race_id):
         number, change = compact(row[1]["text"]), compact(row[12]["text"])
         if not re.fullmatch(r"[1-9][0-9]?", number) or not 1 <= int(number) <= 16 or number in runners:
             raise ValueError("STATE_RUNNER_ID")
-        excluded = change == "競走除外"
+        status = {"": "NO_CHANGE_DISPLAYED", "競走除外": "EXCLUDED",
+                  "騎手変更": "JOCKEY_CHANGED"}.get(change, "UNKNOWN_CHANGE")
         runners[number] = {
             "change_label": change,
-            "status": "EXCLUDED" if excluded else "NO_CHANGE_DISPLAYED" if not change else "UNKNOWN_CHANGE",
-            "active": False if excluded else None,
+            "status": status,
+            "active": False if status == "EXCLUDED" else None,
         }
     return {
         "race_id": race_id,

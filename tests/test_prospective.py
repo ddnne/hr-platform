@@ -6,7 +6,7 @@ from hr_platform.common import canonical, sha, stamp
 from hr_platform.paper import decide
 from hr_platform.prospective import POLICY, SCHEMA, build_view, configuration, current_plan, enroll, tick
 from hr_platform.race_metadata import MetadataEvidence
-from hr_platform.race_state import StateEvidence
+from hr_platform.race_state import StateEvidence, parse_state_page
 from hr_platform.store import Store
 from test_race_state import page, receipt
 from test_realdata import race_archive
@@ -144,12 +144,47 @@ def test_all_three_models_use_same_derived_input_and_keep_raw_facts(planned):
     ("14:02現在", "競走除外", "RUNNER_CHANGE_OR_UNKNOWN"),
     ("14:02現在", "取消", "RUNNER_CHANGE_OR_UNKNOWN"),
     ("14:02現在", "不明変更", "RUNNER_CHANGE_OR_UNKNOWN"),
+    ("14:02現在", "騎手変更 取消", "RUNNER_CHANGE_OR_UNKNOWN"),
+    ("14:02現在", "騎手変更 不明変更", "RUNNER_CHANGE_OR_UNKNOWN"),
 ])
 def test_final_and_changes_are_no_bet(planned, stage, change, reason):
     store, plan = planned
     state(store, 3, stage, change)
     store.clock = lambda: f.at(4, 20)
     assert all(r["reason"] == reason for r in tick(store, plan["id"])["decisions"])
+
+
+def test_observed_entries_allow_known_jockey_change(planned):
+    store, plan = planned
+    state(store, 3, change="騎手変更")
+    store.clock = lambda: f.at(4, 20)
+    records = tick(store, plan["id"])["decisions"]
+    assert all(r["status"] == "PAPER_BET" for r in records)
+    runner = records[0]["input_view"]["state_evidence"]["evidence"]["runners"]["2"]
+    assert runner == {"active": None, "change_label": "騎手変更", "status": "JOCKEY_CHANGED"}
+
+
+def test_jockey_reparse_after_cutoff_keeps_legacy_no_bet(planned):
+    store, plan = planned
+    raw = page("14:02現在", "騎手変更").replace(b"14:10", b"14:14")
+
+    def legacy(data, race_id):
+        parsed = parse_state_page(data, race_id)
+        parsed["runners"]["2"]["status"] = "UNKNOWN_CHANGE"
+        return parsed
+
+    store.clock = lambda: f.at(3, 10)
+    evidence = StateEvidence(store)
+    old = evidence.ingest(receipt(raw, 3), raw, f.RACE, version="synthetic-legacy", parser=legacy)
+    store.clock = lambda: f.at(4, 20)
+    decisions = tick(store, plan["id"])["decisions"]
+    assert all(d["reason"] == "RUNNER_CHANGE_OR_UNKNOWN" for d in decisions)
+    store.clock = lambda: f.at(6)
+    new = evidence.ingest(receipt(raw, 3), raw, f.RACE)
+    assert new["observation_id"] == old["observation_id"]
+    assert new["runners"]["2"]["status"] == "JOCKEY_CHANGED"
+    assert evidence.asof(f.RACE, plan["asof_at"])["evidence"] == old
+    assert tick(store, plan["id"])["decisions"] == decisions
 
 
 @pytest.mark.parametrize("mutation,reason", [

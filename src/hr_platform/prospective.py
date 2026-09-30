@@ -1,9 +1,10 @@
 """Prospectively enrolled, receipt-based shadow Paper inputs.
 
 The raw parsers remain unqualified. This policy explicitly assumes that a horse
-listed in two fresh official sources, without a reported change, is a candidate
-runner. It does not establish actual starters, market synchronization or a sales
-channel deadline. Unknown source update times stay null.
+listed in two fresh official sources, with no change or a recognized jockey-only
+change, is a candidate runner. The latter label is recognized from state parser
+v6 onward, subject to parse availability. It does not establish actual starters,
+market synchronization or a sales channel deadline. Unknown update times stay null.
 """
 
 from copy import deepcopy
@@ -159,7 +160,8 @@ def build_view(store, race_id, schedule, config, at):
             reason = "RACE_NOT_PRE_RACE"
         elif set(page["runners"]) != set(race["horses"]):
             reason = "ENTRY_COUNT_MISMATCH"
-        elif any(r["status"] != "NO_CHANGE_DISPLAYED" for r in page["runners"].values()):
+        elif any(r["status"] not in {"NO_CHANGE_DISPLAYED", "JOCKEY_CHANGED"}
+                 for r in page["runners"].values()):
             reason = "RUNNER_CHANGE_OR_UNKNOWN"
         elif seconds(schedule["scheduled_start_at"], at) <= 0:
             reason = "RACE_NOT_PRE_RACE"
