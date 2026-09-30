@@ -348,7 +348,7 @@ def test_cli_only_prints_private_report_location(tmp_path, monkeypatch, capsys):
     clock = [f.at(2)]
     monkeypatch.setattr(cli, "Store", lambda root: Store(root, clock=lambda: clock[0]))
     original = module.Samples
-    monkeypatch.setattr(module, "Samples", lambda store: original(store, lambda _: Response()))
+    monkeypatch.setattr(module.Samples, "for_plan", lambda store, plan: original(store, lambda _: Response()))
     path = tmp_path / "plan.json"
     path.write_text(json.dumps(plan()))
     args = ["collect-sample", "--plan", str(path), "--item", "sample-0"]

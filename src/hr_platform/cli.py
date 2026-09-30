@@ -40,6 +40,15 @@ def arguments():
     sample = commands.add_parser("collect-sample", help="少数取得計画の1項目を実行・保存。待機/再配送では通信しない")
     sample.add_argument("--plan", required=True, help="事前に保存した有限取得計画JSON")
     sample.add_argument("--item", required=True)
+    probe_plan = commands.add_parser("public-probe-plan", help="公開オッズ1ページの少数時点比較を事前登録。通信なし")
+    probe_plan.add_argument("--url", required=True, help="公開導線で確認した南関東公式のオッズ一覧URL")
+    probe_plan.add_argument("--start", required=True, help="既知の予定発走日時。タイムゾーン必須")
+    probe_plan.add_argument("--config", default="configs/public-probe.json")
+    probe = commands.add_parser("collect-public-probe", help="登録済みの時点で原本のみ保存。Paper取込みなし")
+    probe.add_argument("--plan", required=True)
+    probe.add_argument("--wait-seconds", type=int, default=0)
+    probe_history = commands.add_parser("public-probe-history", help="取得原本の全試行・欠測を読戻し。適格オッズのas-ofではない")
+    probe_history.add_argument("--plan", required=True)
     day_plan = commands.add_parser("day-plan", help="当日全場の一括オッズを保存する有限計画を登録。通信なし")
     day_plan.add_argument("--from", dest="start", required=True)
     day_plan.add_argument("--until", required=True)
@@ -153,6 +162,21 @@ def run(args, store):
             report = collect_day(store, json.loads(read_limited(args.plan, 1024 * 1024)), config, args.wait_seconds)
         else:
             report = race_watch(store, args.date, args.at, config)
+    elif args.command in {"public-probe-plan", "collect-public-probe", "public-probe-history"}:
+        from . import public_probe
+        from .sampling import Samples, run_plan
+
+        if args.command == "public-probe-plan":
+            report = public_probe.make_plan(args.url, args.start, json.loads(read_limited(args.config, 64 * 1024)))
+            Samples.for_plan(store, report).register(report)
+        elif args.command == "collect-public-probe":
+            plan = json.loads(read_limited(args.plan, 64 * 1024))
+            public_probe.validate_plan(plan)
+            policy = plan["policy"]
+            report = run_plan(store, plan, args.wait_seconds, max_wait_seconds=policy["max_wait_seconds"],
+                              sleep_seconds=policy["sleep_seconds"])
+        else:
+            report = public_probe.history(store, json.loads(read_limited(args.plan, 64 * 1024)))
     elif args.command == "paper-session":
         from .session import run as advance
 
@@ -160,7 +184,8 @@ def run(args, store):
     elif args.command == "collect-sample":
         from .sampling import Samples
 
-        report = Samples(store).capture(json.loads(read_limited(args.plan, 64 * 1024)), args.item)
+        plan = json.loads(read_limited(args.plan, 64 * 1024))
+        report = Samples.for_plan(store, plan).capture(plan, args.item)
     elif args.command == "inspect":
         report = adapter.inspect(read_limited(args.zip), Path(args.zip).name, args.kind, args.encoding)
         if args.race_zip and report.get("content_type") == "odds":

@@ -1,7 +1,7 @@
 """Finite local research captures. No scheduler, redirects or automatic retries.
 
-All kinds share one Store's spacing and refusal state. Use the same private root
-for every local sample; this never changes the Cloudflare collector's stop state.
+All kinds from the same provider share one Store's spacing and refusal state.
+Use the same private root for every local sample; Cloudflare state is untouched.
 """
 
 from datetime import datetime, timedelta
@@ -17,6 +17,7 @@ from .parser import MAX_COMPRESSED, VERSION
 from .race_metadata import MetadataEvidence
 from .race_state import StateEvidence, MAX_BYTES, validate_page_url
 from .realdata import filename_metadata
+from . import public_probe
 
 INTERVAL = 120
 FORMAT = "nar-finite-local-v1"
@@ -31,7 +32,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sample_plans(id TEXT PRIMARY KEY, registered_at TEXT NOT NULL, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sample_requests(id TEXT PRIMARY KEY, plan_id TEXT NOT NULL,
  body TEXT NOT NULL, receipt_hash TEXT);
-CREATE TABLE IF NOT EXISTS sample_control(id INTEGER PRIMARY KEY CHECK(id=1),
+CREATE TABLE IF NOT EXISTS sample_control(id INTEGER PRIMARY KEY,
  stopped INTEGER NOT NULL, next_at TEXT);
 INSERT OR IGNORE INTO sample_control VALUES(1,0,NULL);
 """
@@ -43,6 +44,9 @@ def enabled():
 
 
 def validate_plan(plan):
+    if plan.get("format") == public_probe.FORMAT:
+        public_probe.validate_plan(plan)
+        return identity(plan)
     if set(plan) != {"format", "requests"} or plan["format"] not in {FORMAT, DAY_FORMAT}:
         raise ValueError("SAMPLE_PLAN")
     items = plan["requests"]
@@ -110,8 +114,8 @@ def open_response(item):
         return response
 
 
-def after(now, value):
-    minimum = instant(now) + timedelta(seconds=INTERVAL)
+def after(now, value, interval=INTERVAL):
+    minimum = instant(now) + timedelta(seconds=interval)
     try:
         at = (instant(now) + timedelta(seconds=int(value))) if str(value).strip().isdigit() else parsedate_to_datetime(value)
         return stamp(max(minimum, at).isoformat())
@@ -120,12 +124,35 @@ def after(now, value):
 
 
 class Samples:
-    def __init__(self, store, opener=open_response):
+    def __init__(self, store, opener=open_response, *, policy=None):
+        if policy is not None:
+            public_probe.validate_policy(policy)
         self.store, self.opener = store, opener
+        self.policy = json.loads(canonical(policy)) if policy is not None else None
+        self.control_id = 2 if policy is not None else 1
+        self.interval = policy["interval_seconds"] if policy is not None else INTERVAL
         store.db.executescript(SCHEMA)
+        # Keep the existing NAR stop/wait state when extending the one control
+        # table to another provider. The migration is atomic across connections.
+        with store.db:
+            store.db.execute("BEGIN IMMEDIATE")
+            sql = store.db.execute("SELECT sql FROM sqlite_master WHERE name='sample_control'").fetchone()[0]
+            if re.search(r"CHECK\s*\(\s*id\s*=\s*1\s*\)", sql, re.I):
+                store.db.execute("CREATE TABLE sample_control_next(id INTEGER PRIMARY KEY, stopped INTEGER NOT NULL, next_at TEXT)")
+                store.db.execute("INSERT INTO sample_control_next SELECT * FROM sample_control")
+                store.db.execute("DROP TABLE sample_control")
+                store.db.execute("ALTER TABLE sample_control_next RENAME TO sample_control")
+            store.db.execute("INSERT OR IGNORE INTO sample_control VALUES(?,0,NULL)", (self.control_id,))
+
+    @classmethod
+    def for_plan(cls, store, plan, **kwargs):
+        validate_plan(plan)
+        return cls(store, policy=plan.get("policy"), **kwargs)
 
     def register(self, plan):
         key = validate_plan(plan)
+        if plan.get("policy") != self.policy:
+            raise ValueError("SAMPLE_PROVIDER_POLICY")
         previous = self.store.db.execute("SELECT id FROM sample_plans WHERE id=?", (key,)).fetchone()
         if not previous:
             now = stamp(self.store.clock())
@@ -140,8 +167,11 @@ class Samples:
     def control(self, *, stop=False, next_at=None):
         with self.store.db:
             self.store.db.execute("""UPDATE sample_control SET stopped=max(stopped,?),
-                next_at=CASE WHEN ? IS NULL THEN next_at ELSE max(coalesce(next_at,''),?) END WHERE id=1""",
-                (int(stop), next_at, next_at))
+                next_at=CASE WHEN ? IS NULL THEN next_at ELSE max(coalesce(next_at,''),?) END WHERE id=?""",
+                (int(stop), next_at, next_at, self.control_id))
+
+    def stopped(self):
+        return bool(self.store.db.execute("SELECT stopped FROM sample_control WHERE id=?", (self.control_id,)).fetchone()[0])
 
     def capture(self, plan, name):
         enabled()
@@ -158,10 +188,11 @@ class Samples:
             return reserved
         now = reserved["reserved_at"]
         started = stamp(self.store.clock())
-        self.control(next_at=after(started, None))
+        self.control(next_at=after(started, None, self.interval))
         receipt = {"event_id": key, "url": item["url"], "kind": item["kind"],
                    "scheduled_capture_at": stamp(item["at"]), "fetch_started_at": started,
-                   "source_updated_at": None, "scope": "DAY_LOCAL_CAPTURE" if plan["format"] == DAY_FORMAT else "FINITE_LOCAL_SAMPLE",
+                   "source_updated_at": None,
+                   "scope": "PUBLIC_PAGE_QUALIFICATION" if self.policy is not None else "DAY_LOCAL_CAPTURE" if plan["format"] == DAY_FORMAT else "FINITE_LOCAL_SAMPLE",
                    "status": None, "accepted": False, "http_attempted": False, "outcome": "SAMPLE_WINDOW_EXPIRED"}
         if started < now or started >= stamp(item["until"]):
             return self.finish(item, receipt)
@@ -178,8 +209,10 @@ class Samples:
                     return {"status": "REPLAY", "receipt_hash": old["receipt_hash"]}
                 return {"status": "INCOMPLETE_ATTEMPT_STOP", "attempt_id": key}
             now = stamp(self.store.clock())
-            control = self.store.db.execute("SELECT * FROM sample_control WHERE id=1").fetchone()
-            if self.store.db.execute("SELECT 1 FROM sample_requests WHERE receipt_hash IS NULL").fetchone():
+            control = self.store.db.execute("SELECT * FROM sample_control WHERE id=?", (self.control_id,)).fetchone()
+            if self.store.db.execute("""SELECT 1 FROM sample_requests WHERE receipt_hash IS NULL
+                AND (json_extract(body,'$.kind') IS NULL OR (json_extract(body,'$.kind')=?)=?)""",
+                (public_probe.KIND, self.policy is not None)).fetchone():
                 return {"status": "INCOMPLETE_ATTEMPT_STOP"}
             if control["stopped"]:
                 return {"status": "SOURCE_STOPPED"}
@@ -222,7 +255,7 @@ class Samples:
             if denied:
                 self.control(stop=True)
             if status == 429:
-                self.control(next_at=after(receipt["headers_received_at"], headers["Retry-After"]))
+                self.control(next_at=after(receipt["headers_received_at"], headers["Retry-After"], self.interval))
             limit = (MAX_COMPRESSED if item["kind"] in ZIP_KINDS else MAX_BYTES) if status == 200 else 8192
             chunks, size = [], 0
             while size <= limit:
@@ -270,7 +303,7 @@ class Samples:
                     pass
             # Waiting from completion is conservative and also covers a slow
             # reservation or network call. Retry-After is never shortened.
-            self.control(next_at=after(stamp(self.store.clock()), None))
+            self.control(next_at=after(stamp(self.store.clock()), None, self.interval))
         receipt["duration_ms"] = (time.monotonic() - begin) * 1000
         return self.finish(item, receipt)
 
@@ -285,6 +318,10 @@ class Samples:
     def publish(self, item, receipt):
         result = {"status": receipt["outcome"], "attempt_id": receipt["event_id"],
                   "receipt_hash": identity(receipt), "http_status": receipt["status"]}
+        if item["kind"] == public_probe.KIND:
+            # HTML transport success proves neither odds completeness nor live
+            # availability. Qualification raw bodies never enter Paper history.
+            return {**result, "paper_eligible": False, "raw_only": True}
         raw = self.store.read_body(receipt["sha256"], "raw") if receipt["accepted"] else None
         if item["kind"] == "odds" and receipt["http_attempted"]:
             prior = self.store.db.execute("SELECT event FROM attempts WHERE id=?", (receipt["event_id"],)).fetchone()
@@ -325,3 +362,47 @@ class Samples:
             report = cls(self.store).ingest(receipt, raw, item["scope"])
         return {**result, "status": "QUARANTINED" if report["status"] in {"ERROR", "QUARANTINED"} else "PARSED",
                 "parse": report}
+
+
+def advance_plan(store, plan, *, samples=None):
+    """One due item at most; expired slots stay missing, repeats reuse receipts."""
+    samples = samples or Samples.for_plan(store, plan)
+    plan_id = samples.register(plan)
+    now = stamp(store.clock())
+    current = next((x for x in plan["requests"] if stamp(x["at"]) <= now < stamp(x["until"])), None)
+    report = {"plan_id": plan_id, "asof_at": now, "capture": None, "next_at": None}
+    if current:
+        try:
+            report["capture"] = samples.capture(plan, current["id"])
+        except Exception as exc:
+            report["capture"] = {"status": "CAPTURE_ERROR", "error_class": type(exc).__name__}
+        capture = report["capture"]
+        if capture["status"] in {"SOURCE_STOPPED", "INCOMPLETE_ATTEMPT_STOP"}:
+            return {**report, "status": capture["status"]}
+        if capture["status"] == "WAIT" and capture["next_at"] < stamp(current["until"]):
+            report["next_at"] = capture["next_at"]
+    if samples.stopped():
+        return {**report, "next_at": None, "status": "SOURCE_STOPPED"}
+    if report["next_at"] is None:
+        now = stamp(store.clock())
+        report["next_at"] = next((max(stamp(x["at"]), now) for x in plan["requests"]
+                                  if x is not current and stamp(x["until"]) > now), None)
+    return {**report, "status": "WAITING" if report["next_at"] else "PLAN_ENDED"}
+
+
+def run_plan(store, plan, wait_seconds=0, *, max_wait_seconds, sleep_seconds, samples=None,
+             sleeper=time.sleep, timer=time.monotonic):
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= max_wait_seconds:
+        raise ValueError("SAMPLE_WAIT_LIMIT")
+    end = timer() + wait_seconds
+    while True:
+        report = advance_plan(store, plan, samples=samples)
+        if report["next_at"] is None:
+            return report
+        while True:
+            delay = seconds(report["next_at"], store.clock())
+            if timer() >= end or delay > end - timer():
+                return report
+            if delay <= 0:
+                break
+            sleeper(min(delay, sleep_seconds))
