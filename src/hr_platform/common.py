@@ -3,6 +3,9 @@ import hashlib
 import json
 
 
+MODEL_PROBABILITY_FIELDS = {"reference": "p_ref", "marginal": "p_marg", "direct": "p_direct"}
+
+
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 

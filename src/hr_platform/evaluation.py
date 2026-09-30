@@ -1,8 +1,90 @@
 """Private ledger comparison. Missing outcomes never become zero payouts."""
 
 from collections import Counter
+from itertools import combinations
 import json
-from .common import identity, stamp
+import math
+from .common import MODEL_PROBABILITY_FIELDS, identity, stamp
+
+
+SCORE_FIELDS = {**MODEL_PROBABILITY_FIELDS, "market": "v_target"}
+
+
+def _score_race(store, race_id, decisions, entries):
+    """Score a whole frozen outcome distribution, never only the purchased ticket."""
+    diagnostics = [d.get("diagnostics") for d in decisions]
+    if not all(isinstance(d, dict) and d for d in diagnostics) or len({identity(d) for d in diagnostics}) != 1:
+        return {"status": "PREDICTIONS_UNAVAILABLE_OR_DIFFERENT"}
+    decision = decisions[0]
+    target = decision["target"]
+    if target not in {"quinella", "trio"}:
+        return {"status": "UNSUPPORTED_TARGET"}
+    horses = decision["input_view"]["markets"][target]["content"]["state"]["runners"]
+    support = {"-".join(map(str, x)) for x in combinations(sorted(horses), 2 if target == "quinella" else 3)}
+    rows = diagnostics[0].get("rows", [])
+    if (not support or not isinstance(rows, list) or len(rows) != len(support)
+            or any(not isinstance(r, dict) or not isinstance(r.get("selection"), str) for r in rows)
+            or {r["selection"] for r in rows} != support):
+        return {"status": "PREDICTION_SUPPORT_INVALID"}
+    for field in SCORE_FIELDS.values():
+        values = [r.get(field) for r in rows]
+        if (any(type(p) not in {int, float} or not math.isfinite(p) or not 0 <= p <= 1 for p in values)
+                or abs(sum(values) - 1) > 1e-7):
+            return {"status": "PREDICTION_PROBABILITIES_INVALID"}
+    settlements = [e["settlement"] for e in entries]
+    if (not all(settlements) or any(e["status"] == "AMBIGUOUS_REVISION" for e in entries)):
+        return {"status": "PAYOUT_UNAVAILABLE"}
+    if len({s["source_hash"] for s in settlements}) != 1:
+        return {"status": "PAYOUT_EVIDENCE_DIFFERS"}
+    payout = json.loads(store.read_body(settlements[0]["source_hash"], "receipts"))
+    if (payout["race_id"] != race_id or not payout.get("final")
+            or target not in payout.get("complete_markets", [])
+            or payout.get("source_kind") not in {"SYNTHETIC", "OFFICIAL"}):
+        return {"status": "PAYOUT_UNQUALIFIED"}
+    tickets = [t for t in payout.get("tickets", []) if t["market"] == target]
+    if (payout.get("void") or payout.get("special_payouts")
+            or any(t.get("refund_per_100", 0) > 0 for t in tickets)
+            or any(r["status"] in {"EXCLUDED", "CANCELLED_BEFORE_SALES"}
+                   for r in payout.get("runners", {}).values())):
+        return {"status": "NON_ORDINARY_OUTCOME"}
+    winners = [t["selection"] for t in tickets if t.get("payout_per_100", 0) > 0]
+    if len(winners) != 1 or winners[0] not in support:
+        return {"status": "SINGLE_OUTCOME_UNAVAILABLE"}
+    winner = winners[0]
+    scores = {}
+    for model, field in SCORE_FIELDS.items():
+        probability = next(r[field] for r in rows if r["selection"] == winner)
+        scores[model] = {
+            "outcome_probability": probability,
+            "brier": sum((r[field] - int(r["selection"] == winner)) ** 2 for r in rows),
+            "log_loss": -math.log(probability) if probability else None,
+            "log_loss_status": "FINITE" if probability else "INFINITE",
+        }
+    return {"status": "SCORED", "outcome_selection": winner, "models": scores,
+            "payout_revision": settlements[0]["revision"], "source_kind": payout["source_kind"]}
+
+
+def _prediction_scores(store, races, summaries):
+    by_model = {m: {e["race_id"]: e for e in s["entries"]} for m, s in summaries.items()}
+    entries = [{"race_id": race, **_score_race(store, race, list(records.values()),
+                                             [by_model[m][race] for m in records])}
+               for race, records in sorted(races.items())]
+    scored = [e for e in entries if e["status"] == "SCORED"]
+    means = {}
+    for model in SCORE_FIELDS:
+        rows = [e["models"][model] for e in scored]
+        zeros = sum(r["log_loss_status"] == "INFINITE" for r in rows)
+        means[model] = {
+            "race_count": len(rows), "zero_outcome_probability_count": zeros,
+            "mean_brier": sum(r["brier"] for r in rows) / len(rows) if rows else None,
+            "mean_log_loss": sum(r["log_loss"] for r in rows) / len(rows) if rows and not zeros else None,
+            "log_loss_status": "INFINITE" if zeros else "FINITE" if rows else "UNAVAILABLE",
+        }
+    return {"version": "paper-probability-score-v1", "basis": "RECORDED_MARKET_IMPLIED_Q_AND_ASOF_SETTLEMENT",
+            "unit": "ONE_RACE_ONE_ORDINARY_OUTCOME", "brier_definition": "SUM_OVER_ALL_TICKETS",
+            "log_base": "e", "cohort": [e["race_id"] for e in scored], "scored_race_count": len(scored),
+            "unscored_reason_counts": dict(Counter(e["status"] for e in entries if e["status"] != "SCORED")),
+            "models": means, "entries": entries}
 
 
 def compare(store, config, at):
@@ -36,7 +118,7 @@ def compare(store, config, at):
         "generated_at": stamp(store.clock()), "cohort": sorted(races), "race_count": len(races),
         "cohort_basis": "RECORDED_DECISIONS_NOT_ALL_SCHEDULED_RACES",
         "status": "COHORT_MISMATCH" if issues else "EMPTY" if not races else "COMPARED",
-        "issues": issues, "models": {}, "profitability_verified": False,
+        "issues": issues, "models": {}, "prediction_scores": None, "profitability_verified": False,
         "settlement_order": "LATEST_LOCAL_RECORD_NOT_PROVIDER_REVISION_ORDER",
     }
     if issues:
@@ -115,4 +197,5 @@ def compare(store, config, at):
             "max_drawdown_yen_by_decision_time": drawdown if entries and not pending else None,
             "entries": entries,
         }
+    report["prediction_scores"] = _prediction_scores(store, races, report["models"])
     return report
