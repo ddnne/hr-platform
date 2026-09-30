@@ -7,11 +7,11 @@ unblock the Cloudflare source, infer market finality, or place Paper bets.
 from datetime import datetime, timedelta
 import time
 from zoneinfo import ZoneInfo
-from .common import instant, seconds, stamp
+from .common import instant, stamp
 from .parser import ARITY
 from .race_metadata import MetadataEvidence
 from .realdata import completeness
-from .sampling import DAY_FORMAT, INTERVAL, Samples, ZIP_URLS, validate_plan
+from .sampling import DAY_FORMAT, INTERVAL, ZIP_URLS, advance_plan, run_plan, validate_plan
 
 
 def validate_settings(config):
@@ -46,51 +46,17 @@ def make_plan(start, end, config):
 def step(store, plan, *, samples=None):
     if plan.get("format") != DAY_FORMAT:
         raise ValueError("DAY_PLAN_REQUIRED")
-    samples = samples or Samples(store)
-    plan_id = samples.register(plan)
-    now = stamp(store.clock())
-    # Expired slots stay missing. Restarting never downloads a current value for
-    # an old slot, and a single step can make at most one provider request.
-    current = next((x for x in plan["requests"] if stamp(x["at"]) <= now < stamp(x["until"])), None)
-    report = {"plan_id": plan_id, "asof_at": now, "capture": None, "next_at": None}
-    if current:
-        try:
-            report["capture"] = samples.capture(plan, current["id"])
-        except Exception as exc:
-            report["capture"] = {"status": "CAPTURE_ERROR", "error_class": type(exc).__name__}
-        capture = report["capture"]
-        if capture["status"] in {"SOURCE_STOPPED", "INCOMPLETE_ATTEMPT_STOP"}:
-            return {**report, "status": capture["status"]}
-        if capture["status"] == "WAIT" and capture["next_at"] < stamp(current["until"]):
-            report["next_at"] = capture["next_at"]
-    control = store.db.execute("SELECT stopped FROM sample_control WHERE id=1").fetchone()
-    if control[0]:
-        return {**report, "next_at": None, "status": "SOURCE_STOPPED"}
-    if report["next_at"] is None:
-        now = stamp(store.clock())
-        report["next_at"] = next((max(stamp(x["at"]), now) for x in plan["requests"]
-                                  if x is not current and stamp(x["until"]) > now), None)
-    # PLAN_ENDED only describes the schedule. Capture success and market coverage
-    # must be checked separately; this is deliberately not a COMPLETE claim.
-    return {**report, "status": "WAITING" if report["next_at"] else "PLAN_ENDED"}
+    return advance_plan(store, plan, samples=samples)
 
 
 def run(store, plan, config, wait_seconds=0, *, samples=None, sleeper=time.sleep, timer=time.monotonic):
     validate_settings(config)
     if type(wait_seconds) is not int or not 0 <= wait_seconds <= config["max_wait_seconds"]:
         raise ValueError("DAY_WAIT_LIMIT")
-    end = timer() + wait_seconds
-    while True:
-        report = step(store, plan, samples=samples)
-        if report["next_at"] is None:
-            return report
-        while True:
-            delay = seconds(report["next_at"], store.clock())
-            if timer() >= end or delay > end - timer():
-                return report
-            if delay <= 0:
-                break
-            sleeper(min(delay, config["sleep_seconds"]))
+    if plan.get("format") != DAY_FORMAT:
+        raise ValueError("DAY_PLAN_REQUIRED")
+    return run_plan(store, plan, wait_seconds, max_wait_seconds=config["max_wait_seconds"],
+                    sleep_seconds=config["sleep_seconds"], samples=samples, sleeper=sleeper, timer=timer)
 
 
 def race_watch(store, date, at, config):

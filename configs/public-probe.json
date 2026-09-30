@@ -1,0 +1,8 @@
+{
+  "version": "nankankeiba-timing-probe-v1",
+  "interval_seconds": 60,
+  "capture_window_seconds": 5,
+  "before_start_seconds": [310, 250, 190, 130, 70],
+  "max_wait_seconds": 3600,
+  "sleep_seconds": 10
+}
