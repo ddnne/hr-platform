@@ -95,7 +95,7 @@ def test_shadow_does_not_bypass_freshness_or_deadline(inconsistent, config):
     policy = {**shadow(config), 'max_age_seconds': 1}
     stale = decide(inconsistent, f.RACE, f.schedule(), policy)
     assert all(d['reason'] == 'STALE' and d['diagnostics'] is None for d in stale)
-    moments = iter([f.at(4, 10), f.at(7)])
+    moments = iter([f.at(4, 10), f.at(7), f.at(7)])
     late = decide(inconsistent, f.RACE, f.schedule(),
                   {**shadow(config), 'version': 'late-shadow'}, clock=lambda: next(moments))
     assert all(d['reason'] == 'DECISION_TOO_LATE' and d['stake_yen'] == 0 for d in late)

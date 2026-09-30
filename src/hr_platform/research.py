@@ -1,7 +1,6 @@
 """Retrospective diagnostics with an explicit information cutoff; never place Paper bets."""
 
-from datetime import timedelta
-from .common import identity, instant, seconds, stamp
+from .common import identity, paper_asof, seconds, stamp
 from .model import analyze, ModelError
 from .paper import eligibility
 
@@ -45,14 +44,12 @@ def trajectory(store, race_id, markets, at):
 def research_asof(store, race_id, schedule, config, analyzer=analyze):
     if config["target"] in config["references"]:
         raise ValueError("TARGET_IN_REFERENCES")
-    cutoff = stamp((instant(schedule["scheduled_start_at"]) - timedelta(
-        seconds=config["asof_before_start_seconds"]
-    )).isoformat())
+    cutoff = paper_asof(schedule, config, race_id)
     markets = list(dict.fromkeys([config["target"], *config["references"]]))
     view = store.asof(race_id, markets, cutoff, config["max_age_seconds"])
     # Evaluate historical input quality only. This is not evidence that computation
     # completed before the real decision deadline; no historical decision is written.
-    reason = eligibility(view, config, schedule, cutoff)
+    reason = eligibility(view, config, schedule, cutoff, race_id=race_id)
     report = {
         "status": "INPUT_INELIGIBLE" if reason else "ANALYZED",
         "reason": reason,

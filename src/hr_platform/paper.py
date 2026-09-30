@@ -1,24 +1,17 @@
 import json
-from datetime import timedelta
 import math
-from .common import MODEL_PROBABILITY_FIELDS, canonical, identity, instant, stamp, seconds
+from .common import MODEL_PROBABILITY_FIELDS, canonical, identity, instant, paper_asof, stamp, seconds
 from .model import analyze, ModelError
 from .parser import MARKETS
 
 
-def eligibility(view, config, schedule, decision_at):
+def eligibility(view, config, schedule, decision_at, *, race_id=None):
     if view["reason"]:
         return view["reason"]
     asof = view["asof_at"]
     if (
         stamp(schedule["known_at"]) > asof
-        or stamp(
-            (
-                instant(schedule["scheduled_start_at"])
-                - timedelta(seconds=config["asof_before_start_seconds"])
-            ).isoformat()
-        )
-        != asof
+        or paper_asof(schedule, config, race_id) != asof
     ):
         return "SCHEDULE_NOT_KNOWN"
     if seconds(decision_at, asof) < 0 or seconds(decision_at, asof) > config["max_decision_delay_seconds"]:
@@ -103,11 +96,7 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
         if any(x["config_hash"] != config_hash for x in results):
             raise ValueError("EXPERIMENT_CONFIG_CHANGED")
         return results
-    asof = stamp(
-        (
-            instant(schedule["scheduled_start_at"]) - timedelta(seconds=config["asof_before_start_seconds"])
-        ).isoformat()
-    )
+    asof = paper_asof(schedule, config, race_id)
     ready_at = stamp(clock())
     if seconds(ready_at, asof) < 0:
         # Early cron calls do not consume the immutable due-time decision.
@@ -119,7 +108,7 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
     else:
         view = store.asof(race_id, [config["target"], *config["references"]], asof, config["max_age_seconds"])
     now = ready_at
-    reason = eligibility(view, config, schedule, now)
+    reason = eligibility(view, config, schedule, now, race_id=race_id)
     result = None
     assumptions = list(view.get("research_assumptions", []))
     if reason is None:
@@ -141,9 +130,9 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
             # Unexpected solver/model failures consume this fixed decision as a
             # no-bet too. They must not leave it open for a later price retry.
             reason = "MODEL_ERROR"
-    completed = stamp(clock())
+    model_completed = stamp(clock())
     # Recheck deadline after computation, never present start time as completion.
-    after_reason = eligibility(view, config, schedule, completed)
+    after_reason = eligibility(view, config, schedule, model_completed, race_id=race_id)
     reason = after_reason or reason
     day = (
         instant(schedule["scheduled_start_at"])
@@ -185,7 +174,9 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                 "selection": row["selection"] if row else None,
                 "stake_yen": config["stake_yen"] if row else 0,
                 "asof_at": asof,
-                "decision_at": completed,
+                "decision_started_at": ready_at,
+                "model_completed_at": model_completed,
+                "decision_timing_basis": "CANDIDATES_FINALIZED_BEFORE_LEDGER_COMMIT",
                 "schedule": schedule,
                 "paper_timing_assumption": config["paper_timing_assumption"],
                 "sync_evidence": "common_file"
@@ -199,21 +190,29 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                 "code_version": "0.1.0",
                 "real_stake_yen": 0,
             }
+            decisions.append(record)
+        # Lock acquisition, candidate selection and daily-limit checks also take
+        # time. All three candidates must be final before the common deadline.
+        completed = stamp(clock())
+        after_reason = eligibility(view, config, schedule, completed, race_id=race_id)
+        for record in decisions:
+            record["decision_at"] = completed
+            if after_reason:
+                record.update(status="NO_BET", reason=after_reason, selection=None, stake_yen=0)
             store.db.execute(
                 "INSERT INTO decisions VALUES(?,?,?,?,?,?,?)",
                 (
-                    decision_id,
+                    record["id"],
                     experiment,
-                    model,
+                    record["model"],
                     race_id,
                     day,
                     record["stake_yen"],
                     canonical(record).decode(),
                 ),
             )
-            # Match the persisted JSON representation on first delivery and replay.
-            decisions.append(json.loads(canonical(record)))
-    return decisions
+    # Match the persisted JSON representation on first delivery and replay.
+    return json.loads(canonical(decisions))
 
 
 def settle(store, decision_id, payout):

@@ -1,0 +1,30 @@
+version: IRCD-v0.4-exploratory-004-near-close
+mode: EXPLORATORY_SHADOW
+target: quinella
+references: [win, exacta]
+# SPAT4 standard deadlines, not observed race-specific sales close times.
+# Fix input 60 s before assumed close; finish within 30 s or record NO_BET.
+asof_before_start_seconds: 180
+asof_before_start_seconds_by_venue:
+  浦和: 120
+  船橋: 120
+  大井: 120
+  川崎: 120
+max_decision_delay_seconds: 30
+max_age_seconds: 300
+max_source_skew_seconds: 120
+lambda: 0.0001
+sensitivity_lambdas: [0.000001, 0.01]
+stake_yen: 100
+max_tickets_per_race: 1
+comparison_models: [direct, marginal, reference]
+daily_stake_limit_yen_per_model: 10000
+stress_fractions: [0, 0.1, 0.2]
+tie_tolerance: 0.000000001
+probability_tolerance: 0.0000001
+solver: WIN_EXACTA_NEWTON_V1
+solver_max_iter: 300
+identification_epsilon: 0.000001
+paper_timing_assumption: spat4_standard_deadline_input_60s_before_close_no_observed_sales_close
+freshness_basis: collector_receipt_only_source_update_unknown
+reference_constraint_policy: allow_inconsistent_shadow

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 
@@ -23,6 +23,17 @@ def stamp(value):
 
 def seconds(later, earlier):
     return (instant(later) - instant(earlier)).total_seconds()
+
+
+def paper_asof(schedule, config, race_id=None):
+    """One configured cutoff for enrollment, Paper and retrospective diagnostics."""
+    offset = config["asof_before_start_seconds"]
+    overrides = config.get("asof_before_start_seconds_by_venue", {})
+    if overrides:
+        if not race_id or len(race_id.split(":")) != 3:
+            raise ValueError("TIMING_RACE_ID_REQUIRED")
+        offset = overrides.get(race_id.split(":")[1], offset)
+    return stamp((instant(schedule["scheduled_start_at"]) - timedelta(seconds=offset)).isoformat())
 
 
 def canonical(value):
