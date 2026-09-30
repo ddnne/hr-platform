@@ -11,7 +11,7 @@
   "preview_urls": false,
   "triggers": {
     "crons": [
-      "*/5 * * * *"
+      "* * * * *"
     ]
   },
   "observability": {
@@ -23,7 +23,14 @@
   },
   "vars": {
     "ARCHIVE_ENABLED": "true",
-    "BACKFILL_DAYS": "7"
+    "BACKFILL_DAYS": "7305",
+    "ARCHIVE_MIN_INTERVAL_MS": "60000",
+    "ARCHIVE_SLOT_WINDOW_MS": "120000",
+    "ARCHIVE_REQUEST_TIMEOUT_MS": "30000",
+    "ARCHIVE_REQUEST_LEASE_MS": "180000",
+    "ARCHIVE_RETRY_WAIT_MS": "120000",
+    "ARCHIVE_MAX_BODY_BYTES": "16777216",
+    "ARCHIVE_DISPLAY_TIMES": "24"
   },
   "d1_databases": [
     {
