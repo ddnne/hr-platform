@@ -58,6 +58,12 @@ def test_live_video_link_is_not_the_selected_odds_navigation():
     assert parse_state_page(video.encode() + raw, f.RACE) == parse_state_page(raw, f.RACE)
 
 
+def test_jockey_change_is_recognized_without_claiming_active_runner():
+    state = parse_state_page(page(stage="13:55現在", change="騎手変更"), f.RACE)
+    assert state["runners"]["2"] == {"change_label": "騎手変更", "status": "JOCKEY_CHANGED", "active": None}
+    assert not state["paper_eligible"] and state["source_updated_at"] is None
+
+
 def test_changed_start_heading_keeps_new_time_and_explicit_label():
     raw = page(stage="14:01現在", change="").decode()
     for suffix in ("(変更)", "（変更）"):
