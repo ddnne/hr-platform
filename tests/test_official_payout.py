@@ -8,11 +8,12 @@ from hr_platform.race_state import StateEvidence
 from test_race_state import receipt as state_receipt
 
 
-def page(status="除外", amount=650):
-    header = "<tr>" + "".join(f"<th>{h}</th>" for h in HEADERS) + "</tr>"
+def page(status="除外", amount=650, *, corners=True):
+    headers = HEADERS if corners else [h for h in HEADERS if h != "コーナー通過順"]
+    header = "<tr>" + "".join(f"<th>{h}</th>" for h in headers) + "</tr>"
     order = [(1, "1"), (2, status), (3, "2"), (4, "3")]
     rows = "".join(
-        "<tr>" + "".join(f"<td>{v}</td>" for v in [rank, "1", str(h)] + ["SYNTHETIC"] * 13) + "</tr>"
+        "<tr>" + "".join(f"<td>{v}</td>" for v in [rank, "1", str(h)] + ["SYNTHETIC"] * (len(headers) - 3)) + "</tr>"
         for h, rank in order
     )
     return (
@@ -30,6 +31,14 @@ def receipt(raw, minute=15):
     r = state_receipt(raw, minute)
     r["url"] = r["url"].replace("OddsTanFuku", "RaceMarkTable")
     return r
+
+
+def test_missing_corner_column_preserves_payouts_and_requires_matching_rows():
+    assert parse_payout_page(page(corners=False), f.RACE) == parse_payout_page(page(), f.RACE)
+    # A missing header alone must not silently shift mismatched result rows.
+    malformed = page().decode().replace("<th>コーナー通過順</th>", "").encode()
+    with pytest.raises(ValueError, match="PAYOUT_GRADE_ROW"):
+        parse_payout_page(malformed, f.RACE)
 
 
 @pytest.mark.parametrize("status,refunds", [("除外", 6), ("中止", 0), ("取消", 0)])
