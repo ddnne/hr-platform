@@ -186,6 +186,22 @@ def test_bounded_foreground_wait_drives_only_registered_slots_and_fixed_decision
     assert len(sleeps) == before
 
 
+def test_one_finite_run_reaches_payout_without_agent_restarts(session):
+    from datetime import timedelta
+    from hr_platform.common import instant
+    from hr_platform.session import run
+    store, paper, capture, samples, calls = session
+    elapsed = [0.0]
+    start = instant(f.at(-4))
+    store.clock = lambda: (start + timedelta(seconds=elapsed[0])).isoformat()
+    result = run(store, paper["id"], capture, 3600, samples=samples,
+                 sleeper=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay),
+                 timer=lambda: elapsed[0])
+    assert result["status"] == "COMPLETE" and len(result["settlements"]) == 3
+    assert calls == [f"sample-{i}" for i in range(5)]
+    assert 900 < elapsed[0] <= 3600
+
+
 def test_decision_cutoff_crossed_after_not_due_is_not_skipped(session, monkeypatch):
     store, paper, capture, samples, calls = session
     for minute in [-3, -1, 1, 3]:

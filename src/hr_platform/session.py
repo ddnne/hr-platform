@@ -1,6 +1,6 @@
 """One finite, prospective Paper experiment using existing capture and ledger code.
 
-A step never sleeps or schedules itself. An optional short foreground run waits
+A step never sleeps or schedules itself. An optional finite foreground run waits
 for the next planned action; it does not install a recurring collector.
 """
 
@@ -79,7 +79,7 @@ def step(store, paper_plan_id, sample_plan, *, samples=None):
 
 def run(store, paper_plan_id, sample_plan, wait_seconds=0, *, samples=None, sleeper=time.sleep, timer=time.monotonic):
     """Advance once, optionally waiting within a bounded foreground window."""
-    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 900:
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 3600:
         raise ValueError("SESSION_WAIT_LIMIT")
     end = timer() + wait_seconds
     while True:

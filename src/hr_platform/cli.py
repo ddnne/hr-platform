@@ -43,7 +43,7 @@ def arguments():
     session = commands.add_parser("paper-session", help="有限取得・固定Paper判断・公式精算を進める。常時起動はしない")
     session.add_argument("--paper-plan", required=True)
     session.add_argument("--sample-plan", required=True)
-    session.add_argument("--wait-seconds", type=int, default=0, help="次の枠まで待機できる時間。既定0、最大900秒")
+    session.add_argument("--wait-seconds", type=int, default=0, help="次の枠まで待機できる時間。既定0、最大3600秒")
     inspect = commands.add_parser("inspect", help="取得時刻不明のZIPを検査。観測履歴へは追加しない")
     inspect.add_argument("--zip", required=True)
     inspect.add_argument("--kind", choices=["DAILY_SNAPSHOT", "FINAL_ONLY"], required=True)
