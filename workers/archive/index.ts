@@ -37,9 +37,10 @@ export function archiveUrl(job: Job, displayTimes: number, maximumPages: number)
 
 export function inspectPage(value: unknown, job: Job, displayTimes: number) {
   const data = object(value), info = object(data.nar_info), total = data.total_count;
-  // A date with no listed races uses null instead of the usual race array.
+  // Empty dates and the page after the last race use null. Navigation may remain.
   const empty = data.race_type === null && total === 0 && info.race_info === null
-    && [info.races, info.date_info, info.track_info].every(v => Array.isArray(v) && v.length === 0);
+    && Array.isArray(info.races) && info.races.length === 0
+    && [info.date_info, info.track_info].every(v => Array.isArray(v) && v.every(item => typeof item === "string"));
   const raceValues = empty ? [] : info.race_info;
   if (data.race_kind !== "nar" || (!empty && data.race_type !== "NAR_TODAY") || data.race_date !== job.day
       || info.race_date !== job.day || typeof total !== "number" || !Number.isInteger(total)

@@ -181,6 +181,23 @@ test('variable page sizes are followed until an empty page without assuming two 
  }finally{await r.mf.dispose();}
 });
 
+test('an empty tail with navigation ends the day and the next date continues',async()=>{
+ const empty={race_kind:'nar',race_type:null,race_date:'2026-09-29',total_count:0,
+  nar_info:{race_date:'2026-09-29',race_info:null,races:[],date_info:['2026-09-29'],track_info:['合成競馬場']}};
+ const r=await runtime([{body:page('2026-09-29',[1],1)},{body:empty},{body:page('2026-09-28',[1],1)}]);
+ try{
+  assert.equal((await r.tick()).status,'STORED');
+  assert.equal((await r.tick(start+120000)).status,'STORED');
+  const attempt=await r.db.prepare("SELECT * FROM archive_attempts WHERE day='2026-09-29' AND page=2").first();
+  const manifest=await (await r.raw.get('archive/manifests/'+attempt.event_id+'.json')).json();
+  assert.equal(manifest.coverage_status,'NO_RACES_RETURNED');assert.equal(manifest.has_more,false);
+  assert.equal(manifest.pagination_completeness,'UNVERIFIED');
+  assert.equal((await r.db.prepare("SELECT count(*) n FROM archive_jobs WHERE day='2026-09-29' AND page=3").first()).n,0);
+  assert.equal((await r.tick(start+240000)).status,'STORED');
+  assert.equal(new URL(r.requests[2]).searchParams.get('race_date'),'2026-09-28');
+ }finally{await r.mf.dispose();}
+});
+
 test('a known metadata-only archive preserves missing odds and queues the next page',async()=>{
  const data=page('2026-09-29',[1],3);
  data.nar_info.race_info[0].odds_info={sikis:null,siki_odds_times:null};

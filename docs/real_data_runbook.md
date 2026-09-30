@@ -375,7 +375,7 @@ uv run python -m hr_platform.cli --root private/real import-metadata \
 uv run python -m hr_platform.cli --root private/real metadata-history \
   --date YYYYMMDD --at '利用可能時刻の上限'
 uv run python -m hr_platform.cli --root private/real paper-plan \
-  --race '日付:競馬場:競走番号' --config configs/research-shadow.yaml
+  --race '日付:競馬場:競走番号' --config configs/research-shadow-newton.yaml
 uv run python -m hr_platform.cli --root private/real paper-tick --plan '保存された計画ID'
 ```
 
@@ -387,6 +387,7 @@ fetch_started_at/headers_received_at/collector_received_at/raw_saved_atを持つ
 利用可能時刻は再解析時点として記録する。全解析版の履歴は保持する。
 
 `paper-plan`は利用可能な競走情報から予定を決め、判断時刻前にだけ新規登録する。
+新規登録は探索v003を使う。登録済みのv002計画と台帳は維持し、版を分けて集計する。
 返値の`private_report`を開くと計画IDが分かる。同一実験の設定変更や過去時刻への新規登録はエラー。
 登録完了が基準時刻を越えた計画は見送りにする。未判断の`paper-plan`/`paper-tick`は、
 現在までに判明した予定変更を履歴付きで反映する。変更後の基準時刻が過去なら遡って購入しない。
