@@ -177,6 +177,9 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
         actual = json.loads(Path('wrangler.jsonc').read_text())
         assert config['r2_buckets'] == actual['r2_buckets']
         assert config['d1_databases'][0]['database_id'] == actual['d1_databases'][0]['database_id']
+        assert json.loads(config['vars']['STORAGE_POLICY_JSON']) == json.loads(
+            Path('configs/cloud-storage.json').read_text())
+        assert config['limits']['cpu_ms'] == json.loads(Path('configs/cloud-storage.json').read_text())['worker_cpu_ms']
     else:
         assert not {'r2_buckets', 'd1_databases'} & config.keys()
     assert config["python_modules"]["exclude"] == ["**/*.pyc", "**/tests/**", "**/*.pyi"]

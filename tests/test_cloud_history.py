@@ -330,3 +330,108 @@ def test_history_byte_budget_advances_cursor_without_dropping_rows(cloud, monkey
                 break
         assert result == expected
     asyncio.run(scenario())
+
+
+def multi_race_archive(count):
+    import io
+    import zipfile
+    from hr_platform.parser import unzip
+
+    rows = next(iter(unzip(f.archive()).values())).splitlines(keepends=True)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w') as archive:
+        data = rows[0] + b''.join(b''.join(rows[1:]).replace(b'SYNTHETIC', f'SYNTHETIC{i}'.encode())
+                                  for i in range(count))
+        archive.writestr('20000101_odds.csv', data)
+    return out.getvalue()
+
+
+class PendingBucket(Bucket):
+    def __init__(self):
+        super().__init__()
+        self.active = self.peak = 0
+        self.fail_first_put = False
+
+    async def get(self, key):
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(0)
+            return await super().get(key)
+        finally:
+            self.active -= 1
+
+    async def put(self, key, text):
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        fail, self.fail_first_put = self.fail_first_put, False
+        try:
+            await asyncio.sleep(0)
+            if fail:
+                raise RuntimeError('injected R2 failure')
+            await super().put(key, text)
+        finally:
+            self.active -= 1
+
+
+@pytest.mark.parametrize('byte_budget,peak', [(1048576, 3), (1, 1)])
+def test_parallel_storage_keeps_hashes_history_and_batch_limit(cloud, byte_budget, peak):
+    async def scenario():
+        raw = multi_race_archive(5)
+        first = await cloud.h.normalize(cloud.seed(1, 0, raw))
+        bucket = PendingBucket()
+        bucket.objects = dict(cloud.bucket.objects)
+        policy = json.loads(Path('configs/cloud-storage.json').read_text())
+        policy['normalization_batch_bytes'] = byte_budget
+        h = CloudHistory(bucket, cloud.db, cloud.h.clock, storage_policy=policy)
+        second_id = cloud.seed(2, 2, raw)
+        cloud.clock[0] = f.at(8)
+        second = await h.normalize(second_id)
+        assert second['body_hash'] == first['body_hash']
+        assert second['available_at'] == stamp(f.at(8))
+        assert bucket.peak == peak and bucket.active == 0
+        # Five existing race bodies plus their manifest, one GET each, no HEAD+GET.
+        assert bucket.normalized_reads == 6 and bucket.writes == 0
+        old = await h.asof('20000101:SYNTHETIC0:1', ['win'], f.at(5))
+        assert old['markets']['win']['observation_id'] == first['observation_id']
+        assert await h.normalize(second_id) == second
+    asyncio.run(scenario())
+
+
+def test_storage_failure_drains_batch_and_never_publishes_partial_data(cloud):
+    async def scenario():
+        event = cloud.seed(1, 0, multi_race_archive(4))
+        bucket = PendingBucket()
+        bucket.objects = dict(cloud.bucket.objects)
+        bucket.fail_first_put = True
+        h = CloudHistory(bucket, cloud.db, cloud.h.clock,
+                         storage_policy=json.loads(Path('configs/cloud-storage.json').read_text()))
+        with pytest.raises(RuntimeError, match='injected R2 failure'):
+            await h.normalize(event)
+        assert bucket.active == 0 and bucket.writes == 2
+        assert cloud.db.conn.execute('SELECT count(*) FROM odds_parses').fetchone()[0] == 0
+        assert not (await h.history('20000101:SYNTHETIC0:1', f.at(5)))['history']
+        cloud.clock[0] = f.at(8)
+        result = await h.normalize(event)
+        assert result['available_at'] == stamp(f.at(8))
+        assert not (await h.history('20000101:SYNTHETIC0:1', f.at(5)))['history']
+        assert len((await h.history('20000101:SYNTHETIC0:1', f.at(8)))['history']) == 1
+    asyncio.run(scenario())
+
+
+def test_single_read_of_existing_body_still_rejects_corruption(cloud):
+    data = b'SYNTHETIC normalized body'
+    cloud.bucket.objects[f'odds-normalized/{sha(data)}'] = b'corrupt'
+    with pytest.raises(ValueError, match='BODY_CORRUPT'):
+        asyncio.run(cloud.h.save_body(data))
+    assert cloud.bucket.normalized_reads == 1 and cloud.bucket.writes == 0
+
+
+@pytest.mark.parametrize('field,value', [('normalization_concurrency', True),
+    ('normalization_concurrency', 5), ('normalization_batch_bytes', 0)])
+def test_invalid_storage_limits_fail_before_io(cloud, field, value):
+    policy = json.loads(Path('configs/cloud-storage.json').read_text())
+    policy[field] = value
+    with pytest.raises(ValueError, match='STORAGE_POLICY'):
+        CloudHistory(cloud.bucket, cloud.db, storage_policy=policy)
+    assert cloud.bucket.writes == cloud.bucket.normalized_reads == 0

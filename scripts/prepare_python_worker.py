@@ -43,6 +43,12 @@ def prepare(destination, with_storage=False):
         "python_modules": {"exclude": ["**/*.pyc", "**/tests/**", "**/*.pyi"]},
     }
     if with_storage:
+        from hr_platform.cloud_history import storage_limits
+
+        policy = json.loads((repo / "configs/cloud-storage.json").read_text())
+        storage_limits(policy)
+        config['vars'] = {'STORAGE_POLICY_JSON': json.dumps(policy, separators=(',', ':'))}
+        config['limits'] = {'cpu_ms': policy['worker_cpu_ms']}
         storage = json.loads((repo / "wrangler.jsonc").read_text())
         for key in ("r2_buckets", "d1_databases"):
             config[key] = storage[key]
