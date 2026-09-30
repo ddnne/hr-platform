@@ -28,10 +28,10 @@ const page = (day='2026-09-29',numbers=[1,2],total=3) => ({race_kind:'nar',race_
  horse_info:{1:{},2:{},3:{},4:{}},odds_info:{time_odds_times:{umaren:['最終','13:50']},
  time_pops:{umaren:[{'1-2':4.0},{'1-2':4.2}]}}}))}});
 
-async function runtime(responses, backfill='7') {
+async function runtime(responses, backfill='7', enabled='true') {
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,
-  compatibilityDate:'2026-09-30',bindings:{...configured,BACKFILL_DAYS:backfill},
+  compatibilityDate:'2026-09-30',bindings:{...configured,BACKFILL_DAYS:backfill,ARCHIVE_ENABLED:enabled},
   d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),outboundService:async req=>{
    requests.push(req.url);const r=responses.shift();assert.ok(r,'unexpected external access');
    return new Response(typeof r.body==='string'?r.body:JSON.stringify(r.body??{}),
@@ -43,6 +43,16 @@ async function runtime(responses, backfill='7') {
  const tick=async(at=start,delay=0,day,saveDelay=0)=>(await mf.dispatchFetch('http://test/tick?at='+at+'&delay='+delay+(day?'&day='+day:'')+'&save_delay='+saveDelay)).json();
  return {mf,db,requests,tick,raw:await mf.getR2Bucket('RAW')};
 }
+
+test('disabled source neither requests data nor recreates deleted archive jobs',async()=>{
+ const r=await runtime([],'7',configured.ARCHIVE_ENABLED);
+ try {
+  assert.equal((await r.tick()).status,'DISABLED');
+  assert.equal(r.requests.length,0);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM archive_jobs').first()).n,0);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM archive_attempts').first()).n,0);
+ } finally {await r.mf.dispose();}
+});
 
 test('closed-day pagination stores originals; cadence and event replay do not fetch twice',async()=>{
  const r=await runtime([{body:page()},{body:page('2026-09-29',[3])}]);
