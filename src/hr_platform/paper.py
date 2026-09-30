@@ -1,7 +1,7 @@
 import json
 from datetime import timedelta
 import math
-from .common import canonical, identity, instant, stamp, seconds
+from .common import MODEL_PROBABILITY_FIELDS, canonical, identity, instant, stamp, seconds
 from .model import analyze, ModelError
 from .parser import MARKETS
 
@@ -53,7 +53,7 @@ def eligibility(view, config, schedule, decision_at):
 
 
 def select(rows, model, tolerance):
-    field = {"reference": "p_ref", "marginal": "p_marg", "direct": "p_direct"}[model]
+    field = MODEL_PROBABILITY_FIELDS[model]
     candidates = []
     for row in rows:
         edge = row[field] * row["odds"] - 1
