@@ -1,11 +1,13 @@
 /** Capture only. Market availability remains null until a separately versioned parser publishes it.
  * No data API, model dependency, credentials for wagering, or automatic deployment.
  */
+import {boundedBody, discard, fetchPublic, retryAfter, USER_AGENT} from "../http";
+export {boundedBody, retryAfter} from "../http";
+
 const SOURCE = "nar-daily-odds";
 const URL = "https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=daily";
-const MAX_BYTES = 16 * 1024 * 1024;
 const INTERVAL = 120_000;
-const REQUEST_HEADERS = {"User-Agent": "hr-platform-personal-research/0.1", "Accept": "application/zip"};
+const REQUEST_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/zip"};
 interface Manifest {
   event_id: string; scheduled_capture_at: string; fetch_started_at: string;
   headers_received_at: string; collector_received_at: string; raw_saved_at: string | null; raw_sha256: string; raw_bytes: number;
@@ -14,45 +16,6 @@ interface Manifest {
   duration_ms: number;
 }
 const iso = (n: number) => new Date(n).toISOString();
-async function discard(response: Response): Promise<void> {
-  // Cleanup failure must never bypass refusal or Retry-After controls.
-  try { await response.body?.cancel(); } catch { /* already errored/closed */ }
-}
-
-export function retryAfter(value: string | null, now: number): number {
-  if (value === null) return now + INTERVAL;
-  const seconds = /^\d+$/.test(value.trim()) ? Number(value) : NaN;
-  const at = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(value);
-  return Number.isFinite(at) ? Math.max(now + INTERVAL, at) : now + INTERVAL;
-}
-
-export async function boundedBody(response: Response): Promise<Uint8Array> {
-  const length = Number(response.headers.get("content-length"));
-  if (length > MAX_BYTES) {
-    await discard(response);
-    throw new Error("BODY_LIMIT");
-  }
-  if (!response.body) throw new Error("BODY_EMPTY");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > MAX_BYTES) throw new Error("BODY_LIMIT");
-      chunks.push(next.value);
-    }
-  } finally {
-    await reader.cancel();
-  }
-  const all = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; }
-  return all;
-}
-
 async function publish(env: Env, m: Manifest, processingStarted: number): Promise<void> {
   // R2 object and manifest must both exist before publishing an observation index.
   const raw = await env.RAW.head(`raw/${m.raw_sha256}`);
@@ -126,8 +89,8 @@ export async function capture(scheduledTime: number, env: Env): Promise<void> {
   try {
     if (env.CAPTURE_SLOTS_JSON !== undefined
         && !sampleSlotAllowed(env.CAPTURE_SLOTS_JSON, scheduledTime, Date.now())) throw new Error("SAMPLE_WINDOW_EXPIRED");
-    const response = await fetch(URL, {redirect: "manual", signal: controller.signal,
-      headers: {...REQUEST_HEADERS, ...(prior?.etag ? {"If-None-Match": prior.etag} : {})}});
+    const response = await fetchPublic(URL, "application/zip", controller.signal,
+      prior?.etag ? {"If-None-Match": prior.etag} : {});
     httpStatus = response.status;
     contentType = response.headers.get("content-type");
     cfMitigated = response.headers.get("cf-mitigated");
