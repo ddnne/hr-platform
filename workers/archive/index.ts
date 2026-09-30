@@ -15,6 +15,7 @@ function settings(env: ArchiveEnv) {
     window: positive("ARCHIVE_SLOT_WINDOW_MS"), timeout: positive("ARCHIVE_REQUEST_TIMEOUT_MS"),
     lease: positive("ARCHIVE_REQUEST_LEASE_MS"), retryWait: positive("ARCHIVE_RETRY_WAIT_MS"),
     maximumBytes: positive("ARCHIVE_MAX_BODY_BYTES"), displayTimes: positive("ARCHIVE_DISPLAY_TIMES"),
+    maximumPages: positive("ARCHIVE_MAX_PAGES"),
   };
   if (config.lease < config.window + config.timeout) throw new Error("ARCHIVE_CONFIG:lease");
   return config;
@@ -27,9 +28,9 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export function archiveUrl(job: Job, displayTimes: number): string {
+export function archiveUrl(job: Job, displayTimes: number, maximumPages: number): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(job.day) || iso(Date.parse(job.day)).slice(0,10) !== job.day
-      || !Number.isInteger(job.page) || job.page < 1 || job.page > 100) throw new Error("ARCHIVE_JOB");
+      || !Number.isInteger(job.page) || job.page < 1 || job.page > maximumPages) throw new Error("ARCHIVE_JOB");
   return "https://keibaodds.com/odds?" + new URLSearchParams({page: String(job.page), display_times: String(displayTimes),
     race_kind: "nar", race_date: job.day, date_limit: "4", time: "00:00"});
 }
@@ -37,13 +38,13 @@ export function archiveUrl(job: Job, displayTimes: number): string {
 export function inspectPage(value: unknown, job: Job, displayTimes: number) {
   const data = object(value), info = object(data.nar_info), total = data.total_count;
   // A date with no listed races uses null instead of the usual race array.
-  const empty = job.page === 1 && data.race_type === null && total === 0 && info.race_info === null
+  const empty = data.race_type === null && total === 0 && info.race_info === null
     && [info.races, info.date_info, info.track_info].every(v => Array.isArray(v) && v.length === 0);
   const raceValues = empty ? [] : info.race_info;
   if (data.race_kind !== "nar" || (!empty && data.race_type !== "NAR_TODAY") || data.race_date !== job.day
       || info.race_date !== job.day || typeof total !== "number" || !Number.isInteger(total)
       || total < 0 || total > 200 || !Array.isArray(raceValues)
-      || raceValues.length !== Math.min(2, Math.max(0, total - (job.page - 1) * 2))) {
+      || raceValues.length > total) {
     throw new Error("ARCHIVE_SCOPE_OR_PAGINATION");
   }
   const races = raceValues.map((value: unknown) => {
@@ -51,7 +52,9 @@ export function inspectPage(value: unknown, job: Job, displayTimes: number) {
     if (race.race_type !== "NAR" || identity.race_date !== job.day || typeof identity.track !== "string"
         || typeof identity.race !== "number" || !Number.isInteger(identity.race)
         || identity.race < 1 || identity.race > 12 || typeof identity.course !== "string") throw new Error("ARCHIVE_RACE");
-    const clocks = object(odds.time_odds_times), pops = object(odds.time_pops);
+    const missingOdds = Object.keys(odds).length === 2 && odds.sikis === null && odds.siki_odds_times === null;
+    const clocks = missingOdds ? {} : object(odds.time_odds_times);
+    const pops = missingOdds ? {} : object(odds.time_pops);
     const markets = Object.fromEntries(bets.filter(bet => bet in clocks).map(bet => {
       const labels = clocks[bet];
       if (!Array.isArray(labels) || labels.length > displayTimes || !labels.every(t => typeof t === "string")) {
@@ -66,11 +69,14 @@ export function inspectPage(value: unknown, job: Job, displayTimes: number) {
     }));
     return {race_id: `${job.day}:${identity.track}:${identity.race}`,
       discipline: !identity.track.includes("帯広") && /^(?:ダート|芝)\s*[\d０-９]/.test(identity.course) ? "FLAT" : "EXCLUDED_OR_UNKNOWN",
-      runners: Object.keys(object(race.horse_info)).length, markets};
+      runners: Object.keys(object(race.horse_info)).length, markets,
+      odds_status: Object.keys(markets).length ? "RETURNED" : "ODDS_NOT_RETURNED"};
   });
   if (new Set(races.map(r => r.race_id)).size !== races.length) throw new Error("ARCHIVE_DUPLICATE_RACE");
-  return {total_count: total, pages: Math.ceil(total / 2), races,
-    coverage_status: total === 0 ? "NO_RACES_RETURNED" : "RACES_RETURNED",
+  return {total_count: total, page_races: races.length, has_more: races.length > 0, races,
+    // Page sizes differ across old archives. Walk until empty; coverage is checked offline.
+    pagination_completeness: "UNVERIFIED",
+    coverage_status: races.length === 0 ? "NO_RACES_RETURNED" : "RACES_RETURNED",
     dataset_kind: "HISTORICAL_ARCHIVE", paper_eligible: false,
     source_updated_at: null, historical_available_at: null,
     timing_uncertainty: ["CLOCK_ONLY_LABELS", "PUBLICATION_DELAY_UNKNOWN"]};
@@ -112,7 +118,7 @@ export async function collectArchive(slot: number, env: ArchiveEnv, requestedDay
     : await env.INDEX.prepare("SELECT day,page FROM archive_jobs WHERE status='PENDING' AND day=? ORDER BY page LIMIT 1")
       .bind(requestedDay).first<Job>();
   if (!job) return {status: "IDLE"};
-  const url = archiveUrl(job, config.displayTimes);
+  const url = archiveUrl(job, config.displayTimes, config.maximumPages);
   await env.INDEX.prepare(`INSERT INTO archive_attempts(event_id,day,page,status,scheduled_at,reserved_at)
     VALUES(?,?,?,'PENDING',?,?)`).bind(event, job.day, job.page, iso(slot), iso(now)).run();
   let stage = "NETWORK", retryAt = 0;
@@ -171,14 +177,15 @@ export async function collectArchive(slot: number, env: ArchiveEnv, requestedDay
     stage = "PARSE";
     const inventory = inspectPage(JSON.parse(body), job, config.displayTimes);
     receipt.parsed_at = iso(Date.now());
-    const manifest = {...receipt, ...inventory};
+    const manifest = {...receipt, ...inventory,
+      page_limit_reached: inventory.has_more && job.page >= config.maximumPages};
     await env.RAW.put(`archive/manifests/${event}.json`, JSON.stringify(manifest));
     const statements = [env.INDEX.prepare(`UPDATE archive_attempts SET status='STORED',http_status=200,fetch_started_at=?,
       headers_received_at=?,received_at=?,raw_saved_at=?,raw_sha256=?,raw_bytes=?,parsed_at=?,
       available_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),duration_ms=? WHERE event_id=?`)
       .bind(receipt.fetch_started_at,receipt.headers_received_at,receipt.received_at,receipt.raw_saved_at,hash,raw.length,receipt.parsed_at,Date.now()-now,event),
       env.INDEX.prepare("UPDATE archive_jobs SET status='DONE' WHERE day=? AND page=?").bind(job.day,job.page)];
-    if (job.page < inventory.pages) statements.push(env.INDEX.prepare("INSERT OR IGNORE INTO archive_jobs(day,page) VALUES(?,?)").bind(job.day,job.page+1));
+    if (inventory.has_more && job.page < config.maximumPages) statements.push(env.INDEX.prepare("INSERT OR IGNORE INTO archive_jobs(day,page) VALUES(?,?)").bind(job.day,job.page+1));
     await env.INDEX.batch([...statements, release()]);
     return {status: "STORED", races: inventory.races.length, bytes: raw.length};
   } catch (error) {
