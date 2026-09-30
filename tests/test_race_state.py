@@ -58,6 +58,19 @@ def test_live_video_link_is_not_the_selected_odds_navigation():
     assert parse_state_page(video.encode() + raw, f.RACE) == parse_state_page(raw, f.RACE)
 
 
+def test_changed_start_heading_keeps_new_time_and_explicit_label():
+    raw = page(stage="14:01現在", change="").decode()
+    for suffix in ("(変更)", "（変更）"):
+        changed = raw.replace("14:10発走", "14:16発走" + suffix).encode()
+        state = parse_state_page(changed, f.RACE)
+        assert state["scheduled_start_at"] == "2000-01-01T14:16:00+09:00"
+        assert state["schedule_change_displayed"] is True
+        assert state["source_updated_at"] is None and not state["paper_eligible"]
+    assert parse_state_page(raw.encode(), f.RACE)["schedule_change_displayed"] is False
+    with pytest.raises(ValueError, match="STATE_RACE_IDENTITY"):
+        parse_state_page(raw.replace("発走", "発走(不明)").encode(), f.RACE)
+
+
 @pytest.mark.parametrize('href', [
     '/KeibaWeb/TodayRaceInfo/OddsTanFuku?k_raceDate=2000%2F01%2F01&k_raceNo=1&k_babaCode=19',
     'https://other.example/KeibaWeb/TodayRaceInfo/OddsTanFuku?k_raceDate=2000%2F01%2F01&k_raceNo=1&k_babaCode=19',
