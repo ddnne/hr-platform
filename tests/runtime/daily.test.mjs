@@ -7,7 +7,7 @@ import {Miniflare, Log, LogLevel, convertV4MiniflareOptions} from 'miniflare';
 // Only this synthetic harness exposes drive/state. Production HTTP remains 404.
 const code = await build({stdin:{contents:`
 import {NarCollector,nextJob} from './workers/ingestion/daily.ts';
-import {registerPage} from './workers/ingestion/pages.ts';
+import {registerPage,registerEvidenceBatch} from './workers/ingestion/pages.ts';
 export class TestCollector extends NarCollector {
  constructor(ctx,env){let failures=0,notification=Promise.resolve(null);const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
   const st=env.INDEX.prepare(sql);
@@ -22,8 +22,9 @@ export class TestCollector extends NarCollector {
     await ctx.storage.put('notification',{alarm,job});throw new Error('synthetic parser failure');
   })();return notification;}}:undefined;
   super(ctx,{...env,INDEX:index,RESEARCH:research});this.notification=()=>notification.catch(()=>null);}
- async drive(at,kind,now){const page=['state','payout'].includes(kind)?await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first():undefined;
- await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC',...(page?{page}:{})});let error=null;const realNow=Date.now;
+ async drive(at,kind,now){const plan=await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first();
+ const page=['state','payout'].includes(kind)?plan:undefined;
+ await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC',...(plan?{planned:true}:{}),...(page?{page}:{})});let error=null;const realNow=Date.now;
  if(now)Date.now=()=>now;
  try{await this.alarm()}catch(e){error=e.message}finally{Date.now=realNow}
  await this.notification();
@@ -31,10 +32,18 @@ export class TestCollector extends NarCollector {
 }
 export default {async fetch(request,env){const u=new URL(request.url);
  if(u.pathname==='/plan'){const {at,target}=await request.json();try{return Response.json(await registerPage(env,at,target));}catch(e){return new Response(e.message,{status:400});}}
+ if(u.pathname==='/batch'){try{
+   const {entries:rows,revision}=await request.json();const index={prepare:env.INDEX.prepare.bind(env.INDEX),batch:async statements=>{
+     if(env.FAULT==='plan-conflict'){const r=rows[0],t={...r,...{race_id:'20000101:SYNTHETIC:2',url:r.url.replace('k_raceNo=1','k_raceNo=2')}};
+       await env.INDEX.prepare('INSERT OR IGNORE INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+         .bind('nar-daily-'+t.kind+':'+t.at,t.at,t.kind,t.url,t.race_id,new Date().toISOString()).run();}
+     return env.INDEX.batch(statements);}};
+   return Response.json(await registerEvidenceBatch({...env,INDEX:index},rows,revision));
+ }catch(e){return new Response(e.message,{status:400});}}
  if(u.pathname==='/next')return Response.json(nextJob(Number(u.searchParams.get('at')),u.searchParams.has('race')?Number(u.searchParams.get('race')):null));
  const stub=env.COLLECTOR.getByName('synthetic');return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
 `,sourcefile:'daily-harness.ts',resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
-const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8');
+const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8') + await readFile('migrations/0009_evidence_packet_owner.sql','utf8');
 async function runtime(responses, enabled=true, fault="") {
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:code.outputFiles[0].text,
@@ -271,5 +280,90 @@ test('late previous receipt delays page execution within its original window, wi
   await r.drive(at,'state',at+5000);
   assert.equal(r.requests.length,1);
   assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'RAW_STORED');
+ }finally{await r.mf.dispose();}
+});
+
+const batch=(r,rows,revision=1)=>r.mf.dispatchFetch('http://local/batch',{method:'POST',body:JSON.stringify({entries:rows,
+ revision:'2000-01-01T00:00:00.000000+00:00|2000-01-01T00:00:0'+revision+'.000000+00:00|'+'0'.repeat(64)})});
+const packet=(at,race=1)=>[
+ {at,...target('state',race)},
+ {at:at+120000,kind:'race',race_id:target('state',race).race_id,url:'https://www.keiba.go.jp/KeibaWeb/DataDownload/RaceDataDownload?type=daily'},
+ {at:at+1200000,...target('payout',race)}];
+
+test('input packets are reserved completely or rejected without partial rows',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.now()+360000;
+  assert.equal((await batch(r,packet(at))).status,200);
+  assert.equal((await batch(r,packet(at))).status,200);
+  assert.equal((await batch(r,packet(at+2000000,2))).status,200);
+  assert.equal((await batch(r,packet(at+4000000,3))).status,400);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM page_capture_plans').first()).n,6);
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('a reserved race refresh waits for the shared receipt interval and retains its original slot',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  const at=Date.now()+360000;
+  assert.equal((await batch(r,packet(at))).status,200);
+  const raceAt=at+120000;
+  await r.db.prepare('UPDATE source_control SET next_allowed_at=?').bind(raceAt+5000).run();
+  const wait=await r.drive(raceAt,'race',raceAt);
+  assert.equal(wait.job.at,raceAt);assert.equal(wait.alarm,raceAt+5000);assert.equal(r.requests.length,0);
+  const stored=await r.drive(raceAt,'race',raceAt+5000);
+  assert.equal(stored.error,null);assert.equal(r.requests.length,1);
+  assert.ok(r.requests[0].url.includes('RaceDataDownload'));
+  assert.equal((await r.db.prepare("SELECT dataset_kind FROM raw_observations").first()).dataset_kind,'NAR_RACE_BUNDLE');
+ }finally{await r.mf.dispose();}
+});
+
+test('a conflicting registration after precheck cannot leave a partial packet',async()=>{
+ const r=await runtime([],true,'plan-conflict');
+ try{
+  assert.equal((await batch(r,packet(Date.now()+360000))).status,400);
+  const rows=(await r.db.prepare('SELECT * FROM page_capture_plans').all()).results;
+  assert.equal(rows.length,1);assert.equal(rows[0].race_id,'20000101:SYNTHETIC:2');
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('schedule revisions supersede only unstarted automatic slots and do not invent a provider wait',async()=>{
+ const r=await runtime([{body:'<html>SYNTHETIC</html>',headers:{'content-type':'text/html'}}]);
+ try{
+  const at=Date.now()+360000, old=packet(at);
+  assert.equal((await batch(r,old)).status,200);
+  await r.db.prepare("INSERT INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'RAW_STORED')")
+    .bind('nar-daily-state:'+at,new Date(at).toISOString()).run();
+  const manual=at+2000000;assert.equal((await plan(r,manual,target('payout'))).status,200);
+  assert.equal((await batch(r,packet(at+120000),2)).status,200);
+  assert.equal((await batch(r,packet(at+120000),3)).status,200); // same slots, newer observation
+  assert.equal((await batch(r,packet(at),2)).status,400);
+  const status=await r.db.prepare('SELECT event_id,status FROM captures ORDER BY event_id').all();
+  assert.equal(status.results.filter(r=>r.status==='SUPERSEDED_PLAN').length,2);
+  assert.equal((await r.db.prepare('SELECT status FROM captures WHERE event_id=?').bind('nar-daily-state:'+at).first()).status,'RAW_STORED');
+  assert.equal(await r.db.prepare('SELECT status FROM captures WHERE event_id=?').bind('nar-daily-payout:'+manual).first(),null);
+  const canceled=await r.drive(at+120000,'race',at+120000);
+  assert.equal(canceled.error,null);assert.equal(canceled.job.kind,'state');assert.equal(canceled.job.at,at+120000);
+  assert.equal(canceled.alarm,at+120000);assert.equal(r.requests.length,0);
+  await r.drive(at+120000,'state',at+120000);assert.equal(r.requests.length,1);
+  // A superseded event cannot be revived by delivery of an old registration.
+  assert.equal((await batch(r,old)).status,400);
+ }finally{await r.mf.dispose();}
+});
+
+test('late initial registration of an older schedule cannot supersede newer reservations',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.now()+360000;
+  assert.equal((await batch(r,packet(at+120000),2)).status,200);
+  assert.equal((await batch(r,packet(at+120000),3)).status,200);
+  assert.equal((await batch(r,packet(at),2)).status,400);
+  assert.equal((await batch(r,packet(at),1)).status,400);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM captures').first()).n,0);
+  const rows=(await r.db.prepare('SELECT * FROM page_capture_plans').all()).results;
+  assert.equal(rows.length,3);assert.ok(rows.every(x=>x.packet_revision.includes('00:00:03.')));
+  assert.equal(r.requests.length,0);
  }finally{await r.mf.dispose();}
 });

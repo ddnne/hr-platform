@@ -17,7 +17,7 @@ MODEL_FILES = (
     "__init__.py", "model.py", "cloud_model.py", "cloud_history.py", "cloud_race_files.py",
     "cloud_normalization.py", "race_files.py", "history.py", "common.py", "parser.py", "paper_rules.py",
     "cloud_pages.py", "race_state.py", "official_payout.py", "payout_check.py",
-    "cloud_paper.py", "prospective_rules.py",
+    "cloud_paper.py", "prospective_rules.py", "cloud_paper_schedule.py",
 )
 
 
@@ -55,10 +55,19 @@ def prepare(destination, with_storage=False):
         config['vars'] = {
             'STORAGE_POLICY_JSON': json.dumps(policy, separators=(',', ':')),
             'NORMALIZATION_ENABLED': 'false',
-            'COLLECTION_POLICY_JSON': (repo / 'configs/cloud-collection.json').read_text(),
+            'COLLECTION_POLICY_JSON': json.dumps({**json.loads((repo / 'configs/cloud-collection.json').read_text()),
+                'interval_seconds': json.loads((repo / 'configs/collection.json').read_text())['interval_seconds']}),
             'PAPER_ENABLED': 'false',
             'PAPER_POLICY_JSON': (repo / 'configs/cloud-paper.json').read_text(),
+            'AUTO_PAPER_ENABLED': 'false',
+            'PAPER_SCHEDULE_POLICY_JSON': (repo / 'configs/cloud-paper-schedule.json').read_text(),
         }
+        import yaml
+        base = yaml.safe_load((repo / 'configs/research-shadow-near-close.yaml').read_text())
+        base['version'] += ':daily-auto-v1'
+        config['vars']['PAPER_BASE_CONFIG_JSON'] = json.dumps(base)
+        config['services'] = [{'binding': 'COLLECTION', 'service': 'hr-platform-dev-ingestion',
+                               'entrypoint': 'CollectionControl'}]
         config['limits'] = {'cpu_ms': policy['worker_cpu_ms']}
         storage = json.loads((repo / "wrangler.jsonc").read_text())
         for key in ("r2_buckets", "d1_databases"):

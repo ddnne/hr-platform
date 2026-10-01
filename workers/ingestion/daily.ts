@@ -5,7 +5,7 @@ import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
 import {nextPage, type PageTarget} from "./pages";
 
-type Job = {at: number; kind: CaptureKind; date: string; page?: PageTarget};
+type Job = {at: number; kind: CaptureKind; date: string; page?: PageTarget; planned?: boolean};
 type Control = {blocked: number; next_allowed_at: number};
 const DAY = 86_400_000;
 const enabled = (env: Env) => env.DAILY_COLLECTION_ENABLED === "true"
@@ -31,7 +31,8 @@ export class NarCollector extends DurableObject<Env> {
   private async next(after: number, previous: number | null): Promise<Job> {
     const regular = nextJob(after, previous);
     const page = await nextPage(this.env, regular.at);
-    return page ? {at: page.at, kind: page.kind, date: page.race_id.split(":")[0], page} : regular;
+    return page ? {at: page.at, kind: page.kind, date: page.race_id.split(":")[0], planned: true,
+      ...(["state", "payout"].includes(page.kind) ? {page: page as PageTarget} : {})} : regular;
   }
   private async control(): Promise<Control | null> {
     return this.env.INDEX.prepare("SELECT blocked,next_allowed_at FROM source_control WHERE source=?")
@@ -60,7 +61,7 @@ export class NarCollector extends DurableObject<Env> {
     if (Date.now() < job.at) { await this.ctx.storage.setAlarm(job.at); return; }
     const control = await this.control();
     if (!control || control.blocked) return;
-    if (job.page && Date.now() < control.next_allowed_at
+    if ((job.planned || job.page) && Date.now() < control.next_allowed_at
         && Date.now() <= job.at + collection.capture_window_seconds * 1000) {
       // Preserve the planned ID/window while waiting for the previous response.
       // Do not consume a page as WAIT_OR_BLOCKED just because that receipt was late.
@@ -82,7 +83,7 @@ export class NarCollector extends DurableObject<Env> {
     const receipt = stored?.collector_received_at === null || !stored?.collector_received_at
       ? Date.now() : Date.parse(stored.collector_received_at);
     const previous = await this.ctx.storage.get<number>("lastRaceAt") ?? null;
-    const next = await this.next(Math.max(Date.now(), receipt + collection.interval_seconds * 1000,
+    const next = await this.next(Math.max(Date.now(), stored.status === "SUPERSEDED_PLAN" ? 0 : receipt + collection.interval_seconds * 1000,
       nextControl.next_allowed_at), previous);
     // Parsing runs in another Worker Cron. No parser/model call can hold this alarm open.
     await this.ctx.storage.put("job", next);

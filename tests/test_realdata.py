@@ -12,9 +12,9 @@ from hr_platform.realdata import RealData, completeness, validate_manifest, file
 from hr_platform.store import Store
 
 
-def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", horse_count=4, popularity=False):
+def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", horse_count=4, popularity=False, start="1414"):
     key = {"競馬場": "SYNTHETIC", "競走年月日": "20000101", "レース番号": "1"}
-    race = {**key, "発走時刻": "1414", "芝ダート区分": "ダート", "頭数": "4"}
+    race = {**key, "発走時刻": start, "芝ダート区分": "ダート", "頭数": "4"}
     if finished:
         race["上がり3F"] = "38.2"
     horse = [

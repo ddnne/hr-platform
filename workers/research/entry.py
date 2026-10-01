@@ -21,6 +21,13 @@ class Default(WorkerEntrypoint):
                 paper_policy=json.loads(self.env.PAPER_POLICY_JSON))
             tasks.append(paper.tick())
             names.append('paper')
+            if self.env.AUTO_PAPER_ENABLED == "true":
+                from hr_platform.cloud_paper_schedule import schedule_day
+                tasks.append(schedule_day(paper, self.env.COLLECTION,
+                    json.loads(self.env.PAPER_BASE_CONFIG_JSON),
+                    json.loads(self.env.PAPER_SCHEDULE_POLICY_JSON),
+                    json.loads(self.env.COLLECTION_POLICY_JSON)))
+                names.append('paper_enrollment')
         # One task's parsing/model failure does not cancel the other task.
         for name, result in zip(names, await asyncio.gather(*tasks, return_exceptions=True)):
             if isinstance(result, BaseException):
@@ -54,7 +61,7 @@ class Default(WorkerEntrypoint):
 
     async def races(self, payload):
         from hr_platform.cloud_race_files import CloudRaceFiles
-        return await self._stored(CloudRaceFiles, payload, {'normalize', 'history', 'day'})
+        return await self._stored(CloudRaceFiles, payload, {'normalize', 'history', 'day', 'schedules'})
 
     async def pages(self, payload):
         from hr_platform.cloud_pages import CloudPages

@@ -1,0 +1,18 @@
+{
+  "version": "cloud-paper-schedule-v1",
+  "enrollment_horizon_seconds": 1800,
+  "minimum_lead_seconds": 600,
+  "state_before_asof_seconds": 300,
+  "race_before_asof_seconds": 180,
+  "payout_after_start_seconds": 960,
+  "minimum_decision_spacing_seconds": 360,
+  "venue_codes": {
+    "門別": "36",
+    "水沢": "11",
+    "船橋": "19",
+    "金沢": "22",
+    "名古屋": "24",
+    "園田": "27",
+    "佐賀": "32"
+  }
+}
