@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from hr_platform.cli import private_root  # noqa: E402
 
-MODEL_FILES = ("__init__.py", "model.py", "cloud_model.py", "cloud_history.py", "cloud_race_files.py", "cloud_normalization.py", "race_files.py", "history.py", "common.py", "parser.py")
+MODEL_FILES = ("__init__.py", "model.py", "cloud_model.py", "cloud_history.py", "cloud_race_files.py", "cloud_normalization.py", "race_files.py", "history.py", "common.py", "parser.py", "paper_rules.py")
 
 
 def prepare(destination, with_storage=False):
