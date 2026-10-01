@@ -178,12 +178,15 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
         "hr_platform/payout_check.py",
         "hr_platform/cloud_paper.py",
         "hr_platform/prospective_rules.py",
+        "hr_platform/cloud_paper_schedule.py",
     }
     assert (root / "src/hr_platform/model.py").read_bytes() == Path("src/hr_platform/model.py").read_bytes()
     config = json.loads((root / "wrangler.jsonc").read_text())
     assert not config["workers_dev"] and not config["preview_urls"] and config["triggers"]["crons"] == []
-    assert 'services' not in config
     if with_storage:
+        assert config['services'] == [{'binding': 'COLLECTION', 'service': 'hr-platform-dev-ingestion',
+                                       'entrypoint': 'CollectionControl'}]
+        assert config['vars']['AUTO_PAPER_ENABLED'] == 'false'
         actual = json.loads(Path('wrangler.jsonc').read_text())
         assert config['r2_buckets'] == actual['r2_buckets']
         assert config['d1_databases'][0]['database_id'] == actual['d1_databases'][0]['database_id']

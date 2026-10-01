@@ -19,7 +19,7 @@ def seed(c, n, minute, kind='state', raw=None):
     event = c.seed(n, minute, raw, f'NAR_PAGE_{kind.upper()}', f'nar-daily-{kind}')
     c.db.conn.execute('UPDATE raw_observations SET received_at=?,raw_saved_at=? WHERE observation_id=?',
                       (stamp(r['collector_received_at']), stamp(r['raw_saved_at']), event))
-    c.db.conn.execute('INSERT INTO page_capture_plans VALUES(?,?,?,?,?,?)',
+    c.db.conn.execute('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)',
                       (event, n, kind, r['url'], f.RACE, stamp(f.at(-10))))
     c.db.conn.commit()
     c.bucket.objects[f'manifests/{event}.json'] = canonical({

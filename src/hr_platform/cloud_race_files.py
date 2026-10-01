@@ -7,7 +7,7 @@ from .common import canonical, identity, sha, stamp
 from .parser import MAX_COMPRESSED, MAX_EXPANDED
 from .race_files import parse_race_bundle, VERSION as PARSER_VERSION
 
-VERSION = f'cloud-race-files-v1:{PARSER_VERSION}'
+VERSION = f'cloud-race-files-v2:{PARSER_VERSION}'
 
 
 class CloudRaceFiles(CloudHistory):
@@ -46,7 +46,9 @@ class CloudRaceFiles(CloudHistory):
                 total += len(data)
                 if total > MAX_EXPANDED:
                     raise ValueError('NORMALIZED_LIMIT')
-                races[race_id] = {'body_hash': await self.save_body(data), 'markets': []}
+                races[race_id] = {'body_hash': await self.save_body(data), 'markets': [],
+                    'schedule': {**{key: race[key] for key in ('scheduled_start_at', 'surface_label',
+                        'result_present', 'entry_count_matches')}, 'horses': list(race['horses'])}}
             digest = await self.save_body(canonical({'format': 'race-files-v1', 'races': races}))
         except (ValueError, UnicodeError, KeyError, csv.Error) as exc:
             await self.run("INSERT OR IGNORE INTO race_file_parses VALUES(?,?,?,?,'ERROR',?,NULL,NULL,?)",
@@ -66,11 +68,9 @@ class CloudRaceFiles(CloudHistory):
             raise ValueError('CLOCK_ORDER')
         return result
 
-    async def day(self, date, at, race_id=None):
+    async def _snapshot(self, date, at):
         if not isinstance(date, str) or not re.fullmatch(r'\d{8}', date):
             raise ValueError('RACE_DATE')
-        if race_id is not None and (not isinstance(race_id, str) or race_id.split(':')[0] != date):
-            raise ValueError('RACE_DATE_MISMATCH')
         cutoff = self.cutoff(at)
         row = await self.first('''SELECT p.*,o.received_at,o.raw_saved_at,o.raw_sha256
             FROM race_file_parses p JOIN raw_observations o USING(observation_id)
@@ -80,6 +80,21 @@ class CloudRaceFiles(CloudHistory):
                 AND (newer.available_at,newer.parse_id)>(p.available_at,p.parse_id))
               AND EXISTS (SELECT 1 FROM race_file_races r WHERE r.parse_id=p.parse_id AND substr(r.race_id,1,8)=?)
             ORDER BY o.received_at DESC,p.available_at DESC,p.parse_id DESC LIMIT 1''', cutoff, cutoff, date)
+        return cutoff, row
+
+    async def schedules(self, date, at):
+        """Read the compact observed schedule index without every horse/result body."""
+        cutoff, row = await self._snapshot(date, at)
+        index = await self.read_body(row['body_hash']) if row else {'races': {}}
+        complete = all('schedule' in r for r in index['races'].values())
+        return {'asof_at': cutoff, 'snapshot': row, 'status': 'OK' if complete else 'INDEX_PENDING',
+                'races': {key: r['schedule'] for key, r in index['races'].items()
+                          if complete and key.split(':')[0] == date}, 'paper_eligible': False}
+
+    async def day(self, date, at, race_id=None):
+        if race_id is not None and (not isinstance(race_id, str) or race_id.split(':')[0] != date):
+            raise ValueError('RACE_DATE_MISMATCH')
+        cutoff, row = await self._snapshot(date, at)
         if not row:
             return {'asof_at': cutoff, 'snapshot': None, 'paper_eligible': False}
         index = await self.read_body(row['body_hash'])
