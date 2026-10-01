@@ -1,0 +1,15 @@
+{
+  "version": "quinella-portfolio-v1",
+  "target": "quinella",
+  "candidate_variant": "consensus_log_growth",
+  "candidate_cap": 5,
+  "stake_unit_yen": 100,
+  "race_budget_yen": 300,
+  "max_tickets_per_race": 3,
+  "variants": ["ranked_up_to_three_100", "single_300", "multiple_300"],
+  "development_dates": ["20261001"],
+  "validation_not_before_date": "20261002",
+  "probability_basis": "normalized_Qref_target_distribution",
+  "allocation_rule": "enumerate_positive_unit_allocations_on_capped_candidates",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}
