@@ -1,0 +1,17 @@
+{
+  "version": "nar-cloud-daily-v1",
+  "timezone_offset_minutes": 540,
+  "day_start": "07:00",
+  "day_end": "23:00",
+  "race_refresh_seconds": 1800,
+  "request_timeout_seconds": 20,
+  "max_raw_bytes": 16777216,
+  "user_agent": "hr-platform-personal-research/0.1",
+  "urls": {
+    "odds": "https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=daily",
+    "race": "https://www.keiba.go.jp/KeibaWeb/DataDownload/RaceDataDownload?type=daily"
+  },
+  "normalization_lease_seconds": 1800,
+  "normalization_cron": "* * * * *",
+  "collector_watchdog_cron": "0 * * * *"
+}

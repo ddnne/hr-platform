@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from hr_platform.cli import private_root  # noqa: E402
 
-MODEL_FILES = ("__init__.py", "model.py", "cloud_model.py", "cloud_history.py", "history.py", "common.py", "parser.py")
+MODEL_FILES = ("__init__.py", "model.py", "cloud_model.py", "cloud_history.py", "cloud_race_files.py", "cloud_normalization.py", "race_files.py", "history.py", "common.py", "parser.py")
 
 
 def prepare(destination, with_storage=False):
@@ -47,7 +47,11 @@ def prepare(destination, with_storage=False):
 
         policy = json.loads((repo / "configs/cloud-storage.json").read_text())
         storage_limits(policy)
-        config['vars'] = {'STORAGE_POLICY_JSON': json.dumps(policy, separators=(',', ':'))}
+        config['vars'] = {
+            'STORAGE_POLICY_JSON': json.dumps(policy, separators=(',', ':')),
+            'NORMALIZATION_ENABLED': 'false',
+            'COLLECTION_POLICY_JSON': (repo / 'configs/cloud-collection.json').read_text(),
+        }
         config['limits'] = {'cpu_ms': policy['worker_cpu_ms']}
         storage = json.loads((repo / "wrangler.jsonc").read_text())
         for key in ("r2_buckets", "d1_databases"):

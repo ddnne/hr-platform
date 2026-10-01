@@ -5,10 +5,9 @@ prove PRE_RACE, and displayed payouts do not prove finality or refund coverage.
 """
 
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import io
 import unicodedata
-from zoneinfo import ZoneInfo
 from .parser import unzip, UNORDERED
 
 KEYS = ["競馬場", "競走年月日", "レース番号"]
@@ -155,7 +154,7 @@ def parse_race_bundle(raw, encoding="utf-8-sig"):
                 raise ValueError("START_TIME")
             scheduled = (
                 datetime.strptime(row["競走年月日"] + start, "%Y%m%d%H%M")
-                .replace(tzinfo=ZoneInfo("Asia/Tokyo"))
+                .replace(tzinfo=timezone(timedelta(hours=9)))
                 .isoformat()
             )
         count = int(row["頭数"]) if row["頭数"] else None

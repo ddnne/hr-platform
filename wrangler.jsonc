@@ -3,21 +3,52 @@
   "name": "hr-platform-dev-ingestion",
   "main": "workers/ingestion/index.ts",
   "compatibility_date": "2026-09-28",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "workers_dev": false,
   "preview_urls": false,
-  "triggers": { "crons": [] },
-  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": {
+    "crons": []
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "vars": {
     "COLLECTION_ENABLED": "false",
     "SOURCE_APPROVED": "false",
-    "CAPTURE_SLOTS_JSON": "[]"
+    "CAPTURE_SLOTS_JSON": "[]",
+    "DAILY_COLLECTION_ENABLED": "false"
   },
-  "d1_databases": [{
-    "binding": "INDEX",
-    "database_name": "hr-platform-dev-index",
-    "database_id": "81fc8e82-cb25-4baa-834d-b69a8f2ac977",
-    "migrations_dir": "migrations"
-  }],
-  "r2_buckets": [{ "binding": "RAW", "bucket_name": "hr-platform-dev-private" }]
+  "d1_databases": [
+    {
+      "binding": "INDEX",
+      "database_name": "hr-platform-dev-index",
+      "database_id": "81fc8e82-cb25-4baa-834d-b69a8f2ac977",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RAW",
+      "bucket_name": "hr-platform-dev-private"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COLLECTOR",
+        "class_name": "NarCollector"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "nar-collector-v1",
+      "new_sqlite_classes": [
+        "NarCollector"
+      ]
+    }
+  ]
 }
