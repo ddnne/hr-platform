@@ -242,7 +242,9 @@ class Store:
                 )
         return parse_id
 
-    def history(self, race_id, market, until=None, *, current_only=False, since=None):
+    def history(self, race_id, market, until=None, *, current_only=False, since=None, dataset_kind=None):
+        if dataset_kind not in {None, 'SYNTHETIC', 'DAILY_SNAPSHOT', 'FINAL_ONLY'}:
+            raise ValueError('DATASET_KIND')
         cutoff = stamp(until) if until else "9999-12-31T23:59:59.999999+00:00"
         start = stamp(since) if since is not None else None
         if start is not None and start > cutoff:
@@ -252,12 +254,13 @@ class Store:
           o.raw_hash,o.raw_saved_at,o.received_at,o.basis,a.event FROM snapshots s
           JOIN parses p ON p.id=s.parse_id JOIN observations o ON o.id=p.observation_id
           JOIN attempts a ON a.id=o.id WHERE s.race_id=? AND s.market=? AND p.available_at<=?
+          AND (? IS NULL OR json_extract(a.event,'$.dataset_kind')=?)
           AND (? IS NULL OR o.received_at>=?)
           AND (NOT ? OR NOT EXISTS (SELECT 1 FROM parses newer
             WHERE newer.observation_id=p.observation_id AND newer.available_at<=?
             AND (newer.available_at,newer.id)>(p.available_at,p.id)))
           ORDER BY o.received_at,p.available_at,p.id""",
-            (race_id, market, cutoff, start, start, current_only, cutoff),
+            (race_id, market, cutoff, dataset_kind, dataset_kind, start, start, current_only, cutoff),
         ).fetchall()
         result = []
         for row in rows:

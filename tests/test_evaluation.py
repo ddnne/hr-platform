@@ -3,7 +3,7 @@ import math
 import pytest
 from hr_platform import fixtures as f
 from hr_platform.common import canonical
-from hr_platform.evaluation import compare, purchase_counts
+from hr_platform.evaluation import compare, purchase_summary
 from hr_platform.paper import decide, settle
 
 
@@ -45,7 +45,7 @@ def test_correction_and_late_settlement_do_not_rewrite_prior_report(collected, c
         assert summary['hit_race_count'] == summary['hit_ticket_count'] == 0
 
 
-def test_purchase_counts_distinguish_races_tickets_refunds_and_pending():
+def test_purchase_summary_distinguishes_races_tickets_refunds_and_pending():
     rows = [
         {'race_id': 'A', 'target': 'quinella', 'selection': '1-2', 'stake_yen': 100, 'payout_yen': 0, 'refund_yen': 100},
         {'race_id': 'A', 'target': 'quinella', 'selection': '1-3', 'stake_yen': 100, 'payout_yen': 150, 'refund_yen': 0},
@@ -53,13 +53,49 @@ def test_purchase_counts_distinguish_races_tickets_refunds_and_pending():
         {'race_id': 'B', 'target': 'quinella', 'selection': '1-2', 'stake_yen': 100, 'payout_yen': 0, 'refund_yen': 0},
         {'race_id': 'C', 'target': 'quinella', 'selection': None, 'stake_yen': 0, 'payout_yen': 0, 'refund_yen': 0},
     ]
+    for row, quote in zip(rows, [10, 20, 30, 40, None]):
+        row['purchase_odds'] = quote
     rows.append(dict(rows[2]))
-    assert purchase_counts(rows) == {
+    assert purchase_summary(rows) == {
         'bet_race_count': 2, 'purchased_ticket_count': 4, 'hit_race_count': 1, 'hit_ticket_count': 2,
+        'average_purchase_odds': 26,
+        'average_final_odds': None, 'final_odds_known_ticket_count': 0,
     }
     rows[3]['payout_yen'] = None
-    assert purchase_counts(rows)['hit_race_count'] is None
-    assert purchase_counts(rows)['hit_ticket_count'] is None
+    assert purchase_summary(rows)['hit_race_count'] is None
+    assert purchase_summary(rows)['hit_ticket_count'] is None
+    assert purchase_summary(rows)['average_purchase_odds'] == 26
+    rows[0]['purchase_odds'] = None
+    assert purchase_summary(rows)['average_purchase_odds'] is None
+    for row in rows:
+        row['final_odds'] = 50 if row['stake_yen'] else None
+    assert purchase_summary(rows)['average_final_odds'] == 50
+    rows[3]['final_odds'] = None
+    assert purchase_summary(rows)['average_final_odds'] is None
+    assert purchase_summary(rows)['final_odds_known_ticket_count'] == 3
+
+
+def test_average_odds_use_fixed_decision_input_even_before_settlement(collected, config):
+    decisions = decide(collected, f.RACE, f.schedule(), config)
+    original = compare(collected, config, f.at(10))
+    assert all(row['average_final_odds'] is None for row in original['models'].values())
+    for decision in decisions:
+        quote = decision['input_view']['markets'][decision['target']]['content']['quotes'][decision['selection']]['odds']
+        assert original['models'][decision['model']]['average_purchase_odds'] == quote
+    collected.clock = lambda: f.at(21)
+    for decision in decisions:
+        settle(collected, decision['id'], f.payout())
+    after = compare(collected, config, f.at(22))
+    assert all(after['models'][model]['average_purchase_odds'] == row['average_purchase_odds']
+               for model, row in original['models'].items())
+    # A later available final quote is evaluation evidence, never a purchase input.
+    collected.clock = lambda: f.at(25)
+    collected.ingest(f.event('final-for-evaluation', 24, kind='FINAL_ONLY'), f.archive('uniform', distorted=False))
+    later = compare(collected, config, f.at(26))
+    assert all(row['average_final_odds'] == pytest.approx(4.8) for row in later['models'].values())
+    assert all(row['average_purchase_odds'] == original['models'][model]['average_purchase_odds']
+               for model, row in later['models'].items())
+    assert compare(collected, config, f.at(22))['models'] == after['models']
 
 
 def test_tied_revision_is_ambiguous_not_arbitrary(collected, config):

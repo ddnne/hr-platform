@@ -10,19 +10,36 @@ from .common import MODEL_PROBABILITY_FIELDS, identity, stamp
 SCORE_FIELDS = {**MODEL_PROBABILITY_FIELDS, "market": "v_target"}
 
 
-def purchase_counts(entries):
-    """Count distinct purchased combinations; refunds are not hits."""
+def purchase_summary(entries):
+    """Count distinct combinations and average observed purchase quotes by stake."""
     bets = [entry for entry in entries if entry['stake_yen'] > 0]
     pending = any(entry['payout_yen'] is None for entry in bets)
     hits = [entry for entry in bets if entry['payout_yen'] is not None
             and entry['payout_yen'] - entry.get('special_payout_yen', 0) > 0]
     def ticket_key(entry):
         return entry['race_id'], entry['target'], entry['selection']
+    def average(field):
+        quotes, conflicts = {}, set()
+        for entry in bets:
+            key, item = ticket_key(entry), (entry['stake_yen'], entry.get(field))
+            if key in quotes and quotes[key] != item:
+                conflicts.add(key)
+            quotes[key] = item
+        valid = {key: item for key, item in quotes.items() if key not in conflicts
+                 and type(item[1]) in {int, float} and math.isfinite(item[1]) and item[1] >= 1}
+        total = sum(stake for stake, _ in valid.values())
+        return (math.fsum(stake * quote for stake, quote in valid.values()) / total
+                if valid and len(valid) == len(quotes) else None), len(valid)
+    display_mean, _ = average('purchase_odds')
+    final_mean, final_known = average('final_odds')
     return {
         'bet_race_count': len({entry['race_id'] for entry in bets}),
         'purchased_ticket_count': len({ticket_key(entry) for entry in bets}),
         'hit_race_count': None if pending else len({entry['race_id'] for entry in hits}),
         'hit_ticket_count': None if pending else len({ticket_key(entry) for entry in hits}),
+        'average_purchase_odds': display_mean,
+        'average_final_odds': final_mean,
+        'final_odds_known_ticket_count': final_known,
     }
 
 
@@ -139,6 +156,7 @@ def compare(store, config, at):
     }
     if issues:
         return report
+    final_cache = {}
     for model in models:
         decisions = sorted((records[model] for records in races.values()),
                            key=lambda d: (d["asof_at"], d["race_id"]))
@@ -174,9 +192,20 @@ def compare(store, config, at):
             status = "NO_BET" if not stake else (
                 "AMBIGUOUS_REVISION" if ambiguous else latest["status"] if latest else "PENDING")
             settled = status == "SETTLED"
+            quote = (decision['input_view']['markets'].get(decision['target'], {})
+                     .get('content', {}).get('quotes', {}).get(decision['selection'], {}))
+            key = decision['race_id'], decision['target']
+            if stake and key not in final_cache:
+                history = store.history(*key, cutoff, current_only=True, dataset_kind='FINAL_ONLY')
+                final_cache[key] = history[-1] if history else None
+            final = final_cache.get(key)
+            final_quote = final['content']['quotes'].get(decision['selection'], {}) if final else {}
             entries.append({
                 "race_id": decision["race_id"], "decision_id": decision["id"],
                 "target": decision["target"], "selection": decision["selection"],
+                "purchase_odds": quote.get('odds') if quote.get('display_status') == 'FIXED' else None,
+                "final_odds": final_quote.get('odds') if final_quote.get('display_status') == 'FIXED' else None,
+                "final_odds_evidence": {k: final[k] for k in ('observation_id', 'parse_id', 'available_at')} if final else None,
                 "asof_at": decision["asof_at"], "status": status, "stake_yen": stake,
                 "reference_constraint_status": reference_status,
                 "research_assumptions": decision.get("research_assumptions", []),
@@ -204,7 +233,7 @@ def compare(store, config, at):
         no_bet = sum(not e["stake_yen"] for e in entries)
         report["models"][model] = {
             "race_count": len(entries), "bet_count": len(entries) - no_bet,
-            **purchase_counts(entries),
+            **purchase_summary(entries),
             "no_bet_count": no_bet, "skip_rate": no_bet / len(entries) if entries else None,
             "reason_counts": dict(reasons), "input_kind_counts": dict(input_kinds),
             "reference_constraint_status_counts": dict(reference_statuses),
