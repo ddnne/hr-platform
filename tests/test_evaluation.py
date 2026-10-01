@@ -3,7 +3,7 @@ import math
 import pytest
 from hr_platform import fixtures as f
 from hr_platform.common import canonical
-from hr_platform.evaluation import compare
+from hr_platform.evaluation import compare, purchase_counts
 from hr_platform.paper import decide, settle
 
 
@@ -19,6 +19,8 @@ def test_pending_is_not_zero_and_failed_race_stays_in_cohort(collected, config):
         assert summary['reason_counts']['DATA_MISSING'] == 1
         assert summary['profit_yen'] is None and summary['roi'] is None
         assert summary['max_drawdown_yen_by_decision_time'] is None
+        assert summary['bet_race_count'] == summary['purchased_ticket_count'] == 1
+        assert summary['hit_race_count'] is None and summary['hit_ticket_count'] is None
 
 
 def test_correction_and_late_settlement_do_not_rewrite_prior_report(collected, config):
@@ -29,6 +31,7 @@ def test_correction_and_late_settlement_do_not_rewrite_prior_report(collected, c
         assert json.loads(collected.read_body(record['source_hash'], 'receipts')) == f.payout()
     original = compare(collected, config, f.at(22))
     assert all(m['profit_yen'] == 550 for m in original['models'].values())
+    assert all(m['hit_race_count'] == m['hit_ticket_count'] == 1 for m in original['models'].values())
     collected.clock = lambda: f.at(25)
     for decision in decisions:
         settle(collected, decision['id'], f.payout('correction', tickets=[]))
@@ -39,6 +42,24 @@ def test_correction_and_late_settlement_do_not_rewrite_prior_report(collected, c
         assert summary['profit_yen'] == -100 and summary['roi'] == -1
         assert summary['max_drawdown_yen_by_decision_time'] == 100
         assert summary['settlement_source_counts'] == {'SYNTHETIC': 1}
+        assert summary['hit_race_count'] == summary['hit_ticket_count'] == 0
+
+
+def test_purchase_counts_distinguish_races_tickets_refunds_and_pending():
+    rows = [
+        {'race_id': 'A', 'target': 'quinella', 'selection': '1-2', 'stake_yen': 100, 'payout_yen': 0, 'refund_yen': 100},
+        {'race_id': 'A', 'target': 'quinella', 'selection': '1-3', 'stake_yen': 100, 'payout_yen': 150, 'refund_yen': 0},
+        {'race_id': 'A', 'target': 'quinella', 'selection': '2-3', 'stake_yen': 200, 'payout_yen': 300, 'refund_yen': 0},
+        {'race_id': 'B', 'target': 'quinella', 'selection': '1-2', 'stake_yen': 100, 'payout_yen': 0, 'refund_yen': 0},
+        {'race_id': 'C', 'target': 'quinella', 'selection': None, 'stake_yen': 0, 'payout_yen': 0, 'refund_yen': 0},
+    ]
+    rows.append(dict(rows[2]))
+    assert purchase_counts(rows) == {
+        'bet_race_count': 2, 'purchased_ticket_count': 4, 'hit_race_count': 1, 'hit_ticket_count': 2,
+    }
+    rows[3]['payout_yen'] = None
+    assert purchase_counts(rows)['hit_race_count'] is None
+    assert purchase_counts(rows)['hit_ticket_count'] is None
 
 
 def test_tied_revision_is_ambiguous_not_arbitrary(collected, config):
@@ -188,6 +209,11 @@ def test_exceptional_outcomes_remain_in_profit_cohort_without_forced_score(colle
     assert all(m['race_count'] == 1 and m['complete'] for m in report['models'].values())
     assert report['prediction_scores']['cohort'] == []
     assert report['prediction_scores']['unscored_reason_counts'] == {reason: 1}
+    if payout.get('special_payouts'):
+        for summary in report['models'].values():
+            assert summary['payout_yen'] == summary['entries'][0]['special_payout_yen'] == 70
+            assert summary['profit_yen'] == -30
+            assert summary['hit_race_count'] == summary['hit_ticket_count'] == 0
 
 
 @pytest.mark.parametrize('change,reason', [
