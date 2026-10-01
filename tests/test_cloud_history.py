@@ -525,7 +525,7 @@ def test_normalizer_storage_failure_retries_only_after_lease(cloud):
     asyncio.run(scenario())
 
 
-def test_normalizer_prioritizes_race_state_and_fresh_odds_over_import_backlog(cloud):
+def test_normalizer_prioritizes_fresh_receipts_over_old_race_and_odds_imports(cloud):
     from hr_platform.cloud_normalization import normalize_next
     from test_realdata import race_archive
 
@@ -533,8 +533,11 @@ def test_normalizer_prioritizes_race_state_and_fresh_odds_over_import_backlog(cl
         old = cloud.seed(1, 0, kind='DAILY_SNAPSHOT')
         fresh = cloud.seed(2, 2, kind='DAILY_SNAPSHOT')
         race = cloud.seed(3, 1, race_archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        latest_race = cloud.seed(4, 3, race_archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        latest_odds = cloud.seed(5, 3, kind='DAILY_SNAPSHOT')
         completed = set()
-        for expected in (race, fresh, old):
+        # Historical race bundles must not delay live odds; a receipt-time tie favors race state.
+        for expected in (latest_race, latest_odds, fresh, race, old):
             assert (await normalize_next(cloud.bucket, cloud.db, None, 60,
                                         clock=lambda: cloud.clock[0]))['status'] == 'PARSED'
             actual = {r[0] for r in cloud.db.conn.execute(
