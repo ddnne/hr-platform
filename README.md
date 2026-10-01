@@ -56,10 +56,11 @@ npm run build    # dry-runのみ
 当時利用可能だった断面だけで三つのモデルを比較します。過去の購入や実行可能性・利益の証明は作りません。
 不適格な入力は理由を保存し、モデルを実行しません。
 
-`uv run python -m hr_platform.cli --root private/real trajectory --race RACE_ID --market quinella --at 2026-09-28T05:00:00Z`
+`uv run python -m hr_platform.cli --root private/real trajectory --race RACE_ID --market quinella --from 2026-09-28T04:00:00Z --at 2026-09-28T05:00:00Z`
 
 推移は実観測のみを返し、同値の再観測を保持します。再解析はその時点までに利用可能な版を選び、
 欠測を補間しません。確定済み・レース前か不明の断面は`excluded_points`へ分離します。レポートはGit対象外のprivate配下に保存されます。
+`--from`は元の取得時刻の下限で、省略すれば保存済み全期間を返します。`--at`は解析結果が利用可能だった時刻の上限です。`history`にも同じ期間指定が使えます。
 
 ### 保存済みPaper台帳の比較
 

@@ -5,14 +5,17 @@ from .model import analyze, ModelError
 from .paper import eligibility
 
 
-def trajectory(store, race_id, markets, at):
+def trajectory(store, race_id, markets, at, *, since=None):
     cutoff = stamp(at)
+    start = stamp(since) if since is not None else None
+    if start is not None and start > cutoff:
+        raise ValueError("HISTORY_WINDOW_REVERSED")
     histories = {}
     excluded = {}
     for market in markets:
         # Resolve the observation's current parse before looking for a market:
         # deleted markets/races must not reappear in path features.
-        points = [x for x in store.history(race_id, market, cutoff, current_only=True)
+        points = [x for x in store.history(race_id, market, cutoff, current_only=True, since=start)
                   if x["received_at"] <= cutoff]
         for item in points:
             item["age_seconds"] = seconds(cutoff, item["received_at"])
@@ -31,10 +34,11 @@ def trajectory(store, race_id, markets, at):
                 histories[market].append(item)
     return {
         "asof_at": cutoff,
+        "from_at": start,
         "race_id": race_id,
         "history": histories,
         "excluded_points": excluded,
-        "gaps": store.gaps(cutoff),
+        "gaps": [x for x in store.gaps(cutoff) if start is None or x["slot"] >= start],
         "gap_scope": "STORE_CAPTURE_PLAN_NOT_RACE_SPECIFIC",
         "interpolated": False,
         "market_synchronization_verified": False,
