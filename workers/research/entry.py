@@ -10,13 +10,10 @@ class Default(WorkerEntrypoint):
     async def scheduled(self, controller, env=None, ctx=None):
         import asyncio
         import json
-        from hr_platform.cloud_normalization import normalize_next
         from hr_platform.cloud_paper import CloudPaper
         tasks, names = [], []
         if self.env.NORMALIZATION_ENABLED == "true":
-            policy = json.loads(self.env.COLLECTION_POLICY_JSON)
-            tasks.append(normalize_next(self.env.RAW, self.env.INDEX,
-                         json.loads(self.env.STORAGE_POLICY_JSON), policy['normalization_lease_seconds']))
+            tasks.append(self._normalize_saved())
             names.append('normalizer')
         if self.env.PAPER_ENABLED == "true":
             paper = CloudPaper(self.env.RAW, self.env.INDEX,
@@ -28,6 +25,23 @@ class Default(WorkerEntrypoint):
         for name, result in zip(names, await asyncio.gather(*tasks, return_exceptions=True)):
             if isinstance(result, BaseException):
                 print(json.dumps({'component': name, 'status': 'STORAGE_OR_RUNTIME_ERROR'}))
+
+    async def _normalize_saved(self):
+        import json
+        from hr_platform.cloud_normalization import normalize_next
+        policy = json.loads(self.env.COLLECTION_POLICY_JSON)
+        return await normalize_next(self.env.RAW, self.env.INDEX,
+            json.loads(self.env.STORAGE_POLICY_JSON), policy['normalization_lease_seconds'])
+
+    async def normalize_saved(self):
+        """Private wakeup after capture. Shares the Cron lease; never runs Paper."""
+        import json
+        if self.env.NORMALIZATION_ENABLED != "true":
+            return json.dumps({'status': 'DISABLED'})
+        try:
+            return json.dumps(await self._normalize_saved())
+        except Exception:
+            return json.dumps({'status': 'STORAGE_OR_RUNTIME_ERROR'})
 
     async def analyze(self, payload):
         from hr_platform.cloud_model import execute

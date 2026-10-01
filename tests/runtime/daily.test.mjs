@@ -9,19 +9,25 @@ const code = await build({stdin:{contents:`
 import {NarCollector,nextJob} from './workers/ingestion/daily.ts';
 import {registerPage} from './workers/ingestion/pages.ts';
 export class TestCollector extends NarCollector {
- constructor(ctx,env){let failures=0;const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
+ constructor(ctx,env){let failures=0,notification=Promise.resolve(null);const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
   const st=env.INDEX.prepare(sql);
   if(env.FAULT==='preflight' && sql.startsWith('SELECT etag'))return {bind:(...args)=>({first:async()=>{
    if(failures++===0)throw new Error('injected preflight failure');return st.bind(...args).first();}})};
   if((env.FAULT==='claim' && sql.startsWith('INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,'))
     || (env.FAULT==='refusal' && sql.startsWith('UPDATE source_control SET blocked=1'))) {
    return {bind:(...args)=>{const bound=st.bind(...args);return {run:async()=>{if(failures++===0)throw new Error('injected write failure');return bound.run();}}}};
-  }return st;}};super(ctx,{...env,INDEX:index});}
+  }return st;}};
+  const research=env.FAULT==='notification'?{normalize_saved(){notification=(async()=>{
+    const alarm=await ctx.storage.getAlarm();const job=await ctx.storage.get('job');
+    await ctx.storage.put('notification',{alarm,job});throw new Error('synthetic parser failure');
+  })();return notification;}}:undefined;
+  super(ctx,{...env,INDEX:index,RESEARCH:research});this.notification=()=>notification.catch(()=>null);}
  async drive(at,kind,now){const page=['state','payout'].includes(kind)?await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first():undefined;
  await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC',...(page?{page}:{})});let error=null;const realNow=Date.now;
  if(now)Date.now=()=>now;
  try{await this.alarm()}catch(e){error=e.message}finally{Date.now=realNow}
- return {error,job:await this.ctx.storage.get('job'),lastRaceAt:await this.ctx.storage.get('lastRaceAt'),alarm:await this.ctx.storage.getAlarm()};}
+ await this.notification();
+ return {error,notification:await this.ctx.storage.get('notification'),job:await this.ctx.storage.get('job'),lastRaceAt:await this.ctx.storage.get('lastRaceAt'),alarm:await this.ctx.storage.getAlarm()};}
 }
 export default {async fetch(request,env){const u=new URL(request.url);
  if(u.pathname==='/plan'){const {at,target}=await request.json();try{return Response.json(await registerPage(env,at,target));}catch(e){return new Response(e.message,{status:400});}}
@@ -54,6 +60,19 @@ test('daily alarms retain raw captures and arm future work without any parser bi
   await r.drive(at); // redelivered alarm with the same persisted job
   assert.equal(r.requests.length,1);
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('normalizer wakeup sees the armed next capture and its failure cannot stop collection',async()=>{
+ const r=await runtime([{body:zip},{body:zip}],true,'notification');
+ try{
+  const at=Date.now();const first=await r.drive(at);
+  assert.equal(first.error,null);assert.equal(first.notification.alarm,first.alarm);
+  assert.equal(first.notification.job.at,first.job.at);assert.ok(first.alarm>=at+120000);
+  await r.db.prepare('UPDATE source_control SET next_allowed_at=0').run();
+  const next=await r.drive(Date.now(),'race');assert.equal(next.error,null);
+  assert.equal(r.requests.length,2);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,2);
  }finally{await r.mf.dispose();}
 });
 

@@ -35,6 +35,12 @@
       "bucket_name": "hr-platform-dev-private"
     }
   ],
+  "services": [
+    {
+      "binding": "RESEARCH",
+      "service": "hr-platform-dev-research"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
