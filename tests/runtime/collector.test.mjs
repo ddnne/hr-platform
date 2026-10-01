@@ -6,6 +6,7 @@ import { Miniflare, Log, LogLevel, convertV4MiniflareOptions } from 'miniflare';
 
 // The test-only HTTP harness is never the production Worker entrypoint.
 const bundle = await build({stdin: {contents: `import production,{capture,retryAfter,sampleSlotAllowed} from './workers/ingestion/index.ts';
+export {CollectionControl} from './workers/ingestion/index.ts';
 export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='/tick'){
  const fault=u.searchParams.get('fault');
  if(fault==='cancel403'||fault==='cancel429') globalThis.fetch=async()=>new Response(
@@ -35,6 +36,7 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  if(u.searchParams.has('now')) Date.now=()=>Number(u.searchParams.get('now'));
  try{await production.scheduled({scheduledTime:t},bindings);}finally{Date.now=originalNow;}
  return new Response('ok');}
+ if(u.pathname==='/rpc-sample'){await env.CONTROL.collectSample(Number(u.searchParams.get('t')));return new Response('ok');}
  if(u.pathname==='/sample-check') return Response.json(sampleSlotAllowed(u.searchParams.get('plan'),Number(u.searchParams.get('t')),Number(u.searchParams.get('now'))));
  if(u.pathname==='/retry') return Response.json(retryAfter(u.searchParams.get('v'),1000));
  return production.fetch();}};`, resolveDir: process.cwd(), sourcefile: 'harness.ts'},
@@ -44,9 +46,11 @@ const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1, 2, 3]); // raw capture only, no
 
 async function runtime(responses, enabled=true, extraBindings={}) {
  let requests = [];
- const mf = new Miniflare(convertV4MiniflareOptions({modules: true, script: bundle.outputFiles[0].text,
+ const mf = new Miniflare(convertV4MiniflareOptions({name: 'collector', modules: true, script: bundle.outputFiles[0].text,
   compatibilityDate: '2026-09-28', compatibilityFlags: ['nodejs_compat'],
-  bindings: {COLLECTION_ENABLED: String(enabled), SOURCE_APPROVED: String(enabled), ...extraBindings},
+  bindings: Object.fromEntries(Object.entries({COLLECTION_ENABLED: String(enabled),
+   SOURCE_APPROVED: String(enabled), ...extraBindings}).filter(([,value])=>value!==undefined)),
+  serviceBindings: {CONTROL: {name: 'collector', entrypoint: 'CollectionControl'}},
   d1Databases: ['INDEX'], r2Buckets: ['RAW'], log: new Log(LogLevel.NONE),
   outboundService: async req => {requests.push({url:req.url,etag:req.headers.get('if-none-match'),
     userAgent:req.headers.get('user-agent'),accept:req.headers.get('accept')});
@@ -239,6 +243,34 @@ test('production scheduled handler blocks empty plan and limits delivery to appr
    await scheduled(start);await scheduled(start);
    assert.equal(r.requests.length,plan==='[]'?0:1);
    assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,plan==='[]'?0:1);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('private sample RPC and Cron redelivery share one provider request and observation',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ const r=await runtime([{body:zip}],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start])});
+ try{
+  await Promise.all([r.mf.dispatchFetch(`http://local/rpc-sample?t=${start}`),
+   r.mf.dispatchFetch(`http://local/scheduled?t=${start}`)]);
+  await r.mf.dispatchFetch(`http://local/rpc-sample?t=${start}`);
+  assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('private sample RPC requires an active finite slot and respects provider stop and switches',async()=>{
+ const start=Math.floor(Date.now()/60_000)*60_000;
+ for(const overrides of [{CAPTURE_SLOTS_JSON:undefined},{CAPTURE_SLOTS_JSON:'[]'},
+   {CAPTURE_SLOTS_JSON:JSON.stringify([start-300_000])},{DAILY_COLLECTION_ENABLED:'true'},
+   {COLLECTION_ENABLED:'false'},{SOURCE_APPROVED:'false'},{blocked:true}]){
+  const {blocked,...bindings}=overrides;
+  const r=await runtime([],true,{CAPTURE_SLOTS_JSON:JSON.stringify([start]),...bindings});
+  try{
+   if(blocked) await r.db.prepare('UPDATE source_control SET blocked=1').run();
+   await r.mf.dispatchFetch(`http://local/rpc-sample?t=${start}`);
+   assert.equal(r.requests.length,0);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
   }finally{await r.mf.dispose();}
  }
 });

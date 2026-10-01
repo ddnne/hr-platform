@@ -1,8 +1,19 @@
 /** Private collection only; the HTTP endpoint exposes no data. */
+import {WorkerEntrypoint} from "cloudflare:workers";
 import {capture, sampleSlotAllowed} from "./capture";
 import {ensureDaily} from "./daily";
 export {capture, retryAfter, boundedBody, sampleSlotAllowed} from "./capture";
 export {NarCollector} from "./daily";
+
+/** Private startup/diagnostic binding; all collection still uses the shared gates. */
+export class CollectionControl extends WorkerEntrypoint<Env> {
+  async collectSample(slot: number): Promise<void> {
+    if (this.env.DAILY_COLLECTION_ENABLED === "true"
+        || !sampleSlotAllowed(this.env.CAPTURE_SLOTS_JSON, slot, Date.now())) return;
+    await capture(slot, this.env);
+  }
+  async ensureDaily(): Promise<void> { await ensureDaily(this.env); }
+}
 
 export default {
   async fetch(): Promise<Response> { return new Response("Not found", {status: 404}); },
