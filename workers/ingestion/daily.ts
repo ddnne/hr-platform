@@ -1,6 +1,6 @@
 /** One provider coordinator. Alarms persist on Cloudflare; no Mac or model scheduler. */
 import {DurableObject} from "cloudflare:workers";
-import {capture, eventIdFor, SOURCE, type CaptureKind} from "./capture";
+import {capture, eventIdFor, lastMonthlyAttempt, SOURCE, type CaptureKind} from "./capture";
 import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
 import {nextPage, type PageTarget} from "./pages";
@@ -27,9 +27,25 @@ export function nextJob(after: number, lastRaceAt: number | null): Job {
   return {at, kind, date};
 }
 
+/** One finalized archive per rolling day, using the existing provider coordinator. */
+export function nextMonthly(after: number, previous: number | null): Job {
+  const earliest = Math.max(after, previous === null ? 0 : previous + policy.monthly_min_interval_seconds * 1000);
+  const offset = policy.timezone_offset_minutes * 60_000;
+  const midnight = Math.floor((earliest + offset) / DAY) * DAY - offset;
+  const at = Math.max(earliest, midnight + minute(policy.monthly_capture_time) * 60_000);
+  return {at, kind: "monthly", date: new Date(at + offset).toISOString().slice(0, 10).replaceAll("-", "")};
+}
+
 export class NarCollector extends DurableObject<Env> {
-  private async next(after: number, previous: number | null): Promise<Job> {
-    const regular = nextJob(after, previous);
+  private async next(after: number, previous: number | null, allowMonthly = true): Promise<Job> {
+    let regular = nextJob(after, previous);
+    // The first odds after state/race evidence is needed for the fixed Paper
+    // input. Let that ordinary slot run before inserting an archive request.
+    if (allowMonthly && this.env.MONTHLY_COLLECTION_ENABLED === "true") {
+      const monthly = nextMonthly(after, await lastMonthlyAttempt(this.env));
+      if (monthly.at <= regular.at) regular = monthly;
+    }
+    // Previously reserved state/payout slots take precedence over the archive.
     const page = await nextPage(this.env, regular.at);
     return page ? {at: page.at, kind: page.kind, date: page.race_id.split(":")[0], planned: true,
       ...(["state", "payout"].includes(page.kind) ? {page: page as PageTarget} : {})} : regular;
@@ -84,7 +100,7 @@ export class NarCollector extends DurableObject<Env> {
       ? Date.now() : Date.parse(stored.collector_received_at);
     const previous = await this.ctx.storage.get<number>("lastRaceAt") ?? null;
     const next = await this.next(Math.max(Date.now(), stored.status === "SUPERSEDED_PLAN" ? 0 : receipt + collection.interval_seconds * 1000,
-      nextControl.next_allowed_at), previous);
+      nextControl.next_allowed_at), previous, job.kind === "odds");
     // Parsing runs in another Worker Cron. No parser/model call can hold this alarm open.
     await this.ctx.storage.put("job", next);
     await this.ctx.storage.setAlarm(Math.max(next.at, nextControl.next_allowed_at));

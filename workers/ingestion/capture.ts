@@ -7,7 +7,7 @@ export {boundedBody, retryAfter} from "../http";
 import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
 import {validatePage, type PageTarget} from "./pages";
-export type CaptureKind = "odds" | "race" | PageTarget["kind"];
+export type CaptureKind = "odds" | "race" | "monthly" | PageTarget["kind"];
 // Keep the existing source row: both ZIP endpoints share the provider's stop/wait state.
 export const SOURCE = "nar-daily-odds";
 const INTERVAL = collection.interval_seconds * 1000;
@@ -20,6 +20,27 @@ interface Manifest {
   validator_raw_sha256: string | null; file_name: string | null; file_timestamp: string | null;
   duration_ms: number; dataset_kind?: string;
   url?: string; race_id?: string;
+}
+/** The first day collects the previous month containing yesterday's results. */
+export function monthlyTarget(at: number): {url: string; month: string} {
+  const date = new Date(at + policy.timezone_offset_minutes * 60_000);
+  if (!Number.isSafeInteger(at) || !Number.isFinite(date.getTime())) throw new Error("MONTHLY_TIME");
+  if (date.getUTCDate() === 1) date.setUTCDate(0);
+  const year = date.getUTCFullYear(), month = date.getUTCMonth() + 1;
+  return {url: `${policy.urls.monthly}&k_year=${year}&k_month=${month}`,
+    month: `${year}${String(month).padStart(2, "0")}`};
+}
+export async function lastMonthlyAttempt(env: Env): Promise<number | null> {
+  const row = await env.INDEX.prepare(`SELECT fetch_started_at,collector_received_at,duration_ms FROM captures
+    WHERE event_id LIKE 'nar-daily-monthly:%' AND fetch_started_at IS NOT NULL
+    ORDER BY fetch_started_at DESC LIMIT 1`)
+    .first<{fetch_started_at: string; collector_received_at: string | null; duration_ms: number | null}>();
+  // Count failed requests too; anchor the limit after HTTP, conservatively using
+  // processing duration when a response body never finished. An unfinished
+  // attempt stays held for its full bounded window rather than guessing a retry.
+  return row ? Math.max(Date.parse(row.fetch_started_at) + (row.duration_ms
+    ?? (collection.capture_window_seconds + policy.request_timeout_seconds) * 1000),
+    row.collector_received_at ? Date.parse(row.collector_received_at) : 0) : null;
 }
 const iso = (n: number) => new Date(n).toISOString().replace("Z", "000+00:00");
 async function publish(env: Env, m: Manifest, processingStarted: number): Promise<void> {
@@ -54,6 +75,8 @@ async function publish(env: Env, m: Manifest, processingStarted: number): Promis
 export async function capture(scheduledTime: number, env: Env, kind: CaptureKind = "odds", daily = false, page?: PageTarget): Promise<void> {
   if (env.COLLECTION_ENABLED !== "true" || env.SOURCE_APPROVED !== "true") return;
   if (daily && env.DAILY_COLLECTION_ENABLED !== "true") return;
+  const isMonthly = kind === "monthly";
+  if (isMonthly && !daily) throw new Error("CAPTURE_KIND");
   const isPage = kind === "state" || kind === "payout";
   if (isPage) {
     if (!daily || !page || page.kind !== kind) throw new Error("PAGE_TARGET_REQUIRED");
@@ -61,8 +84,9 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
     const plan = await env.INDEX.prepare("SELECT url,race_id FROM page_capture_plans WHERE event_id=?")
       .bind(eventIdFor(kind, scheduledTime)).first<{url: string; race_id: string}>();
     if (!plan || plan.url !== page.url || plan.race_id !== page.race_id) throw new Error("PAGE_PLAN_REQUIRED");
-  } else if (page || !["odds", "race"].includes(kind)) throw new Error("CAPTURE_KIND");
-  const url = page?.url ?? policy.urls[kind as "odds" | "race"];
+  } else if (page || !["odds", "race", "monthly"].includes(kind)) throw new Error("CAPTURE_KIND");
+  const monthly = isMonthly ? monthlyTarget(scheduledTime) : null;
+  const url = page?.url ?? monthly?.url ?? policy.urls[kind as "odds" | "race"];
   const accept = isPage ? "text/html" : "application/zip";
   const allowed = (now: number) => daily
     ? Number.isSafeInteger(scheduledTime) && now >= scheduledTime
@@ -109,13 +133,30 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
       await env.INDEX.prepare("UPDATE captures SET status='MISSED_WINDOW' WHERE event_id=? AND status='RESERVED'")
         .bind(eventId).run();
     }
+    if (isMonthly && env.MONTHLY_COLLECTION_ENABLED !== "true" && existing.status === "RESERVED") {
+      await env.INDEX.prepare("UPDATE captures SET status='SKIPPED_DISABLED' WHERE event_id=? AND status='RESERVED'")
+        .bind(eventId).run();
+    }
     return; // no re-fetch on event redelivery; a later slot is a new attempt
+  }
+  if (isMonthly && env.MONTHLY_COLLECTION_ENABLED !== "true") {
+    await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'SKIPPED_DISABLED')")
+      .bind(eventId, iso(scheduledTime)).run();
+    return;
   }
   const now = Date.now();
   if (!allowed(now)) {
     if (daily) await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'MISSED_WINDOW')")
       .bind(eventId, iso(scheduledTime)).run();
     return;
+  }
+  if (isMonthly) {
+    const previous = await lastMonthlyAttempt(env);
+    if (previous !== null && now < previous + policy.monthly_min_interval_seconds * 1000) {
+      await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'WAIT_OR_BLOCKED')")
+        .bind(eventId, iso(scheduledTime)).run();
+      return;
+    }
   }
   const claim = await env.INDEX.prepare(`UPDATE source_control SET next_allowed_at=?,owner_event_id=?
     WHERE source=? AND blocked=0 AND next_allowed_at<=?`).bind(now + INTERVAL, eventId, SOURCE, now).run();
@@ -130,7 +171,8 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
   const inserted = await env.INDEX.prepare(`INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,
     fetch_started_at,status) VALUES(?,?,?,'RESERVED')`).bind(eventId, iso(scheduledTime), iso(now)).run();
   if (!inserted.meta.changes) return;
-  const prior = isPage ? null : await env.INDEX.prepare(`SELECT etag,raw_sha256,file_name,file_timestamp FROM captures
+  // Monthly responses vary by month; do not reuse another month's validator.
+  const prior = isPage || isMonthly ? null : await env.INDEX.prepare(`SELECT etag,raw_sha256,file_name,file_timestamp FROM captures
     WHERE status='RAW_STORED' AND http_status=200 AND event_id LIKE ? ORDER BY collector_received_at DESC LIMIT 1`)
     .bind(`nar-daily-${kind}:%`).first<{etag: string | null; raw_sha256: string; file_name: string | null; file_timestamp: string | null}>();
   const controller = new AbortController();
@@ -244,7 +286,8 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
       file_name: filename ?? (response.status === 304 ? prior?.file_name ?? null : null),
       file_timestamp: unix ? iso(Number(unix) * 1000) : response.status === 304 ? prior?.file_timestamp ?? null : null,
       duration_ms: Date.now() - now,
-      dataset_kind: isPage ? `NAR_PAGE_${kind.toUpperCase()}` : kind === "odds" ? "DAILY_SNAPSHOT" : "NAR_RACE_BUNDLE",
+      dataset_kind: isMonthly ? "FINAL_ONLY" : isPage ? `NAR_PAGE_${kind.toUpperCase()}` : kind === "odds" ? "DAILY_SNAPSHOT" : "NAR_RACE_BUNDLE",
+      ...(monthly ? {url: monthly.url} : {}),
       ...(page ? {url: page.url, race_id: page.race_id} : {})};
     // Store the event-to-hash intent first. It is not a successful observation.
     await env.RAW.put(`manifests/${eventId}.json`, JSON.stringify(manifest));
