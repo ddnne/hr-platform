@@ -26,7 +26,7 @@ def main():
     if (
         config["name"] != "hr-platform-dev-ingestion"
         or config["vars"]
-        != {"COLLECTION_ENABLED": "false", "SOURCE_APPROVED": "false", "CAPTURE_SLOTS_JSON": "[]"}
+        != {"COLLECTION_ENABLED": "false", "SOURCE_APPROVED": "false", "CAPTURE_SLOTS_JSON": "[]", "DAILY_COLLECTION_ENABLED": "false"}
         or config["workers_dev"]
         or config["preview_urls"]
         or config["triggers"]["crons"]

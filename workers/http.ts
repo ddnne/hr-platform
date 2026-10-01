@@ -1,6 +1,8 @@
 /** Common public provider transport: no credentials, redirects or automatic retries. */
-const INTERVAL = 120_000;
-export const USER_AGENT = "hr-platform-personal-research/0.1";
+import collection from "../configs/collection.json";
+import policy from "../configs/cloud-collection.json";
+const INTERVAL = collection.interval_seconds * 1000;
+export const USER_AGENT = policy.user_agent;
 export function fetchPublic(url: string, accept: string, signal: AbortSignal, extra: Record<string, string> = {}): Promise<Response> {
   return fetch(url, {redirect: "manual", signal, headers: {"User-Agent": USER_AGENT, "Accept": accept, ...extra}});
 }
@@ -17,7 +19,7 @@ export function retryAfter(value: string | null, now: number, minimumWait = INTE
   return Number.isFinite(at) ? Math.max(now + minimumWait, at) : now + minimumWait;
 }
 
-export async function boundedBody(response: Response, maximum = 16 * 1024 * 1024): Promise<Uint8Array> {
+export async function boundedBody(response: Response, maximum = policy.max_raw_bytes): Promise<Uint8Array> {
   const length = Number(response.headers.get("content-length"));
   if (length > maximum) {
     await discard(response);

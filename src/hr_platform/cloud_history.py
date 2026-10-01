@@ -39,6 +39,10 @@ def storage_limits(policy):
 
 
 class CloudHistory:
+    body_prefix = 'odds-normalized'
+    parse_table = 'odds_parses'
+    races_table = 'odds_races'
+
     def __init__(self, bucket, database, clock=utcnow, *, storage_policy=None):
         self.bucket, self.db, self.clock = bucket, database, clock
         self.concurrency, self.batch_bytes = storage_limits(storage_policy)
@@ -140,7 +144,7 @@ class CloudHistory:
 
     async def save_body(self, data):
         digest = sha(data)
-        key = f"odds-normalized/{digest}"
+        key = f"{self.body_prefix}/{digest}"
         existing = await self.bucket.get(key)
         if existing is not None:
             if sha(await self.object_body(existing, MAX_EXPANDED)) != digest:
@@ -150,14 +154,14 @@ class CloudHistory:
         return digest
 
     async def read_body(self, digest):
-        data = await self.body(f"odds-normalized/{digest}", MAX_EXPANDED)
+        data = await self.body(f"{self.body_prefix}/{digest}", MAX_EXPANDED)
         if sha(data) != digest:
             raise ValueError('BODY_CORRUPT')
         return json.loads(data)
 
     async def race_body(self, row, race_id):
         data = await self.read_body(row['body_hash'])
-        if data.get('format') == 'odds-races-v2':
+        if data.get('format') in {'odds-races-v2', 'race-files-v1'}:
             return await self.read_body(data['races'][race_id]['body_hash'])
         return data[race_id]  # Preserve history from the original whole-archive format.
 
@@ -167,25 +171,28 @@ class CloudHistory:
             raise ValueError('ASOF_IN_FUTURE')
         return cutoff
 
-    async def history(self, race_id, at, cursor=None, limit=50):
+    async def history(self, race_id, at, cursor=None, limit=50, since=None):
         cutoff = self.cutoff(at)
+        lower = stamp(since) if since is not None else ''
+        if lower > cutoff:
+            raise ValueError('HISTORY_WINDOW')
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError('PAGE_LIMIT')
         cursor_at, cursor_id = '', ''
         if cursor is not None:
             if not isinstance(cursor, str) or not re.fullmatch(r'[0-9a-f]{64}', cursor):
                 raise ValueError('CURSOR')
-            previous = await self.first("""SELECT p.available_at FROM odds_parses p JOIN odds_races r USING(parse_id)
+            previous = await self.first(f"""SELECT p.available_at FROM {self.parse_table} p JOIN {self.races_table} r USING(parse_id)
                 WHERE p.parse_id=? AND r.race_id=? AND p.status='OK' AND p.available_at<=?""", cursor, race_id, cutoff)
             if not previous:
                 raise ValueError('CURSOR')
             cursor_at, cursor_id = previous['available_at'], cursor
-        rows = native(await self.db.prepare("""SELECT p.*,o.raw_sha256,o.received_at,o.raw_saved_at,
-            o.evidence,o.dataset_kind FROM odds_races r JOIN odds_parses p USING(parse_id)
+        rows = native(await self.db.prepare(f"""SELECT p.*,o.raw_sha256,o.received_at,o.raw_saved_at,
+            o.evidence,o.dataset_kind FROM {self.races_table} r JOIN {self.parse_table} p USING(parse_id)
             JOIN raw_observations o USING(observation_id)
-            WHERE r.race_id=? AND p.status='OK' AND p.available_at<=?
+            WHERE r.race_id=? AND p.status='OK' AND p.available_at<=? AND o.received_at>=?
             AND (p.available_at,p.parse_id)>(?,?)
-            ORDER BY p.available_at,p.parse_id LIMIT ?""").bind(race_id, cutoff, cursor_at, cursor_id, limit + 1).all())['results']
+            ORDER BY p.available_at,p.parse_id LIMIT ?""").bind(race_id, cutoff, lower, cursor_at, cursor_id, limit + 1).all())['results']
         result, size = [], 0
         for row in rows[:limit]:
             item = {**row, 'race_id': race_id, 'content': await self.race_body(row, race_id)}

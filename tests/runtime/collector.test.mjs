@@ -29,7 +29,7 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  const late=u.searchParams.get('late')==='true';
  const bindings=late?{...env,INDEX:{batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
  const statement=env.INDEX.prepare(sql);
- if(sql.startsWith('SELECT etag')) return {first:async()=>{const value=await statement.first();Date.now=()=>t+120001;return value;}};
+ if(sql.startsWith('SELECT etag')) return {bind:(...args)=>({first:async()=>{const value=await statement.bind(...args).first();Date.now=()=>t+120001;return value;}})};
  return statement;}}}:env;
  if(u.searchParams.get('expired')==='true') Date.now=()=>t+120001;
  if(u.searchParams.has('now')) Date.now=()=>Number(u.searchParams.get('now'));
@@ -38,7 +38,7 @@ export default {async fetch(req,env){const u=new URL(req.url); if(u.pathname==='
  if(u.pathname==='/sample-check') return Response.json(sampleSlotAllowed(u.searchParams.get('plan'),Number(u.searchParams.get('t')),Number(u.searchParams.get('now'))));
  if(u.pathname==='/retry') return Response.json(retryAfter(u.searchParams.get('v'),1000));
  return production.fetch();}};`, resolveDir: process.cwd(), sourcefile: 'harness.ts'},
- bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
+ external: ['cloudflare:workers'], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
 const schema = await readFile('migrations/0001_capture.sql', 'utf8') + await readFile('migrations/0002_processing_metrics.sql', 'utf8');
 const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1, 2, 3]); // raw capture only, not a parser success fixture
 
@@ -281,8 +281,9 @@ test('Cron second offsets share one planned minute and keep actual receipt clock
   assert.equal(r.requests.length,1);
   const row=await r.db.prepare('SELECT * FROM captures').first();
   assert.equal(row.event_id,`nar-daily-odds:${start}`);
-  assert.equal(row.scheduled_capture_at,new Date(start).toISOString());
-  assert.equal(row.fetch_started_at,new Date(start+57_000).toISOString());
+  assert.equal(Date.parse(row.scheduled_capture_at),start);
+  assert.match(row.scheduled_capture_at,/\.\d{6}\+00:00$/);
+  assert.equal(Date.parse(row.fetch_started_at),start+57_000);
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
  }finally{await r.mf.dispose();}
 });

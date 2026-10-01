@@ -76,3 +76,5 @@ npm run build    # dry-runのみ
 静的診断の`reference_consistency`は、参照市場を同時に表すために必要な最小の確率誤差を記録します。
 正則化や対象市場の価格差とは独立した診断です。値が大きいことを依存構造の優位性や利益とは解釈せず、
 許容差・購入閾値も自動変更しません。
+
+Cloudflareでの自動取得とデータ保存への移行は [日次収集](docs/cloud_daily_collection.md) を参照。稼働の実測状態は [status](docs/status.md) に記録する。

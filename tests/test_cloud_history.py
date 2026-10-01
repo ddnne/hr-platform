@@ -435,3 +435,110 @@ def test_invalid_storage_limits_fail_before_io(cloud, field, value):
     with pytest.raises(ValueError, match='STORAGE_POLICY'):
         CloudHistory(cloud.bucket, cloud.db, storage_policy=policy)
     assert cloud.bucket.writes == cloud.bucket.normalized_reads == 0
+
+
+def test_cloud_race_snapshots_preserve_results_clock_and_reobservations(cloud):
+    from hr_platform.cloud_race_files import CloudRaceFiles
+    from test_realdata import race_archive
+
+    async def scenario():
+        h = CloudRaceFiles(cloud.bucket, cloud.db, lambda: cloud.clock[0])
+        one = cloud.seed(1, 0, race_archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        p1 = await h.normalize(one)
+        first = await h.day('20000101', f.at(5))
+        assert first['races'][f.RACE]['scheduled_start_at'] == '2000-01-01T14:14:00+09:00'
+        assert first['races'][f.RACE]['sales_close_at'] is None
+        assert not first['races'][f.RACE]['result_present']
+        assert not first['paper_eligible']
+        assert (await h.day('20000101', f.at(4)))['snapshot'] is None
+        cloud.clock[0] = f.at(6)
+        two = cloud.seed(2, 2, race_archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        p2 = await h.normalize(two)
+        assert p1['body_hash'] == p2['body_hash'] and p1['parse_id'] != p2['parse_id']
+        assert await h.normalize(two) == p2
+        three = cloud.seed(3, 4, race_archive(finished=True), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        cloud.clock[0] = f.at(7)
+        await h.normalize(three)
+        assert await h.day('20000101', f.at(5)) == first
+        latest = await h.day('20000101', f.at(7))
+        assert latest['races'][f.RACE]['result_present']
+        assert latest['races'][f.RACE]['status'] == 'UNKNOWN'
+        assert not latest['races'][f.RACE]['final']
+        history = await h.history(f.RACE, f.at(7))
+        assert len(history['history']) == 3
+        assert history['history'][0]['content'] == first['races'][f.RACE]
+        assert len((await h.history(f.RACE, f.at(7), since=f.at(2)))['history']) == 2
+        assert not (await h.history(f.RACE, f.at(5), since=f.at(2)))['history']
+    asyncio.run(scenario())
+
+
+def test_race_parse_failure_does_not_change_odds_or_provider_stop(cloud):
+    from hr_platform.cloud_race_files import CloudRaceFiles
+
+    async def scenario():
+        h = CloudRaceFiles(cloud.bucket, cloud.db, lambda: cloud.clock[0])
+        bad = cloud.seed(1, 0, f.archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        assert (await h.normalize(bad))['status'] == 'ERROR'
+        odds = cloud.seed(2, 2)
+        assert (await cloud.h.normalize(odds))['status'] == 'OK'
+        assert (await h.day('20000101', f.at(5)))['snapshot'] is None
+        assert cloud.db.conn.execute("SELECT blocked FROM source_control WHERE source='nar-daily-odds'").fetchone()[0] == 0
+    asyncio.run(scenario())
+
+
+def test_separate_normalizer_claims_once_and_preserves_parse_error(cloud):
+    from hr_platform.cloud_normalization import normalize_next
+
+    async def scenario():
+        cloud.seed(1, 0, kind='DAILY_SNAPSHOT')
+        def run():
+            return normalize_next(cloud.bucket, cloud.db, None, 60, clock=lambda: cloud.clock[0])
+        assert (await run())['status'] == 'PARSED'
+        assert (await run())['status'] == 'IDLE'
+        cloud.seed(2, 2, f.archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        assert (await run())['status'] == 'PARSE_ERROR'
+        assert (await run())['status'] == 'IDLE'
+        assert cloud.db.conn.execute("SELECT count(*) FROM normalization_jobs WHERE status='DONE'").fetchone()[0] == 2
+    asyncio.run(scenario())
+
+
+def test_normalizer_storage_failure_retries_only_after_lease(cloud):
+    from hr_platform.cloud_normalization import normalize_next
+
+    async def scenario():
+        cloud.seed(1, 0, kind='DAILY_SNAPSHOT')
+        def run():
+            return normalize_next(cloud.bucket, cloud.db, None, 60, clock=lambda: cloud.clock[0])
+        put = cloud.bucket.put
+
+        async def failed(*_):
+            raise RuntimeError('storage unavailable')
+
+        cloud.bucket.put = failed
+        with pytest.raises(RuntimeError, match='storage unavailable'):
+            await run()
+        cloud.bucket.put = put
+        assert (await run())['status'] == 'IDLE'
+        cloud.clock[0] = f.at(7)
+        assert (await run())['status'] == 'PARSED'
+        assert not (await cloud.h.history(f.RACE, f.at(5)))['history']
+    asyncio.run(scenario())
+
+
+def test_normalizer_prioritizes_race_state_and_fresh_odds_over_import_backlog(cloud):
+    from hr_platform.cloud_normalization import normalize_next
+    from test_realdata import race_archive
+
+    async def scenario():
+        old = cloud.seed(1, 0, kind='DAILY_SNAPSHOT')
+        fresh = cloud.seed(2, 2, kind='DAILY_SNAPSHOT')
+        race = cloud.seed(3, 1, race_archive(), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        completed = set()
+        for expected in (race, fresh, old):
+            assert (await normalize_next(cloud.bucket, cloud.db, None, 60,
+                                        clock=lambda: cloud.clock[0]))['status'] == 'PARSED'
+            actual = {r[0] for r in cloud.db.conn.execute(
+                "SELECT observation_id FROM normalization_jobs WHERE status='DONE'")}
+            assert actual - completed == {expected}
+            completed = actual
+    asyncio.run(scenario())
