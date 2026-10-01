@@ -1,0 +1,15 @@
+{
+  "version": "quinella-successors-v1",
+  "base_config": "configs/research-shadow-near-close.yaml",
+  "development_dates": ["20261001"],
+  "validation_not_before_date": "20261002",
+  "reference_bankroll_yen": 10000,
+  "variants": ["reference_baseline", "reference_sensitivity_floor", "consensus_log_growth", "consensus_log_growth_trend"],
+  "probability_floor": "minimum_of_reference_unregularized_lambda_and_reference_weight_variants",
+  "consensus_floor": "minimum_of_probability_floor_and_direct",
+  "trend_previous_checkpoint": "close_minus_120s",
+  "trend_projection": "current_quote_times_minimum_of_one_and_current_over_previous_quote",
+  "trend_missing_policy": "exclude_variant_without_two_distinct_observations_and_complete_matching_support",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE",
+  "outcome_policy": "ordinary_published_payout_comparison_with_unknown_refunds_separate_from_official_settlement"
+}
