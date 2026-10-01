@@ -25,8 +25,9 @@ async def normalize_next(bucket, db, storage_policy, lease_seconds, clock=None):
             AND p.version=? AND p.encoding='utf-8-sig' AND p.status IN ('OK','ERROR'))
           AND NOT EXISTS (SELECT 1 FROM race_file_parses p WHERE p.observation_id=o.observation_id
             AND p.version=? AND p.encoding='utf-8-sig' AND p.status IN ('OK','ERROR'))
-        ORDER BY CASE WHEN o.dataset_kind='NAR_RACE_BUNDLE' THEN 0 ELSE 1 END,
-          o.received_at DESC,o.observation_id DESC LIMIT 1''',
+        ORDER BY o.received_at DESC,
+          CASE WHEN o.dataset_kind='NAR_RACE_BUNDLE' THEN 0 ELSE 1 END,
+          o.observation_id DESC LIMIT 1''',
         RACE_VERSION, ODDS_VERSION, RACE_VERSION, ODDS_VERSION, now, ODDS_VERSION, RACE_VERSION)
     if not item:
         return {'status': 'IDLE'}
