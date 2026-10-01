@@ -137,7 +137,7 @@ def test_invalid_prices_rejected_by_shared_model_before_solver(config, monkeypat
     next(iter(p["markets"][market]["quotes"].values()))["odds"] = value
     with pytest.raises(ModelError, match="UNUSABLE_ODDS"):
         analyze(**p)
-    assert json.loads(execute(json.dumps(p)))["status"] == "MODEL_ERROR"
+    assert json.loads(execute(json.dumps(p)))["status"] == "DATA_MISSING"
 
 
 def test_actual_solver_failure_has_static_response_without_warning(config, capsys, recwarn):
@@ -176,6 +176,8 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
         "hr_platform/race_state.py",
         "hr_platform/official_payout.py",
         "hr_platform/payout_check.py",
+        "hr_platform/cloud_paper.py",
+        "hr_platform/prospective_rules.py",
     }
     assert (root / "src/hr_platform/model.py").read_bytes() == Path("src/hr_platform/model.py").read_bytes()
     config = json.loads((root / "wrangler.jsonc").read_text())

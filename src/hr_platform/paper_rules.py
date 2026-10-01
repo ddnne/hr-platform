@@ -121,3 +121,20 @@ def settlement_values(decision, payout):
         "profit_yen": paid + refund - stake if status != "PENDING" else None,
         "roi": (paid + refund - stake) / stake if stake and status == "SETTLED" else None,
     }
+
+
+def validate_paper_config(config):
+    if config["mode"] not in {"EXPLORATORY_SHADOW", "FROZEN_PAPER"} or config["stake_yen"] != 100:
+        raise ValueError("PAPER_CONFIG")
+    if config["max_tickets_per_race"] != 1 or config["target"] in config["references"]:
+        raise ValueError("PAPER_CONFIG")
+    reference_policy = config.get("reference_constraint_policy", "require_feasible")
+    if reference_policy not in {"require_feasible", "allow_inconsistent_shadow"} or (
+        reference_policy == "allow_inconsistent_shadow" and config["mode"] != "EXPLORATORY_SHADOW"
+    ):
+        raise ValueError("REFERENCE_CONSTRAINT_POLICY")
+    return reference_policy
+
+
+def model_error_reason(error):
+    return 'DATA_MISSING' if str(error) in {'INCOMPLETE_MARKET', 'UNUSABLE_ODDS', 'REFERENCE_MISSING'} else 'MODEL_ERROR'

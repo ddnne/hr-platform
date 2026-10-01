@@ -8,17 +8,26 @@ class Default(WorkerEntrypoint):
         return Response("Not found", status=404)
 
     async def scheduled(self, controller, env=None, ctx=None):
+        import asyncio
         import json
         from hr_platform.cloud_normalization import normalize_next
-        if self.env.NORMALIZATION_ENABLED != "true":
-            return
-        try:
+        from hr_platform.cloud_paper import CloudPaper
+        tasks, names = [], []
+        if self.env.NORMALIZATION_ENABLED == "true":
             policy = json.loads(self.env.COLLECTION_POLICY_JSON)
-            await normalize_next(self.env.RAW, self.env.INDEX,
-                                 json.loads(self.env.STORAGE_POLICY_JSON),
-                                 policy['normalization_lease_seconds'])
-        except Exception:
-            print(json.dumps({'component': 'normalizer', 'status': 'STORAGE_OR_RUNTIME_ERROR'}))
+            tasks.append(normalize_next(self.env.RAW, self.env.INDEX,
+                         json.loads(self.env.STORAGE_POLICY_JSON), policy['normalization_lease_seconds']))
+            names.append('normalizer')
+        if self.env.PAPER_ENABLED == "true":
+            paper = CloudPaper(self.env.RAW, self.env.INDEX,
+                storage_policy=json.loads(self.env.STORAGE_POLICY_JSON),
+                paper_policy=json.loads(self.env.PAPER_POLICY_JSON))
+            tasks.append(paper.tick())
+            names.append('paper')
+        # One task's parsing/model failure does not cancel the other task.
+        for name, result in zip(names, await asyncio.gather(*tasks, return_exceptions=True)):
+            if isinstance(result, BaseException):
+                print(json.dumps({'component': name, 'status': 'STORAGE_OR_RUNTIME_ERROR'}))
 
     async def analyze(self, payload):
         from hr_platform.cloud_model import execute
@@ -37,7 +46,14 @@ class Default(WorkerEntrypoint):
         from hr_platform.cloud_pages import CloudPages
         return await self._stored(CloudPages, payload, {'normalize', 'history', 'asof'})
 
-    async def _stored(self, storage, payload, operations):
+    async def paper(self, payload):
+        import json
+        from hr_platform.cloud_paper import CloudPaper
+        operations = {'enroll', 'history'} if self.env.PAPER_ENABLED == "true" else {'history'}
+        return await self._stored(CloudPaper, payload, operations,
+                                 paper_policy=json.loads(self.env.PAPER_POLICY_JSON))
+
+    async def _stored(self, storage, payload, operations, **options):
         import json
 
         try:
@@ -47,7 +63,7 @@ class Default(WorkerEntrypoint):
             if not isinstance(request, dict):
                 raise ValueError("INPUT_SCHEMA")
             history = storage(self.env.RAW, self.env.INDEX,
-                              storage_policy=json.loads(self.env.STORAGE_POLICY_JSON))
+                              storage_policy=json.loads(self.env.STORAGE_POLICY_JSON), **options)
             operation = request.pop("operation")
             if operation not in operations:
                 raise ValueError("OPERATION")

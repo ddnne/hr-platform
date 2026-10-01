@@ -1,7 +1,7 @@
 import json
 from .common import canonical, identity, instant, paper_asof, stamp, seconds
 from .model import analyze, ModelError
-from .paper_rules import eligibility, select, settlement_values
+from .paper_rules import eligibility, select, settlement_values, validate_paper_config, model_error_reason
 
 
 def register_experiment(store, config):
@@ -23,15 +23,7 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
         from .prospective import validate_policy
 
         validate_policy(config)
-    if config["mode"] not in {"EXPLORATORY_SHADOW", "FROZEN_PAPER"} or config["stake_yen"] != 100:
-        raise ValueError("PAPER_CONFIG")
-    if config["max_tickets_per_race"] != 1 or config["target"] in config["references"]:
-        raise ValueError("PAPER_CONFIG")
-    reference_policy = config.get("reference_constraint_policy", "require_feasible")
-    if reference_policy not in {"require_feasible", "allow_inconsistent_shadow"} or (
-        reference_policy == "allow_inconsistent_shadow" and config["mode"] != "EXPLORATORY_SHADOW"
-    ):
-        raise ValueError("REFERENCE_CONSTRAINT_POLICY")
+    reference_policy = validate_paper_config(config)
     experiment = config["version"]
     config_hash = register_experiment(store, config)
     existing = store.db.execute(
@@ -67,11 +59,7 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
                 else:
                     assumptions.append("INCONSISTENT_REFERENCES_SOFT_CALIBRATION")
         except ModelError as exc:
-            reason = (
-                "DATA_MISSING"
-                if str(exc) in {"INCOMPLETE_MARKET", "UNUSABLE_ODDS", "REFERENCE_MISSING"}
-                else "MODEL_ERROR"
-            )
+            reason = model_error_reason(exc)
         except Exception:
             # Unexpected solver/model failures consume this fixed decision as a
             # no-bet too. They must not leave it open for a later price retry.

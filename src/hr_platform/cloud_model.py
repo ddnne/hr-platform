@@ -11,7 +11,7 @@ import time
 import warnings
 
 MAX_INPUT_BYTES = 1024 * 1024
-VERSION = "python-worker-model-v3"
+VERSION = "python-worker-model-v4"
 
 
 def clock_timings(value):
@@ -99,8 +99,9 @@ def execute(payload):
                     "ignore", message=r"Solution may be inaccurate\.", category=UserWarning
                 )
                 result = analyze(**data)
-        except ModelError:
-            return json.dumps({**envelope, "status": "MODEL_ERROR"})
+        except ModelError as exc:
+            from .paper_rules import model_error_reason
+            return json.dumps({**envelope, "status": model_error_reason(exc)})
         status = (
             "REFERENCE_INCONSISTENT" if result["identification"]["status"] == "INCONSISTENT" else "ANALYZED"
         )
