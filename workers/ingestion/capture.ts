@@ -6,7 +6,8 @@ export {boundedBody, retryAfter} from "../http";
 
 import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
-export type CaptureKind = "odds" | "race";
+import {validatePage, type PageTarget} from "./pages";
+export type CaptureKind = "odds" | "race" | PageTarget["kind"];
 // Keep the existing source row: both ZIP endpoints share the provider's stop/wait state.
 export const SOURCE = "nar-daily-odds";
 const INTERVAL = collection.interval_seconds * 1000;
@@ -18,6 +19,7 @@ interface Manifest {
   http_status: number; etag: string | null; validator_sent: string | null;
   validator_raw_sha256: string | null; file_name: string | null; file_timestamp: string | null;
   duration_ms: number; dataset_kind?: string;
+  url?: string; race_id?: string;
 }
 const iso = (n: number) => new Date(n).toISOString().replace("Z", "000+00:00");
 async function publish(env: Env, m: Manifest, processingStarted: number): Promise<void> {
@@ -49,9 +51,19 @@ async function publish(env: Env, m: Manifest, processingStarted: number): Promis
   }
 }
 
-export async function capture(scheduledTime: number, env: Env, kind: CaptureKind = "odds", daily = false): Promise<void> {
+export async function capture(scheduledTime: number, env: Env, kind: CaptureKind = "odds", daily = false, page?: PageTarget): Promise<void> {
   if (env.COLLECTION_ENABLED !== "true" || env.SOURCE_APPROVED !== "true") return;
   if (daily && env.DAILY_COLLECTION_ENABLED !== "true") return;
+  const isPage = kind === "state" || kind === "payout";
+  if (isPage) {
+    if (!daily || !page || page.kind !== kind) throw new Error("PAGE_TARGET_REQUIRED");
+    validatePage(page);
+    const plan = await env.INDEX.prepare("SELECT url,race_id FROM page_capture_plans WHERE event_id=?")
+      .bind(eventIdFor(kind, scheduledTime)).first<{url: string; race_id: string}>();
+    if (!plan || plan.url !== page.url || plan.race_id !== page.race_id) throw new Error("PAGE_PLAN_REQUIRED");
+  } else if (page || !["odds", "race"].includes(kind)) throw new Error("CAPTURE_KIND");
+  const url = page?.url ?? policy.urls[kind as "odds" | "race"];
+  const accept = isPage ? "text/html" : "application/zip";
   const allowed = (now: number) => daily
     ? Number.isSafeInteger(scheduledTime) && now >= scheduledTime
       && now - scheduledTime <= collection.capture_window_seconds * 1000
@@ -118,7 +130,7 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
   const inserted = await env.INDEX.prepare(`INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,
     fetch_started_at,status) VALUES(?,?,?,'RESERVED')`).bind(eventId, iso(scheduledTime), iso(now)).run();
   if (!inserted.meta.changes) return;
-  const prior = await env.INDEX.prepare(`SELECT etag,raw_sha256,file_name,file_timestamp FROM captures
+  const prior = isPage ? null : await env.INDEX.prepare(`SELECT etag,raw_sha256,file_name,file_timestamp FROM captures
     WHERE status='RAW_STORED' AND http_status=200 AND event_id LIKE ? ORDER BY collector_received_at DESC LIMIT 1`)
     .bind(`nar-daily-${kind}:%`).first<{etag: string | null; raw_sha256: string; file_name: string | null; file_timestamp: string | null}>();
   const controller = new AbortController();
@@ -141,7 +153,7 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
     await env.INDEX.prepare("UPDATE captures SET status='FETCHING' WHERE event_id=? AND status='RESERVED'")
       .bind(eventId).run();
     if (!allowed(Date.now())) throw new Error("SAMPLE_WINDOW_EXPIRED");
-    const response = await fetchPublic(policy.urls[kind], "application/zip", controller.signal,
+    const response = await fetchPublic(url, accept, controller.signal,
       prior?.etag ? {"If-None-Match": prior.etag} : {});
     httpStatus = response.status;
     contentType = response.headers.get("content-type");
@@ -205,9 +217,13 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
       size = raw.size;
       rawSavedAt = iso(Date.now());
     } else {
-      const body = await boundedBody(response);
+      const body = await boundedBody(response, isPage ? policy.page_max_bytes : policy.max_raw_bytes);
       receivedAt = iso(Date.now());
-      if (body[0] !== 0x50 || body[1] !== 0x4b) {
+      const validBody = isPage
+        ? !!contentType?.includes("text/html") && /<(?:!doctype\s+html|html)\b/i.test(new TextDecoder().decode(body.subarray(0, 8192)))
+          && !/captcha|challenge/i.test(new TextDecoder().decode(body))
+        : body[0] === 0x50 && body[1] === 0x4b;
+      if (!validBody) {
         errorBody = body;
         // Any HTML/interstitial on the ZIP path stops the source for manual investigation.
         await stopSource();
@@ -227,7 +243,9 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
       validator_sent: prior?.etag ?? null, validator_raw_sha256: prior?.raw_sha256 ?? null,
       file_name: filename ?? (response.status === 304 ? prior?.file_name ?? null : null),
       file_timestamp: unix ? iso(Number(unix) * 1000) : response.status === 304 ? prior?.file_timestamp ?? null : null,
-      duration_ms: Date.now() - now, dataset_kind: kind === "odds" ? "DAILY_SNAPSHOT" : "NAR_RACE_BUNDLE"};
+      duration_ms: Date.now() - now,
+      dataset_kind: isPage ? `NAR_PAGE_${kind.toUpperCase()}` : kind === "odds" ? "DAILY_SNAPSHOT" : "NAR_RACE_BUNDLE",
+      ...(page ? {url: page.url, race_id: page.race_id} : {})};
     // Store the event-to-hash intent first. It is not a successful observation.
     await env.RAW.put(`manifests/${eventId}.json`, JSON.stringify(manifest));
     if (content !== null) {
@@ -247,7 +265,7 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
     try {
       await env.RAW.put(`failure-metadata/${eventId}.json`, JSON.stringify({
         schema: "collector-failure-metadata-v1", event_id: eventId,
-        request_profile_headers: REQUEST_HEADERS, http_status: httpStatus,
+        request_profile_headers: {...REQUEST_HEADERS, Accept: accept}, http_status: httpStatus,
         fetch_started_at: iso(now), headers_received_at: headersAt,
         content_type: contentType?.slice(0, 512) ?? null,
         cf_mitigated: cfMitigated?.slice(0, 128) ?? null,

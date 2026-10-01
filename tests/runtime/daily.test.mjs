@@ -7,6 +7,7 @@ import {Miniflare, Log, LogLevel, convertV4MiniflareOptions} from 'miniflare';
 // Only this synthetic harness exposes drive/state. Production HTTP remains 404.
 const code = await build({stdin:{contents:`
 import {NarCollector,nextJob} from './workers/ingestion/daily.ts';
+import {registerPage} from './workers/ingestion/pages.ts';
 export class TestCollector extends NarCollector {
  constructor(ctx,env){let failures=0;const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
   const st=env.INDEX.prepare(sql);
@@ -16,16 +17,18 @@ export class TestCollector extends NarCollector {
     || (env.FAULT==='refusal' && sql.startsWith('UPDATE source_control SET blocked=1'))) {
    return {bind:(...args)=>{const bound=st.bind(...args);return {run:async()=>{if(failures++===0)throw new Error('injected write failure');return bound.run();}}}};
   }return st;}};super(ctx,{...env,INDEX:index});}
- async drive(at,kind,now){await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC'});let error=null;const realNow=Date.now;
+ async drive(at,kind,now){const page=['state','payout'].includes(kind)?await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first():undefined;
+ await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC',...(page?{page}:{})});let error=null;const realNow=Date.now;
  if(now)Date.now=()=>now;
  try{await this.alarm()}catch(e){error=e.message}finally{Date.now=realNow}
  return {error,job:await this.ctx.storage.get('job'),lastRaceAt:await this.ctx.storage.get('lastRaceAt'),alarm:await this.ctx.storage.getAlarm()};}
 }
 export default {async fetch(request,env){const u=new URL(request.url);
+ if(u.pathname==='/plan'){const {at,target}=await request.json();try{return Response.json(await registerPage(env,at,target));}catch(e){return new Response(e.message,{status:400});}}
  if(u.pathname==='/next')return Response.json(nextJob(Number(u.searchParams.get('at')),u.searchParams.has('race')?Number(u.searchParams.get('race')):null));
  const stub=env.COLLECTOR.getByName('synthetic');return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
 `,sourcefile:'daily-harness.ts',resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
-const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8');
+const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8');
 async function runtime(responses, enabled=true, fault="") {
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:code.outputFiles[0].text,
@@ -174,5 +177,80 @@ test('interrupted raw write with an intent manifest records a gap and advances',
   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
   assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,0);
   assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+const target=(kind='state',race=1)=>({kind,race_id:'20000101:SYNTHETIC:'+race,
+ url:'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/'+(kind==='state'?'OddsTanFuku':'RaceMarkTable')+
+ '?k_raceDate=2000%2F01%2F01&k_raceNo='+race+'&k_babaCode=19'});
+const plan=(r,at,t=target())=>r.mf.dispatchFetch('http://local/plan',{method:'POST',body:JSON.stringify({at,target:t})});
+
+test('planned pages share interval, raw history and replay controls; consume one daily slot',async()=>{
+ const r=await runtime([{body:zip},{body:'<!doctype html><html>SYNTHETIC</html>',headers:{'content-type':'text/html'}}]);
+ try{
+  const now=Date.now(), at=now+360000;
+  assert.equal((await plan(r,at)).status,200);
+  assert.equal((await plan(r,at)).status,200);
+  assert.equal((await plan(r,at,target('state',2))).status,400);
+  const first=await r.drive(at-200000,'odds',at-200000);
+  assert.equal(first.job.at,at);assert.equal(first.job.kind,'state');
+  const state=await r.drive(at,'state',at);
+  assert.equal(state.error,null);assert.ok(state.alarm>=at+120000);
+  await r.drive(at,'state',at);
+  assert.equal(r.requests.length,2);
+  assert.equal(r.requests[1].etag,null);assert.ok(r.requests[1].url.includes('OddsTanFuku'));
+  const obs=await r.db.prepare("SELECT * FROM raw_observations WHERE dataset_kind='NAR_PAGE_STATE'").first();
+  assert.ok(obs);assert.equal(obs.source_updated_at,null);
+  const bucket=await r.mf.getR2Bucket('RAW');const m=await(await bucket.get('manifests/'+obs.observation_id+'.json')).json();
+  assert.equal(m.url,target().url);assert.equal(m.race_id,target().race_id);
+ }finally{await r.mf.dispose();}
+});
+
+test('page targets reject another host, duplicate parameters and late plans before HTTP',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.now()+360000;
+  for(const t of [{...target(),url:target().url.replace('www.keiba.go.jp','invalid.example')},
+                  {...target(),url:target().url+'&k_babaCode=19'},target('state',13)]){
+   assert.equal((await plan(r,at,t)).status,400);
+  }
+  assert.equal((await plan(r,Date.now())).status,400);
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('a page challenge stops both page and odds collection',async()=>{
+ const r=await runtime([{body:'<!doctype html><html>CAPTCHA</html>',headers:{'content-type':'text/html'}}]);
+ try{
+  const at=Date.now()+360000;assert.equal((await plan(r,at)).status,200);
+  await r.drive(at,'state',at);
+  assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+  await r.drive(at+120000,'odds',at+120000);
+  assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('expired page slot remains a gap instead of fetching a newer page',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.now()+360000;await plan(r,at);
+  await r.drive(at,'state',at+91000);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'MISSED_WINDOW');
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('late previous receipt delays page execution within its original window, without consuming it',async()=>{
+ const r=await runtime([{body:'<html>SYNTHETIC</html>',headers:{'content-type':'text/html'}}]);
+ try{
+  const at=Date.now()+360000;await plan(r,at);
+  await r.db.prepare('UPDATE source_control SET next_allowed_at=?').bind(at+5000).run();
+  const wait=await r.drive(at,'state',at);
+  assert.equal(wait.alarm,at+5000);assert.equal(wait.job.at,at);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM captures').first()).n,0);
+  await r.drive(at,'state',at+5000);
+  assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'RAW_STORED');
  }finally{await r.mf.dispose();}
 });

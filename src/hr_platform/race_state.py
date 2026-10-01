@@ -11,8 +11,7 @@ import json
 import re
 import unicodedata
 from urllib.parse import parse_qs, urlsplit
-from zoneinfo import ZoneInfo
-from .common import canonical, identity, sha, stamp, seconds
+from .common import JST, canonical, identity, sha, stamp, seconds
 
 VERSION = "nar-odds-page-state-v6"
 MAX_BYTES = 2 * 1024 * 1024
@@ -183,7 +182,7 @@ def parse_state_page(raw, race_id):
         if m:
             year, month, day, venue, number, start, changed = m.groups()
             date = f"{year}{int(month):02}{int(day):02}"
-            dt = datetime.strptime(date + start, "%Y%m%d%H:%M").replace(tzinfo=ZoneInfo("Asia/Tokyo"))
+            dt = datetime.strptime(date + start, "%Y%m%d%H:%M").replace(tzinfo=JST)
             identities.append((f"{date}:{venue}:{int(number)}", dt.isoformat(), changed is not None))
     if len(identities) != 1 or identities[0][0] != race_id:
         raise ValueError("STATE_RACE_IDENTITY")
@@ -319,7 +318,8 @@ class StateEvidence:
     def validate(self, receipt, raw, scope, now):
         return validate_receipt(receipt, raw, scope, now, self.receipt_path)
 
-    def verify_parsed(self, parsed, receipt):
+    @staticmethod
+    def verify_parsed(parsed, receipt):
         if parsed["venue_code"] != parse_qs(urlsplit(receipt["url"]).query)["k_babaCode"][0]:
             raise ValueError("STATE_VENUE_CODE")
 
