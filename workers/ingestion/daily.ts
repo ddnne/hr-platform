@@ -87,6 +87,15 @@ export class NarCollector extends DurableObject<Env> {
     // Parsing runs in another Worker Cron. No parser/model call can hold this alarm open.
     await this.ctx.storage.put("job", next);
     await this.ctx.storage.setAlarm(Math.max(next.at, nextControl.next_allowed_at));
+    if (stored.status === "RAW_STORED" && this.env.RESEARCH) {
+      const normalizer = this.env.RESEARCH as unknown as {normalize_saved(): Promise<string>};
+      // The next capture is durable before waking the existing normalizer.
+      // Its failure cannot delay collection; the minute Cron remains a fallback.
+      this.ctx.waitUntil((async () => {
+        try { await normalizer.normalize_saved(); }
+        catch { /* The raw observation remains pending for the existing Cron. */ }
+      })());
+    }
   }
 }
 
