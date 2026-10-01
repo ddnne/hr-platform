@@ -1,5 +1,7 @@
 from hr_platform import fixtures as f
+from hr_platform.common import stamp
 from hr_platform.research import trajectory, research_asof
+import pytest
 
 
 def test_observations_not_revisions_and_no_future_or_final(store):
@@ -80,3 +82,33 @@ def test_reparse_removal_is_shared_by_asof_latest_and_trajectory(store):
     assert store.latest(f.RACE, 'quinella') is None
     # Audit history still contains the withdrawn interpretation.
     assert len(store.history(f.RACE, 'quinella', f.at(4))) == 1
+
+
+def test_window_keeps_all_observations_and_gaps_without_importing_old_reparses(store):
+    raw = f.archive()
+    store.plan([f.at(0), f.at(2), f.at(4), f.at(6)])
+    store.ingest(f.event('old', 0), raw)
+    store.ingest(f.event('first', 2), raw)
+    store.clock = lambda: f.at(4)
+    store.ingest(f.event('failed', 4, status=503))
+    store.clock = lambda: f.at(6, 2)
+    store.ingest(f.event('repeat', 6), raw)
+    store.ingest(f.event('repeat', 6), raw)
+    store.reparse('old', 'later-parse-of-old-receipt')
+    before = trajectory(store, f.RACE, ['quinella'], f.at(7), since=f.at(2, 1))
+    points = before['history']['quinella']
+    assert [x['observation_id'] for x in points] == ['first', 'repeat']
+    assert points[0]['raw_hash'] == points[1]['raw_hash']
+    assert [x['slot'] for x in before['gaps']] == [stamp(f.at(4))]
+    store.clock = lambda: f.at(8, 2)
+    store.ingest(f.event('future', 8), f.archive(distorted=False))
+    store.reparse('first', 'future-parser')
+    assert trajectory(store, f.RACE, ['quinella'], f.at(7), since=f.at(2, 1)) == before
+    assert len(store.history(f.RACE, 'quinella', f.at(7), since=f.at(2), current_only=True)) == 2
+
+
+def test_reversed_history_window_is_rejected(store):
+    with pytest.raises(ValueError, match='HISTORY_WINDOW_REVERSED'):
+        store.history(f.RACE, 'quinella', f.at(2), since=f.at(3))
+    with pytest.raises(ValueError, match='HISTORY_WINDOW_REVERSED'):
+        trajectory(store, f.RACE, [], f.at(2), since=f.at(3))

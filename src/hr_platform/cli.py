@@ -138,6 +138,8 @@ def arguments():
         query.add_argument("--race", required=True)
         query.add_argument("--market", action="append", required=True)
         query.add_argument("--at", required=name != "history")
+        if name in {"history", "trajectory"}:
+            query.add_argument("--from", dest="since", help="取得時刻の下限。省略時は保存済みの全期間")
     reparse = commands.add_parser(
         "reparse", help="保存原本を現在時刻で再解析。過去の利用可能時刻は変更しない"
     )
@@ -269,11 +271,12 @@ def run(args, store):
     elif args.command == "capture-log":
         report = CaptureLog(store).history(args.start, args.end, args.at)
     elif args.command == "history":
-        report = {"history": {h: store.history(args.race, h, args.at) for h in args.market}}
+        report = {"from_at": args.since, "history": {
+            h: store.history(args.race, h, args.at, since=args.since) for h in args.market}}
     elif args.command == "trajectory":
         from .research import trajectory
 
-        report = trajectory(store, args.race, args.market, args.at)
+        report = trajectory(store, args.race, args.market, args.at, since=args.since)
     elif args.command == "research-asof":
         from .research import research_asof
 
