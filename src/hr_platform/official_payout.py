@@ -10,7 +10,6 @@ import re
 from itertools import combinations
 from urllib.parse import parse_qs, urlsplit
 from .common import stamp
-from .paper import settle
 from .payout_check import ResultPage, parse_result_page
 from .race_state import StateEvidence, compact
 
@@ -262,6 +261,8 @@ class PayoutEvidence(StateEvidence):
     parser = staticmethod(parse_payout_page)
 
     def settle_decision(self, decision_id, evidence_id):
+        from .paper import settle
+
         # Only recorded, already published evidence may reach the ledger. There
         # is no path here to create a decision or backdate an import.
         row = self.store.db.execute(

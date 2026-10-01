@@ -33,6 +33,10 @@ class Default(WorkerEntrypoint):
         from hr_platform.cloud_race_files import CloudRaceFiles
         return await self._stored(CloudRaceFiles, payload, {'normalize', 'history', 'day'})
 
+    async def pages(self, payload):
+        from hr_platform.cloud_pages import CloudPages
+        return await self._stored(CloudPages, payload, {'normalize', 'history', 'asof'})
+
     async def _stored(self, storage, payload, operations):
         import json
 

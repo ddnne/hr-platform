@@ -5,7 +5,6 @@ import re
 import unicodedata
 from .common import stamp
 from .parser import MARKETS, UNORDERED, ARITY
-from .realdata import RealData
 
 VERSION = "ordinary-payout-crosscheck-v1"
 
@@ -132,6 +131,8 @@ def parse_result_page(raw, race_id):
 
 
 def crosscheck(store, raw, filename, html, race_id, encoding):
+    from .realdata import RealData
+
     report = {"version": VERSION, "race_id": race_id, "paper_eligible": False,
               "settlement_eligible": False, "exceptions_qualified": False,
               "interpretation": "PAYOUT_CROSSCHECK_NOT_SETTLEMENT",

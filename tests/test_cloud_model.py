@@ -172,6 +172,10 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
         "hr_platform/common.py",
         "hr_platform/parser.py",
         "hr_platform/paper_rules.py",
+        "hr_platform/cloud_pages.py",
+        "hr_platform/race_state.py",
+        "hr_platform/official_payout.py",
+        "hr_platform/payout_check.py",
     }
     assert (root / "src/hr_platform/model.py").read_bytes() == Path("src/hr_platform/model.py").read_bytes()
     config = json.loads((root / "wrangler.jsonc").read_text())

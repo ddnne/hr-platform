@@ -5,10 +5,11 @@ prove PRE_RACE, and displayed payouts do not prove finality or refund coverage.
 """
 
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import io
 import unicodedata
 from .parser import unzip, UNORDERED
+from .common import JST
 
 KEYS = ["競馬場", "競走年月日", "レース番号"]
 RACE_HEADERS = [
@@ -154,7 +155,7 @@ def parse_race_bundle(raw, encoding="utf-8-sig"):
                 raise ValueError("START_TIME")
             scheduled = (
                 datetime.strptime(row["競走年月日"] + start, "%Y%m%d%H%M")
-                .replace(tzinfo=timezone(timedelta(hours=9)))
+                .replace(tzinfo=JST)
                 .isoformat()
             )
         count = int(row["頭数"]) if row["頭数"] else None

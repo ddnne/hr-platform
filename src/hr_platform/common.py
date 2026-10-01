@@ -4,6 +4,8 @@ import json
 
 
 MODEL_PROBABILITY_FIELDS = {"reference": "p_ref", "marginal": "p_marg", "direct": "p_direct"}
+# Official contemporary NAR schedules use JST, without a runtime tzdata dependency.
+JST = timezone(timedelta(hours=9))
 
 
 def utcnow():
