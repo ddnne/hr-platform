@@ -4,6 +4,8 @@
   "day_start": "07:00",
   "day_end": "23:00",
   "race_refresh_seconds": 1800,
+  "monthly_capture_time": "14:10",
+  "monthly_min_interval_seconds": 86400,
   "request_timeout_seconds": 20,
   "max_raw_bytes": 16777216,
   "page_max_bytes": 2097152,
@@ -17,7 +19,8 @@
   "user_agent": "hr-platform-personal-research/0.1",
   "urls": {
     "odds": "https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=daily",
-    "race": "https://www.keiba.go.jp/KeibaWeb/DataDownload/RaceDataDownload?type=daily"
+    "race": "https://www.keiba.go.jp/KeibaWeb/DataDownload/RaceDataDownload?type=daily",
+    "monthly": "https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=monthly"
   },
   "normalization_lease_seconds": 1800,
   "normalization_cron": "* * * * *",

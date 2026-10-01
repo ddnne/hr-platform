@@ -19,7 +19,8 @@
     "COLLECTION_ENABLED": "false",
     "SOURCE_APPROVED": "false",
     "CAPTURE_SLOTS_JSON": "[]",
-    "DAILY_COLLECTION_ENABLED": "false"
+    "DAILY_COLLECTION_ENABLED": "false",
+    "MONTHLY_COLLECTION_ENABLED": "false"
   },
   "d1_databases": [
     {

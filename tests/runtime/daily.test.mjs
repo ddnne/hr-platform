@@ -6,7 +6,8 @@ import {Miniflare, Log, LogLevel, convertV4MiniflareOptions} from 'miniflare';
 
 // Only this synthetic harness exposes drive/state. Production HTTP remains 404.
 const code = await build({stdin:{contents:`
-import {NarCollector,nextJob} from './workers/ingestion/daily.ts';
+import {NarCollector,nextJob,nextMonthly} from './workers/ingestion/daily.ts';
+import {monthlyTarget} from './workers/ingestion/capture.ts';
 import {registerPage,registerEvidenceBatch} from './workers/ingestion/pages.ts';
 export class TestCollector extends NarCollector {
  constructor(ctx,env){let failures=0,notification=Promise.resolve(null);const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
@@ -41,15 +42,16 @@ export default {async fetch(request,env){const u=new URL(request.url);
    return Response.json(await registerEvidenceBatch({...env,INDEX:index},rows,revision));
  }catch(e){return new Response(e.message,{status:400});}}
  if(u.pathname==='/next')return Response.json(nextJob(Number(u.searchParams.get('at')),u.searchParams.has('race')?Number(u.searchParams.get('race')):null));
+ if(u.pathname==='/monthly')return Response.json({...nextMonthly(Number(u.searchParams.get('at')),u.searchParams.has('previous')?Number(u.searchParams.get('previous')):null),...monthlyTarget(Number(u.searchParams.get('at')))});
  const stub=env.COLLECTOR.getByName('synthetic');return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
 `,sourcefile:'daily-harness.ts',resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
 const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8') + await readFile('migrations/0009_evidence_packet_owner.sql','utf8');
-async function runtime(responses, enabled=true, fault="") {
+async function runtime(responses, enabled=true, fault="", monthly=false) {
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:code.outputFiles[0].text,
   compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
   durableObjects:{COLLECTOR:{className:'TestCollector',useSQLite:true}},d1Databases:['INDEX'],r2Buckets:['RAW'],
-  bindings:{COLLECTION_ENABLED:'true',SOURCE_APPROVED:'true',DAILY_COLLECTION_ENABLED:String(enabled),CAPTURE_SLOTS_JSON:'[]',FAULT:fault},
+  bindings:{COLLECTION_ENABLED:'true',SOURCE_APPROVED:'true',DAILY_COLLECTION_ENABLED:String(enabled),MONTHLY_COLLECTION_ENABLED:String(monthly),CAPTURE_SLOTS_JSON:'[]',FAULT:fault},
   log:new Log(LogLevel.NONE),outboundService:async req=>{requests.push({url:req.url,etag:req.headers.get('if-none-match')});
    const r=responses.shift();if(!r)throw new Error('unexpected provider request');
    return new Response(r.body??null,{status:r.status??200,headers:r.headers});}}));
@@ -60,6 +62,111 @@ async function runtime(responses, enabled=true, fault="") {
   assert.equal(response.status,200);return response.json();}};
 }
 const zip=new Uint8Array([0x50,0x4b,3,4]);
+
+test('monthly archive replaces one daily slot, shares raw history and stays FINAL_ONLY',async()=>{
+ const r=await runtime([{body:zip,headers:{etag:'"daily"'}},{body:zip},{body:zip}],true,'',true);
+ try{
+  const at=Date.parse('2026-10-02T05:10:00Z');
+  const first=await r.drive(at-120000,'odds',at-120000);
+  assert.equal(first.job.kind,'monthly');assert.equal(first.job.at,at);
+  const monthly=await r.drive(at,'monthly',at);assert.equal(monthly.error,null);
+  await r.drive(at,'monthly',at);assert.equal(r.requests.length,2);
+  assert.equal(r.requests[1].url,'https://www.keiba.go.jp/KeibaWeb/DataDownload/OddsDataDownload?type=monthly&k_year=2026&k_month=10');
+  assert.equal(r.requests[1].etag,null);
+  const rows=(await r.db.prepare('SELECT * FROM raw_observations ORDER BY received_at').all()).results;
+  assert.equal(rows.length,2);assert.equal(rows[1].dataset_kind,'FINAL_ONLY');
+  assert.equal(rows[0].raw_sha256,rows[1].raw_sha256);
+  assert.equal(rows[1].source_updated_at,null);
+  const bucket=await r.mf.getR2Bucket('RAW');
+  const manifest=await(await bucket.get('manifests/'+rows[1].observation_id+'.json')).json();
+  assert.equal(manifest.dataset_kind,'FINAL_ONLY');assert.equal(manifest.url,r.requests[1].url);
+  assert.ok(monthly.alarm>=at+120000);
+  await r.db.prepare('UPDATE source_control SET next_allowed_at=0').run();
+  await r.drive(at+120000,'monthly',at+120000);assert.equal(r.requests.length,2);
+  assert.equal((await r.db.prepare('SELECT status FROM captures WHERE event_id=?').bind('nar-daily-monthly:'+(at+120000)).first()).status,'WAIT_OR_BLOCKED');
+  await r.drive(at+240000,'race',at+240000); // monthly cooldown does not disable daily collection
+  assert.equal(r.requests.length,3);
+ }finally{await r.mf.dispose();}
+});
+
+test('monthly first-day scope and rolling interval survive month/year boundaries',async()=>{
+ const r=await runtime([],false);
+ try{
+  const jan=Date.parse('2027-01-01T00:00:00Z');
+  const first=await(await r.mf.dispatchFetch('http://local/monthly?at='+jan)).json();
+  assert.equal(first.month,'202612');assert.equal(first.at,Date.parse('2027-01-01T05:10:00Z'));
+  const previous=Date.parse('2026-12-31T05:12:00Z');
+  const delayed=await(await r.mf.dispatchFetch('http://local/monthly?at='+jan+'&previous='+previous)).json();
+  assert.equal(delayed.at,Date.parse('2027-01-01T05:12:00Z'));
+ }finally{await r.mf.dispose();}
+});
+
+test('failed monthly requests retain the daily wait/stop and the 24-hour archive limit',async()=>{
+ for(const status of [429,403]){
+  const r=await runtime([{status,headers:{'retry-after':'600'}}],true,'',true);
+  try{
+   const at=Date.parse('2026-10-02T05:10:00Z');
+   const result=await r.drive(at,'monthly',at);assert.equal(result.error,null);
+   const control=await r.db.prepare('SELECT * FROM source_control').first();
+   if(status===429){assert.equal(control.blocked,0);assert.ok(result.alarm>=at+600000);}
+   else assert.equal(control.blocked,1);
+   await r.drive(at+120000,'monthly',at+120000);
+   assert.equal(r.requests.length,1);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('disabling an already armed monthly job advances without HTTP',async()=>{
+ const r=await runtime([]);
+ try{
+  const result=await r.drive(Date.now(),'monthly');
+  assert.equal(result.error,null);assert.notEqual(result.job.kind,'monthly');
+  assert.equal(r.requests.length,0);
+  assert.equal((await r.db.prepare('SELECT status FROM captures').first()).status,'SKIPPED_DISABLED');
+ }finally{await r.mf.dispose();}
+});
+
+test('monthly insertion preserves the first odds slot after Paper evidence',async()=>{
+ const r=await runtime([{body:zip},{body:zip}],true,'',true);
+ try{
+  const raceAt=Date.parse('2026-10-02T05:08:00Z');
+  const evidence=await r.drive(raceAt,'race',raceAt);
+  assert.equal(evidence.job.kind,'odds');assert.equal(evidence.job.at,raceAt+120000);
+  const odds=await r.drive(evidence.job.at,'odds',evidence.job.at);
+  assert.equal(odds.job.kind,'monthly');assert.ok(odds.job.at>=raceAt+240000);
+ }finally{await r.mf.dispose();}
+});
+
+test('archive cooldown includes the previous HTTP/preflight duration',async()=>{
+ const r=await runtime([{body:zip},{body:zip}],true,'',true);
+ try{
+  const at=Date.parse('2026-10-02T05:10:00Z');
+  await r.drive(at,'monthly',at);
+  await r.db.prepare('UPDATE captures SET duration_ms=10000 WHERE event_id=?').bind('nar-daily-monthly:'+at).run();
+  await r.drive(at+86400000,'monthly',at+86400000);
+  assert.equal(r.requests.length,1);
+  await r.drive(at+86410000,'monthly',at+86410000);
+  assert.equal(r.requests.length,2);
+ }finally{await r.mf.dispose();}
+});
+
+test('monthly disable first recovers or terminates an interrupted event',async()=>{
+ for(const phase of ['RESERVED','FETCHING']){
+  const r=await runtime([]);
+  try{
+   const at=Date.now()-120000;
+   await r.db.prepare('INSERT INTO captures(event_id,scheduled_capture_at,fetch_started_at,status) VALUES(?,?,?,?)')
+    .bind('nar-daily-monthly:'+at,new Date(at).toISOString(),new Date(at).toISOString(),phase).run();
+   const result=await r.drive(at,'monthly');assert.equal(result.error,null);
+   const stored=await r.db.prepare('SELECT status FROM captures').first();
+   assert.ok(['MISSED_WINDOW','SKIPPED_DISABLED','INCOMPLETE_FETCH'].includes(stored.status));
+   assert.equal(r.requests.length,0);
+   if(phase==='FETCHING')assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+   else assert.notEqual(result.job.kind,'monthly');
+  }finally{await r.mf.dispose();}
+ }
+});
 
 test('daily alarms retain raw captures and arm future work without any parser binding',async()=>{
  const r=await runtime([{body:zip,headers:{etag:'"odds"'}}]);
