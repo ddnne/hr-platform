@@ -10,6 +10,22 @@ from .common import MODEL_PROBABILITY_FIELDS, identity, stamp
 SCORE_FIELDS = {**MODEL_PROBABILITY_FIELDS, "market": "v_target"}
 
 
+def purchase_counts(entries):
+    """Count distinct purchased combinations; refunds are not hits."""
+    bets = [entry for entry in entries if entry['stake_yen'] > 0]
+    pending = any(entry['payout_yen'] is None for entry in bets)
+    hits = [entry for entry in bets if entry['payout_yen'] is not None
+            and entry['payout_yen'] - entry.get('special_payout_yen', 0) > 0]
+    def ticket_key(entry):
+        return entry['race_id'], entry['target'], entry['selection']
+    return {
+        'bet_race_count': len({entry['race_id'] for entry in bets}),
+        'purchased_ticket_count': len({ticket_key(entry) for entry in bets}),
+        'hit_race_count': None if pending else len({entry['race_id'] for entry in hits}),
+        'hit_ticket_count': None if pending else len({ticket_key(entry) for entry in hits}),
+    }
+
+
 def _score_race(store, race_id, decisions, entries):
     """Score a whole frozen outcome distribution, never only the purchased ticket."""
     diagnostics = [d.get("diagnostics") for d in decisions]
@@ -160,11 +176,13 @@ def compare(store, config, at):
             settled = status == "SETTLED"
             entries.append({
                 "race_id": decision["race_id"], "decision_id": decision["id"],
+                "target": decision["target"], "selection": decision["selection"],
                 "asof_at": decision["asof_at"], "status": status, "stake_yen": stake,
                 "reference_constraint_status": reference_status,
                 "research_assumptions": decision.get("research_assumptions", []),
                 "settlement": latest,
                 "payout_yen": latest["payout_yen"] if settled else 0 if not stake else None,
+                "special_payout_yen": latest.get("special_payout_yen", 0) if settled else 0 if not stake else None,
                 "refund_yen": latest["refund_yen"] if settled else 0 if not stake else None,
                 "profit_yen": latest["profit_yen"] if settled else 0 if not stake else None,
             })
@@ -186,6 +204,7 @@ def compare(store, config, at):
         no_bet = sum(not e["stake_yen"] for e in entries)
         report["models"][model] = {
             "race_count": len(entries), "bet_count": len(entries) - no_bet,
+            **purchase_counts(entries),
             "no_bet_count": no_bet, "skip_rate": no_bet / len(entries) if entries else None,
             "reason_counts": dict(reasons), "input_kind_counts": dict(input_kinds),
             "reference_constraint_status_counts": dict(reference_statuses),
