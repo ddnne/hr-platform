@@ -66,9 +66,11 @@ class CloudRaceFiles(CloudHistory):
             raise ValueError('CLOCK_ORDER')
         return result
 
-    async def day(self, date, at):
+    async def day(self, date, at, race_id=None):
         if not isinstance(date, str) or not re.fullmatch(r'\d{8}', date):
             raise ValueError('RACE_DATE')
+        if race_id is not None and (not isinstance(race_id, str) or race_id.split(':')[0] != date):
+            raise ValueError('RACE_DATE_MISMATCH')
         cutoff = self.cutoff(at)
         row = await self.first('''SELECT p.*,o.received_at,o.raw_saved_at,o.raw_sha256
             FROM race_file_parses p JOIN raw_observations o USING(observation_id)
@@ -82,6 +84,6 @@ class CloudRaceFiles(CloudHistory):
             return {'asof_at': cutoff, 'snapshot': None, 'paper_eligible': False}
         index = await self.read_body(row['body_hash'])
         races = {key: await self.read_body(value['body_hash']) for key, value in index['races'].items()
-                 if key.split(':')[0] == date}
+                 if key.split(':')[0] == date and (race_id is None or key == race_id)}
         return {'asof_at': cutoff, 'snapshot': row, 'races': races, 'paper_eligible': False,
                 'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
