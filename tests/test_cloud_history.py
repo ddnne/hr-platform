@@ -486,6 +486,54 @@ def test_race_parse_failure_does_not_change_odds_or_provider_stop(cloud):
     asyncio.run(scenario())
 
 
+def test_race_filter_reads_only_selected_body_and_does_not_restore_removed_race(cloud):
+    import csv
+    import io
+    import zipfile
+    from hr_platform.cloud_race_files import CloudRaceFiles
+    from test_realdata import race_archive
+
+    def races(numbers):
+        result = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(race_archive())) as source, zipfile.ZipFile(result, 'w') as dest:
+            for name in source.namelist():
+                reader = csv.DictReader(io.StringIO(source.read(name).decode('utf-8-sig')))
+                rows, text = list(reader), io.StringIO()
+                writer = csv.DictWriter(text, reader.fieldnames)
+                writer.writeheader()
+                writer.writerows({**row, 'レース番号': str(n)} for n in numbers for row in rows)
+                dest.writestr(name, text.getvalue().encode('utf-8-sig'))
+        return result.getvalue()
+
+    async def scenario():
+        h = CloudRaceFiles(cloud.bucket, cloud.db, lambda: cloud.clock[0])
+        one = cloud.seed(1, 0, races((1, 2)), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        await h.normalize(one)
+        full = await h.day('20000101', f.at(5))
+        reads, get = [], cloud.bucket.get
+
+        async def record_get(key):
+            reads.append(key)
+            return await get(key)
+
+        cloud.bucket.get = record_get
+        first = await h.day('20000101', f.at(5), race_id=f.RACE)
+        assert first == {**full, 'races': {f.RACE: full['races'][f.RACE]}}
+        assert len(reads) == 2  # One manifest and the selected race, not the other race.
+        assert (await h.day('20000101', f.at(4), race_id=f.RACE))['snapshot'] is None
+        cloud.clock[0] = f.at(7)
+        two = cloud.seed(2, 6, races((2,)), kind='NAR_RACE_BUNDLE', source='nar-daily-race')
+        latest = await h.normalize(two)
+        removed = await h.day('20000101', f.at(7), race_id=f.RACE)
+        assert removed['snapshot']['parse_id'] == latest['parse_id']
+        assert removed['races'] == {} and not removed['paper_eligible']
+        assert await h.day('20000101', f.at(5), race_id=f.RACE) == first
+        with pytest.raises(ValueError, match='RACE_DATE_MISMATCH'):
+            await h.day('20000101', f.at(7), race_id='20000102:SYNTHETIC:1')
+
+    asyncio.run(scenario())
+
+
 def test_separate_normalizer_claims_once_and_preserves_parse_error(cloud):
     from hr_platform.cloud_normalization import normalize_next
 
