@@ -24,13 +24,21 @@ class CloudPaper(CloudHistory):
                 or any(type(paper_policy[k]) is not int or paper_policy[k] <= 0 for k in paper_policy if k != 'version')):
             raise ValueError('CLOUD_PAPER_POLICY')
         self.policy = paper_policy
-        args = {'clock': clock, 'storage_policy': storage_policy}
+        self.database_time = ''
+        args = {'clock': self.evidence_clock, 'storage_policy': storage_policy}
         self.odds = CloudHistory(bucket, database, **args)
         self.races = CloudRaceFiles(bucket, database, **args)
         self.pages = CloudPages(bucket, database, **args)
 
     async def now(self):
-        return (await self.first(f'SELECT {PUBLICATION_CLOCK} AS now'))['now']
+        now = (await self.first(f'SELECT {PUBLICATION_CLOCK} AS now'))['now']
+        self.database_time = max(self.database_time, now)
+        return now
+
+    def evidence_clock(self):
+        # D1 publication and Worker clocks can differ slightly. A time already
+        # read from D1 is an observed bound, not a client-supplied future cutoff.
+        return max(stamp(self.clock()), self.database_time)
 
     async def metadata(self, race_id, at):
         saved = await self.races.day(race_id.split(':')[0], at, race_id)

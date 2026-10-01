@@ -184,3 +184,22 @@ def test_unusable_odds_are_data_missing_not_solver_failure(cloud, config):
         result = await p.decide(plan['id'], analyzer)
         assert all(d['reason'] == 'DATA_MISSING' for d in result['decisions'])
     asyncio.run(run())
+
+
+def test_observed_d1_clock_can_lead_worker_without_allowing_future_inputs(cloud, config):
+    async def run():
+        from datetime import timedelta
+        from hr_platform.common import instant
+        cloud.db.clock = lambda: (instant(cloud.clock[0]) + timedelta(seconds=1)).isoformat()
+        p = engine(cloud)
+        plan = await inputs(cloud, p, config)
+        cloud.clock[0] = f.at(4, 10)
+        result = await p.tick()
+        assert all(d['status'] == 'PAPER_BET' for d in result['decisions'])
+        assert result['decision_at'] == stamp(f.at(4, 11))
+        with pytest.raises(ValueError, match='ASOF_IN_FUTURE'):
+            await p.odds.asof(f.RACE, ['win'], f.at(4, 12))
+        assert not (await p.history(plan['id'], f.at(4, 10)))['decisions']
+        cloud.clock[0] = f.at(4, 12)
+        assert (await p.history(plan['id'], f.at(4, 11)))['decisions'] == result['decisions']
+    asyncio.run(run())
