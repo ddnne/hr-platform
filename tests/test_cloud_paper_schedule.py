@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 from hr_platform import fixtures as f
-from hr_platform.cloud_paper_schedule import schedule_day
+from hr_platform.cloud_paper_schedule import delayed_payout_packet, schedule_day
 from hr_platform.common import instant, stamp
 from test_cloud_history import cloud as cloud_fixture
 from test_cloud_paper import engine
@@ -169,4 +169,57 @@ def test_same_schedule_new_observation_updates_reservation_version_without_new_d
         assert await p.plan(plan['id']) == plan
         assert (await schedule_day(p, collector, config, *policies()))['status'] == 'NO_FUTURE_SLOT'
         assert len(collector.calls) == 2 and not (await p.history(plan['id'], await p.now()))['decisions']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('condition', ['future', 'late', 'settled', 'conflict'])
+def test_delay_after_decision_moves_only_payout_and_never_reprices(cloud, config, condition):
+    async def run():
+        p = engine(cloud)
+        await observed(p, cloud)
+        collector = Collector(p)
+        result = await schedule_day(p, collector, config, *policies())
+        original = await p.plan(result['plan_id'])
+        cloud.clock[0] = f.at(4, 10)
+        before = await p.decide(original['id'])
+        cloud.clock[0] = f.at(65 if condition == 'late' else 5)
+        await p.races.normalize(cloud.seed(11, 4, race_archive(start='1444', finished=condition == 'late'),
+                                          'NAR_RACE_BUNDLE', 'nar-daily-race'))
+        if condition == 'settled':
+            await p.run('INSERT INTO cloud_paper_settlements VALUES(?,?,?,?)',
+                        original['id'], 'synthetic-evidence', 'synthetic-body', stamp(f.at(5)))
+        if condition == 'conflict':
+            await p.run('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)',
+                        'another-payout', round(instant(f.at(60)).timestamp()*1000), 'payout', 'SYNTHETIC',
+                        '20000101:OTHER:1', stamp(f.at(5)))
+        changed = await schedule_day(p, collector, config, *policies())
+        if condition in {'settled', 'conflict'}:
+            assert changed['status'] == 'NO_FUTURE_SLOT'
+            assert len(collector.calls) == 1
+        else:
+            assert changed['status'] == 'PAYOUT_RESCHEDULED'
+            assert collector.calls[1][:2] == collector.calls[0][:2]
+            expected = 71 if condition == 'late' else 60
+            assert collector.calls[1][-1]['at'] == round(instant(f.at(expected)).timestamp()*1000)
+            assert (await schedule_day(p, collector, config, *policies()))['status'] == 'NO_FUTURE_SLOT'
+            assert len(collector.calls) == 2
+        assert await p.plan(original['id']) == original
+        assert await p.decide(original['id']) == before
+        assert len(await p.all('SELECT * FROM cloud_paper_plan_revisions')) == 1
+    asyncio.run(run())
+
+
+def test_delayed_payout_cannot_consume_another_plans_last_odds_slot(cloud, config):
+    async def run():
+        p = engine(cloud)
+        await observed(p, cloud)
+        await schedule_day(p, Collector(p), config, *policies())
+        captures = await p.all('SELECT *,NULL AS capture_status FROM page_capture_plans')
+        policy, collection = policies()
+        # Payout at 15:00 would be 2 minutes after the other race's metadata
+        # request, but it would consume its final odds slot before 15:01.
+        other = {'race_id': '20000101:OTHER:1', 'asof_at': f.at(61), 'decisions': None}
+        metadata = {'scheduled_start_at': f.at(44)}
+        assert delayed_payout_packet(f.RACE, metadata, captures, [other], f.at(5), policy, collection) is None
+        assert delayed_payout_packet(f.RACE, metadata, captures, [], f.at(5), policy, collection)
     asyncio.run(run())

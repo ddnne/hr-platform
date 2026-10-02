@@ -474,3 +474,23 @@ test('late initial registration of an older schedule cannot supersede newer rese
   assert.equal(r.requests.length,0);
  }finally{await r.mf.dispose();}
 });
+
+test('post-decision delay can retain both input slots and replace only the payout reservation',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.now()+360000, old=packet(at);
+  assert.equal((await batch(r,old)).status,200);
+  for(const entry of old.slice(0,2)) {
+   await r.db.prepare("INSERT INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'RAW_STORED')")
+    .bind(`nar-daily-${entry.kind}:${entry.at}`,new Date(entry.at).toISOString()).run();
+  }
+  const revised=[...old.slice(0,2),{...old[2],at:old[2].at+1200000}];
+  assert.equal((await batch(r,revised,2)).status,200);
+  assert.equal((await batch(r,revised,2)).status,200);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM page_capture_plans').first()).n,4);
+  assert.equal((await r.db.prepare('SELECT status FROM captures WHERE event_id=?')
+   .bind('nar-daily-payout:'+old[2].at).first()).status,'SUPERSEDED_PLAN');
+  assert.equal((await r.db.prepare("SELECT count(*) n FROM captures WHERE status='RAW_STORED'").first()).n,2);
+  assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
