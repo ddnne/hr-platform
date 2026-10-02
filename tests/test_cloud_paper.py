@@ -203,3 +203,45 @@ def test_observed_d1_clock_can_lead_worker_without_allowing_future_inputs(cloud,
         cloud.clock[0] = f.at(4, 12)
         assert (await p.history(plan['id'], f.at(4, 11)))['decisions'] == result['decisions']
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('after_wait', ['on_time', 'late', 'rescheduled'])
+def test_cron_before_the_minute_waits_for_fixed_decision(cloud, config, monkeypatch, after_wait):
+    async def run():
+        config['max_decision_delay_seconds'] = 30
+        p = engine(cloud)
+        plan = await inputs(cloud, p, config)
+        cloud.clock[0] = f.at(3, 39)
+        calls = []
+        metadata = p.metadata
+        async def wait(delay):
+            calls.append(delay)
+            assert (await p.decision(plan['id']))['decisions'] is None
+            cloud.clock[0] = f.at(4, 31) if after_wait == 'late' else f.at(4)
+            if after_wait == 'rescheduled':
+                async def changed(race, at):
+                    result = await metadata(race, at)
+                    result['evidence']['metadata']['scheduled_start_at'] = f.at(18)
+                    result['evidence']['available_at'] = stamp(f.at(3, 50))
+                    return result
+                p.metadata = changed
+        monkeypatch.setattr('hr_platform.cloud_paper.asyncio.sleep', wait)
+        # Direct RPC/default tick keeps its non-waiting behavior.
+        assert (await p.tick())['status'] == 'IDLE'
+        assert not calls
+        result = await p.tick(wait_for_due=True)
+        assert calls == [21]
+        assert not (await p.history(plan['id'], f.at(3, 59)))['decisions']
+        if after_wait == 'rescheduled':
+            assert result['status'] == 'NOT_DUE'
+            assert (await p.plan(plan['id']))['asof_at'] == stamp(f.at(8))
+            assert (await p.decision(plan['id']))['decisions'] is None
+        else:
+            assert all(d['asof_at'] == plan['asof_at'] for d in result['decisions'])
+            assert all(d['status'] == ('NO_BET' if after_wait == 'late' else 'PAPER_BET')
+                       for d in result['decisions'])
+            if after_wait == 'late':
+                assert all(d['reason'] == 'DECISION_TOO_LATE' for d in result['decisions'])
+            assert await p.tick(wait_for_due=True) == {'status': 'PAYOUT_PENDING'}
+            assert calls == [21]
+    asyncio.run(run())

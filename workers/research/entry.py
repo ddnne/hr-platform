@@ -19,7 +19,7 @@ class Default(WorkerEntrypoint):
             paper = CloudPaper(self.env.RAW, self.env.INDEX,
                 storage_policy=json.loads(self.env.STORAGE_POLICY_JSON),
                 paper_policy=json.loads(self.env.PAPER_POLICY_JSON))
-            tasks.append(paper.tick())
+            tasks.append(paper.tick(wait_for_due=True))
             names.append('paper')
             if self.env.AUTO_PAPER_ENABLED == "true":
                 from hr_platform.cloud_paper_schedule import schedule_day
