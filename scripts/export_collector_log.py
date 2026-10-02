@@ -22,7 +22,8 @@ def export(store, start, end, runner=subprocess.run):
     lower, upper = instant(start).timestamp(), instant(end).timestamp()
     statement = (
         f"SELECT {','.join(FIELDS)} FROM captures "
-        f"WHERE status NOT IN ('SYNTHETIC_FIXTURE','IMPORTED_RAW_STORED') "
+        f"WHERE event_id LIKE '{SOURCE}:%' "
+        f"AND status NOT IN ('SYNTHETIC_FIXTURE','IMPORTED_RAW_STORED') "
         f"AND unixepoch(scheduled_capture_at,'subsec')>={lower} "
         f"AND unixepoch(scheduled_capture_at,'subsec')<{upper} "
         f"ORDER BY scheduled_capture_at,event_id LIMIT {MAX_ROWS + 1}"

@@ -178,7 +178,10 @@ def test_exporter_selects_full_range_handles_z_timestamps_and_keeps_output_priva
     )
     rows = [record(), record(2, "FAILED"), record(8, "WAIT_OR_BLOCKED"), record(10),
             {**record(4), 'status': 'SYNTHETIC_FIXTURE'},
-            {**record(6), 'event_id': 'nar-mac-import:' + 'a' * 64, 'status': 'IMPORTED_RAW_STORED'}]
+            {**record(6), 'event_id': 'nar-mac-import:' + 'a' * 64, 'status': 'IMPORTED_RAW_STORED'},
+            {**record(4), 'event_id': 'sports:boat:123:' + 'b' * 64},
+            {**record(6), 'event_id': 'nar-daily-race:123'},
+            {**record(8), 'event_id': 'nar-monthly-odds:123'}]
     for r in rows:
         r["scheduled_capture_at"] = (
             instant(r["scheduled_capture_at"]).isoformat(timespec="milliseconds").replace("+00:00", "Z")

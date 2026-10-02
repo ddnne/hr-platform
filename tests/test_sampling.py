@@ -469,3 +469,25 @@ def test_payout_uses_existing_evidence_parser(store):
     assert result["status"] == "PARSED"
     assert s.capture(p, "sample-0") == result
     assert store.db.execute("SELECT count(*) FROM official_payout_observations").fetchone()[0] == 1
+
+
+def test_public_read_post_uses_common_transport_without_changing_get(monkeypatch):
+    captured = []
+
+    class Opener:
+        def open(self, request, timeout):
+            captured.append(request)
+            return Response()
+
+    monkeypatch.setattr('urllib.request.build_opener', lambda *args: Opener())
+    item = {'kind': 'page', 'url': 'https://synthetic.invalid/public-read'}
+    open_response(item).close()
+    open_response(item, json_body={'raceNo': 1}, extra_headers={'X-CSRF-TOKEN': 'SYNTHETIC_GUEST'}).close()
+    open_response(item, form_body={'encp': 'SYNTHETIC_PUBLIC_RACE_LINK'}).close()
+    assert captured[0].get_method() == 'GET' and captured[0].data is None
+    assert captured[1].get_method() == 'POST' and json.loads(captured[1].data) == {'raceNo': 1}
+    assert captured[1].get_header('Content-type') == 'application/json'
+    assert captured[2].data == b'encp=SYNTHETIC_PUBLIC_RACE_LINK'
+    with pytest.raises(ValueError, match='REQUEST_BODY'):
+        open_response(item, json_body={}, form_body={})
+    assert len(captured) == 3

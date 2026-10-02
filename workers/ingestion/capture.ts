@@ -4,6 +4,7 @@
 import {boundedBody, discard, fetchPublic, retryAfter, USER_AGENT} from "../http";
 export {boundedBody, retryAfter} from "../http";
 
+import {digest, iso, publishCapture, saveCapture, type CaptureManifest} from "../capture-storage";
 import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
 import {validatePage, type PageTarget} from "./pages";
@@ -13,14 +14,6 @@ export const SOURCE = "nar-daily-odds";
 const INTERVAL = collection.interval_seconds * 1000;
 export const eventIdFor = (kind: CaptureKind, at: number) => `nar-daily-${kind}:${at}`;
 const REQUEST_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/zip"};
-interface Manifest {
-  event_id: string; scheduled_capture_at: string; fetch_started_at: string;
-  headers_received_at: string; collector_received_at: string; raw_saved_at: string | null; raw_sha256: string; raw_bytes: number;
-  http_status: number; etag: string | null; validator_sent: string | null;
-  validator_raw_sha256: string | null; file_name: string | null; file_timestamp: string | null;
-  duration_ms: number; dataset_kind?: string;
-  url?: string; race_id?: string;
-}
 /** The first day collects the previous month containing yesterday's results. */
 export function monthlyTarget(at: number): {url: string; month: string} {
   const date = new Date(at + policy.timezone_offset_minutes * 60_000);
@@ -42,34 +35,9 @@ export async function lastMonthlyAttempt(env: Env): Promise<number | null> {
     ?? (collection.capture_window_seconds + policy.request_timeout_seconds) * 1000),
     row.collector_received_at ? Date.parse(row.collector_received_at) : 0) : null;
 }
-const iso = (n: number) => new Date(n).toISOString().replace("Z", "000+00:00");
-async function publish(env: Env, m: Manifest, processingStarted: number): Promise<void> {
-  // R2 object and manifest must both exist before publishing an observation index.
-  const raw = await env.RAW.head(`raw/${m.raw_sha256}`);
-  if (!raw) throw new Error("RAW_MISSING");
-  if (m.raw_saved_at === null) {
-    // Recover a successful body write whose completion-manifest write was interrupted.
-    m.raw_saved_at = iso(raw.uploaded.getTime());
-    await env.RAW.put(`manifests/${m.event_id}.json`, JSON.stringify(m));
-  }
-  await env.INDEX.batch([
-    env.INDEX.prepare(`UPDATE captures SET status='RAW_STORED',http_status=?,headers_received_at=?,collector_received_at=?,
-      raw_saved_at=?,raw_sha256=?,raw_bytes=?,etag=?,validator_sent=?,validator_raw_sha256=?,
-      file_name=?,file_timestamp=?,duration_ms=?,error_code=NULL WHERE event_id=?`).bind(
-      m.http_status, m.headers_received_at, m.collector_received_at, m.raw_saved_at, m.raw_sha256, m.raw_bytes, m.etag,
-      m.validator_sent, m.validator_raw_sha256, m.file_name, m.file_timestamp, m.duration_ms, m.event_id),
-    env.INDEX.prepare(`INSERT OR IGNORE INTO raw_observations VALUES(?,?,?,?,?,?,NULL,NULL)`)
-      .bind(m.event_id, m.raw_sha256, m.collector_received_at, m.raw_saved_at,
-        m.http_status === 304 ? "validator_304" : "body_200", m.dataset_kind ?? "DAILY_SNAPSHOT")
-  ]);
-  // Include raw writes and index publication; the final metric write itself is excluded.
-  try {
-    await env.INDEX.prepare("UPDATE captures SET processing_ms=? WHERE event_id=?")
-      .bind(Date.now() - processingStarted, m.event_id).run();
-  } catch {
-    // Metrics cannot invalidate an already published observation or its ETag.
-    console.log(JSON.stringify({component: "collector", status: "METRIC_WRITE_FAILED"}));
-  }
+// Only old NAR manifests may omit dataset_kind.
+async function publish(env: Env, m: Omit<CaptureManifest, "dataset_kind"> & {dataset_kind?: string}, started: number): Promise<void> {
+  await publishCapture(env, {...m, dataset_kind: m.dataset_kind ?? "DAILY_SNAPSHOT"}, started);
 }
 
 export async function capture(scheduledTime: number, env: Env, kind: CaptureKind = "odds", daily = false, page?: PageTarget): Promise<void> {
@@ -104,7 +72,7 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
     if (["PENDING", "FETCHING", "STORAGE_ERROR"].includes(existing.status)) {
       const stored = await env.RAW.get(`manifests/${eventId}.json`);
       if (stored) {
-        const manifest = await stored.json<Manifest>();
+        const manifest = await stored.json<Omit<CaptureManifest, "dataset_kind"> & {dataset_kind?: string}>();
         if (await env.RAW.head(`raw/${manifest.raw_sha256}`)) await publish(env, manifest, processingStarted);
         else if (daily && Date.now() > scheduledTime
             + (collection.capture_window_seconds + policy.request_timeout_seconds) * 1000) {
@@ -271,14 +239,13 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
         await stopSource();
         throw new Error("NON_ZIP_OR_CHALLENGE");
       }
-      const digest = await crypto.subtle.digest("SHA-256", body);
-      hash = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, "0")).join("");
+      hash = await digest(body);
       size = body.byteLength;
       stage = "STORAGE";
       if (await env.RAW.head(`raw/${hash}`)) rawSavedAt = iso(Date.now());
       else content = body;
     }
-    const manifest: Manifest = {event_id: eventId, scheduled_capture_at: iso(scheduledTime),
+    const manifest: CaptureManifest = {event_id: eventId, scheduled_capture_at: iso(scheduledTime),
       fetch_started_at: iso(now), headers_received_at: headersAt, collector_received_at: receivedAt!, raw_saved_at: rawSavedAt,
       raw_sha256: hash, raw_bytes: size, http_status: response.status,
       etag: response.headers.get("etag") ?? (response.status === 304 ? prior?.etag ?? null : null),
@@ -289,15 +256,8 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
       dataset_kind: isMonthly ? "FINAL_ONLY" : isPage ? `NAR_PAGE_${kind.toUpperCase()}` : kind === "odds" ? "DAILY_SNAPSHOT" : "NAR_RACE_BUNDLE",
       ...(monthly ? {url: monthly.url} : {}),
       ...(page ? {url: page.url, race_id: page.race_id} : {})};
-    // Store the event-to-hash intent first. It is not a successful observation.
-    await env.RAW.put(`manifests/${eventId}.json`, JSON.stringify(manifest));
-    if (content !== null) {
-      const saved = await env.RAW.put(`raw/${hash}`, content);
-      if (!saved) throw new Error("RAW_PUT_FAILED");
-      manifest.raw_saved_at = iso(saved.uploaded.getTime());
-      await env.RAW.put(`manifests/${eventId}.json`, JSON.stringify(manifest));
-    }
-    await publish(env, manifest, processingStarted);
+    // Intent, raw body and index publication share the common persistence path.
+    await saveCapture(env, manifest, content, processingStarted);
   } catch (error) {
     const allowed = new Set(["SAMPLE_WINDOW_EXPIRED", "SOURCE_DENIED", "RATE_LIMITED", "HTTP_ERROR", "UNBOUND_304", "BODY_LIMIT", "BODY_EMPTY", "NON_ZIP_OR_CHALLENGE"]);
     const code = error instanceof Error && allowed.has(error.message) ? error.message : stopRequired ? "STOP_WRITE_FAILED" : stage === "STORAGE" ? "STORAGE_ERROR" : controller.signal.aborted ? "FETCH_TIMEOUT" : "NETWORK_ERROR";

@@ -3,8 +3,9 @@ import collection from "../configs/collection.json";
 import policy from "../configs/cloud-collection.json";
 const INTERVAL = collection.interval_seconds * 1000;
 export const USER_AGENT = policy.user_agent;
-export function fetchPublic(url: string, accept: string, signal: AbortSignal, extra: Record<string, string> = {}): Promise<Response> {
-  return fetch(url, {redirect: "manual", signal, headers: {"User-Agent": USER_AGENT, "Accept": accept, ...extra}});
+export function fetchPublic(url: string, accept: string, signal: AbortSignal, extra: Record<string, string> = {}, jsonBody?: string): Promise<Response> {
+  return fetch(url, {redirect: "manual", signal, method: jsonBody === undefined ? "GET" : "POST", body: jsonBody,
+    headers: {"User-Agent": USER_AGENT, "Accept": accept, ...(jsonBody === undefined ? {} : {"Content-Type": "application/json"}), ...extra}});
 }
 
 export async function discard(response: Response): Promise<void> {
