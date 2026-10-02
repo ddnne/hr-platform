@@ -50,7 +50,7 @@ def input_window(at, policy):
 
 
 def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, collection):
-    """Keep the observed inputs; move only an unfinished payout after a delay."""
+    """Keep inputs; reserve a future payout after a delay or missed window."""
     if not metadata.get('scheduled_start_at'):
         return None
     owned = [r for r in captures if r['race_id'] == race_id and r['packet_owner'] == policy['version']
@@ -62,7 +62,8 @@ def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, colle
         return None
     expected = round((instant(metadata['scheduled_start_at']) +
                       timedelta(seconds=policy['payout_after_start_seconds'])).timestamp() * 1000)
-    if latest['payout']['at'] >= expected:
+    if (latest['payout']['at'] >= expected
+            and latest['payout']['capture_status'] != 'MISSED_WINDOW'):
         return None
     # If the revision arrived late, reserve a future observation, never backfill.
     at = max(expected, round(instant(now).timestamp() * 1000) +

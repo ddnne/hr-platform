@@ -10,7 +10,14 @@ import {NarCollector,nextJob,nextMonthly} from './workers/ingestion/daily.ts';
 import {monthlyTarget} from './workers/ingestion/capture.ts';
 import {registerPage,registerEvidenceBatch} from './workers/ingestion/pages.ts';
 export class TestCollector extends NarCollector {
- constructor(ctx,env){let failures=0,notification=Promise.resolve(null);const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
+ constructor(ctx,env){
+  // drive() owns the synthetic clock. Real workerd alarms must not run between
+  // manual deliveries when a fixture date has passed on the host clock.
+  const storage=ctx.storage;
+  storage.getAlarm=async()=>await storage.get('syntheticAlarm')??null;
+  storage.setAlarm=at=>storage.put('syntheticAlarm',Number(at));
+  storage.deleteAlarm=()=>storage.delete('syntheticAlarm');
+  let failures=0,notification=Promise.resolve(null);const index={batch:env.INDEX.batch.bind(env.INDEX),prepare(sql){
   const st=env.INDEX.prepare(sql);
   if(env.FAULT==='preflight' && sql.startsWith('SELECT etag'))return {bind:(...args)=>({first:async()=>{
    if(failures++===0)throw new Error('injected preflight failure');return st.bind(...args).first();}})};
@@ -64,6 +71,7 @@ async function runtime(responses, enabled=true, fault="", monthly=false) {
  for(const statement of schema.replace(/^--.*$/gm,'').split(';').map(x=>x.trim()).filter(Boolean))await db.prepare(statement).run();
  return {mf,db,requests,drive:async(at,kind='odds',now=0)=>{
   const response=await mf.dispatchFetch('http://local/drive?at='+at+'&kind='+kind+'&now='+now);
+  if(response.status!==200)throw new Error(await response.text());
   assert.equal(response.status,200);return response.json();}};
 }
 const zip=new Uint8Array([0x50,0x4b,3,4]);
