@@ -15,14 +15,17 @@ export class TestCollector extends NarCollector {
   if(env.FAULT==='preflight' && sql.startsWith('SELECT etag'))return {bind:(...args)=>({first:async()=>{
    if(failures++===0)throw new Error('injected preflight failure');return st.bind(...args).first();}})};
   if((env.FAULT==='claim' && sql.startsWith('INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,'))
-    || (env.FAULT==='refusal' && sql.startsWith('UPDATE source_control SET blocked=1'))) {
-   return {bind:(...args)=>{const bound=st.bind(...args);return {run:async()=>{if(failures++===0)throw new Error('injected write failure');return bound.run();}}}};
+    || (['refusal','refusal-persistent'].includes(env.FAULT) && sql.startsWith('UPDATE source_control SET blocked=1'))) {
+   return {bind:(...args)=>{const bound=st.bind(...args);return {run:async()=>{if(env.FAULT==='refusal-persistent'||failures++===0)throw new Error('injected write failure');return bound.run();}}}};
   }return st;}};
   const research=env.FAULT==='notification'?{normalize_saved(){notification=(async()=>{
     const alarm=await ctx.storage.getAlarm();const job=await ctx.storage.get('job');
     await ctx.storage.put('notification',{alarm,job});throw new Error('synthetic parser failure');
   })();return notification;}}:undefined;
   super(ctx,{...env,INDEX:index,RESEARCH:research});this.notification=()=>notification.catch(()=>null);}
+ async wake(now){const realNow=Date.now;Date.now=()=>now;
+  try{await this.ctx.storage.deleteAlarm();await this.ensure();return {job:await this.ctx.storage.get('job'),alarm:await this.ctx.storage.getAlarm()};}
+  finally{Date.now=realNow}}
  async drive(at,kind,now){const plan=await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first();
  const page=['state','payout'].includes(kind)?plan:undefined;
  await this.ctx.storage.put('job',{at,kind,date:'SYNTHETIC',...(plan?{planned:true}:{}),...(page?{page}:{})});let error=null;const realNow=Date.now;
@@ -43,7 +46,9 @@ export default {async fetch(request,env){const u=new URL(request.url);
  }catch(e){return new Response(e.message,{status:400});}}
  if(u.pathname==='/next')return Response.json(nextJob(Number(u.searchParams.get('at')),u.searchParams.has('race')?Number(u.searchParams.get('race')):null));
  if(u.pathname==='/monthly')return Response.json({...nextMonthly(Number(u.searchParams.get('at')),u.searchParams.has('previous')?Number(u.searchParams.get('previous')):null),...monthlyTarget(Number(u.searchParams.get('at')))});
- const stub=env.COLLECTOR.getByName('synthetic');return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
+ const stub=env.COLLECTOR.getByName('synthetic');
+ if(u.pathname==='/wake')return Response.json(await stub.wake(Number(u.searchParams.get('now'))));
+ return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
 `,sourcefile:'daily-harness.ts',resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
 const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8') + await readFile('migrations/0009_evidence_packet_owner.sql','utf8');
 async function runtime(responses, enabled=true, fault="", monthly=false) {
@@ -62,6 +67,44 @@ async function runtime(responses, enabled=true, fault="", monthly=false) {
   assert.equal(response.status,200);return response.json();}};
 }
 const zip=new Uint8Array([0x50,0x4b,3,4]);
+
+test('failed stop writes are never mistaken for an authorized release',async()=>{
+ const r=await runtime([{status:403}],true,'refusal-persistent');
+ try{
+  const at=new Date(Date.now()+86400000).setUTCHours(4,12,0,0);
+  const failed=await r.drive(at,'odds',at);
+  assert.ok(failed.error);
+  assert.equal((await r.db.prepare('SELECT error_code FROM captures').first()).error_code,'STOP_WRITE_FAILED');
+  assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,0);
+  const wake=await(await r.mf.dispatchFetch('http://local/wake?now='+(at+900000))).json();
+  assert.equal(wake.job.at,at);assert.equal(r.requests.length,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('a stopped failed event stays stopped; an explicit release starts a new observation',async()=>{
+ const r=await runtime([{body:'<html>SYNTHETIC download error</html>',headers:{'content-type':'text/html'}},{body:zip}]);
+ try{
+  const at=new Date(Date.now()+86400000).setUTCHours(4,12,0,0);
+  await r.drive(at,'odds',at);
+  const failed=await r.db.prepare('SELECT * FROM captures').first();
+  assert.equal(failed.error_code,'NON_ZIP_OR_CHALLENGE');
+  const wake=async now=>(await r.mf.dispatchFetch('http://local/wake?now='+now)).json();
+  const held=await wake(at+900000);
+  assert.equal(held.alarm,null);assert.equal(held.job.at,at);assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare('SELECT blocked FROM source_control').first()).blocked,1);
+  // Simulate a separately authorized release, not an automatic collector action.
+  await r.db.prepare('UPDATE source_control SET blocked=0,next_allowed_at=?').bind(at+960000).run();
+  const resumed=await wake(at+900000);
+  assert.equal(resumed.job.at,at+960000);assert.equal(resumed.alarm,resumed.job.at);
+  assert.equal(r.requests.length,1); // ensure only arms, it never fetches early.
+  await r.drive(resumed.job.at,resumed.job.kind,resumed.job.at);
+  assert.equal(r.requests.length,2);
+  assert.deepEqual(await r.db.prepare('SELECT * FROM captures WHERE event_id=?').bind(failed.event_id).first(),failed);
+  const rows=(await r.db.prepare('SELECT * FROM raw_observations').all()).results;
+  assert.equal(rows.length,1);assert.notEqual(rows[0].observation_id,failed.event_id);
+  assert.equal(Date.parse(rows[0].received_at),resumed.job.at);
+ }finally{await r.mf.dispose();}
+});
 
 test('monthly archive replaces one daily slot, shares raw history and stays FINAL_ONLY',async()=>{
  const r=await runtime([{body:zip,headers:{etag:'"daily"'}},{body:zip},{body:zip}],true,'',true);
