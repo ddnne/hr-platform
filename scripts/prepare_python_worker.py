@@ -68,6 +68,8 @@ def prepare(destination, with_storage=False):
         config['vars']['PAPER_BASE_CONFIG_JSON'] = json.dumps(base)
         config['services'] = [{'binding': 'COLLECTION', 'service': 'hr-platform-dev-ingestion',
                                'entrypoint': 'CollectionControl'}]
+        config['durable_objects'] = {'bindings': [{'name': 'PAPER_CLOCK', 'class_name': 'PaperClock'}]}
+        config['migrations'] = [{'tag': 'paper-clock-v1', 'new_sqlite_classes': ['PaperClock']}]
         config['limits'] = {'cpu_ms': policy['worker_cpu_ms']}
         storage = json.loads((repo / "wrangler.jsonc").read_text())
         for key in ("r2_buckets", "d1_databases"):

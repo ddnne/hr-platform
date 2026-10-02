@@ -21,10 +21,12 @@ class CloudPaper(CloudHistory):
     def __init__(self, bucket, database, clock=utcnow, *, storage_policy=None, paper_policy):
         super().__init__(bucket, database, clock, storage_policy=storage_policy)
         if (set(paper_policy) != {'version', 'lease_seconds', 'max_future_seconds', 'max_pending_plans',
-                                  'decision_lookahead_seconds'}
+                                  'decision_lookahead_seconds', 'alarm_lead_seconds'}
                 or paper_policy['version'] != 'cloud-paper-v1'
                 or any(type(paper_policy[k]) is not int or paper_policy[k] <= 0 for k in paper_policy if k != 'version')):
             raise ValueError('CLOUD_PAPER_POLICY')
+        if paper_policy['alarm_lead_seconds'] > paper_policy['decision_lookahead_seconds']:
+            raise ValueError('CLOUD_PAPER_ALARM_LEAD')
         self.policy = paper_policy
         self.database_time = ''
         args = {'clock': self.evidence_clock, 'storage_policy': storage_policy}
@@ -232,6 +234,17 @@ class CloudPaper(CloudHistory):
         await self.run(f'INSERT OR IGNORE INTO cloud_paper_settlements VALUES(?,?,?,{PUBLICATION_CLOCK})', plan_id, evidence['id'], digest)
         saved = await self.first('SELECT * FROM cloud_paper_settlements WHERE plan_id=? AND evidence_id=?', plan_id, evidence['id'])
         return {**await self.read_body(saved['body_hash']), 'recorded_at': saved['available_at']}
+
+    async def next_alarm(self):
+        """Use the current persisted plan and lease; no second scheduling ledger."""
+        now = await self.now()
+        rows = await self.all('''SELECT asof_at,owner,lease_until FROM cloud_paper_plans
+            WHERE decisions IS NULL''')
+        times = [max(instant(row['asof_at']) - timedelta(seconds=self.policy['alarm_lead_seconds']),
+                     instant(row['lease_until']) if row['owner'] and row['lease_until'] else instant(now))
+                 for row in rows]
+        return max(round(instant(now).timestamp() * 1000) + 1,
+                   round(min(times).timestamp() * 1000)) if times else None
 
     async def tick(self, *, wait_for_due=False):
         pending = await self.all('SELECT plan_id,plan_body FROM cloud_paper_plans WHERE decisions IS NULL')
