@@ -1,7 +1,7 @@
 import {digest,iso,type CaptureStorage} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
 import {parseOdds} from './parsers';
-import {parseProgram,supportsProgram} from './discovery';
+import {parseProgram,supportsProgram,type Program} from './discovery';
 import type {Sport,Target} from './types';
 export async function normalize(env:CaptureStorage,event:string,target:Target,version?:string):Promise<string> {
  const manifest=await env.RAW.get(`manifests/${event}.json`);if(!manifest)throw new Error('MANIFEST_REQUIRED');
@@ -31,6 +31,19 @@ export async function normalize(env:CaptureStorage,event:string,target:Target,ve
 }
 export async function resourceId(t:Target):Promise<string> {
  return digest(new TextEncoder().encode(JSON.stringify([t.sport,t.race_id,t.kind,t.url,t.body??null])));
+}
+export async function savedProgram(env:CaptureStorage,event:string,at=Date.now()) {
+ const cutoff=iso(at);
+ const row=await env.INDEX.prepare(`SELECT p.status,p.normalized_key,p.available_at,o.received_at FROM sports_parses p
+ JOIN raw_observations o ON o.observation_id=p.observation_id
+ WHERE p.observation_id=? AND p.parser_version LIKE 'sports-program-v%'
+ AND p.available_at<=? AND o.received_at<=?
+ ORDER BY p.available_at DESC,CAST(substr(p.parser_version,length('sports-program-v')+1) AS INTEGER) DESC LIMIT 1`)
+ .bind(event,cutoff,cutoff).first<{status:string;normalized_key:string|null;available_at:string;received_at:string}>();
+ if(!row||row.status!=='PROGRAM_PARSED'||!row.normalized_key)throw new Error('PROGRAM_UNAVAILABLE');
+ if(at-Date.parse(row.received_at)>config.discovery.maximum_program_age_seconds*1000)throw new Error('PROGRAM_STALE');
+ const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
+ return {value:await object.json<Program>(),available_at:row.available_at,received_at:row.received_at};
 }
 export async function history(env:CaptureStorage,sport:Sport,race:string,cutoff:string,limit=config.maximum_history_rows,after='',kind:'odds'|'program'='odds') {
  if(!Number.isFinite(Date.parse(cutoff)) || !Number.isInteger(limit)||limit<1||limit>config.maximum_history_rows)throw new Error('HISTORY_QUERY');

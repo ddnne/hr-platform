@@ -50,3 +50,15 @@ test('keirin program uses revised advertised clocks, keeps navigation positions 
  assert.equal(d.parseProgram(fixture.keirinProgram,target).program.selected.race_id,target.race_id);
  assert.throws(()=>d.parseProgram(fixture.keirinProgram,{...target,race_id:'keirin:20000101:47:1'}),/IDENTITY/);
 });
+test('keirin venue navigation discovers the response race and still rejects another venue/day',()=>{
+ const t={sport:'keirin',kind:'guest',race_id:'keirin:20000101:47:0',url:'https://keirin.jp/pc/racelive',discovery_stage:'venue'};
+ const p=d.parseProgram(fixture.keirinProgram,t);assert.equal(p.requested_race_id,t.race_id);assert.equal(p.program.selected.race_id,'keirin:20000101:47:2');
+ for(const bad of [{race_id:'keirin:20000102:47:0'},{race_id:'keirin:20000101:48:0'},{discovery_stage:'race'},{discovery_stage:undefined}])assert.throws(()=>d.parseProgram(fixture.keirinProgram,{...t,...bad}),/IDENTITY/);
+});
+test('keirin identity JSON resolves unknown race numbers without inventing cutoff clocks',()=>{
+ const t={sport:'keirin',kind:'schedule',race_id:'keirin:20000101:47:0',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation',discovery_stage:'race'};
+ assert.equal(d.supportsProgram(t),true);const p=d.parseProgram(fixture.keirinIdentity,t);
+ assert.equal(p.program.selected.race_id,'keirin:20000101:47:2');assert.equal(p.program.selected.close_at,null);assert.equal(p.program.selected.start_at,null);
+ for(const id of ['keirin:20000102:47:0','keirin:20000101:48:0','keirin:20000101:47:3'])assert.throws(()=>d.parseProgram(fixture.keirinIdentity,{...t,race_id:id}),/IDENTITY/);
+ assert.throws(()=>d.parseProgram(fixture.keirinIdentity.replace('"raceNo":"2"','"raceNo":"0"'),t),/ID/);
+});

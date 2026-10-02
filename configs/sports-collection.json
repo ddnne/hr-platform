@@ -1,7 +1,7 @@
 {
   "version": "sports-shadow-v1",
   "parser_version": "sports-odds-v1",
-  "program_parser_version": "sports-program-v1",
+  "program_parser_version": "sports-program-v2",
   "interval_seconds": 120,
   "request_spacing_seconds": 5,
   "request_timeout_seconds": 20,
@@ -13,6 +13,7 @@
   "sources": {
     "boat": {
       "origin": "https://www.boatrace.jp",
+      "program_path": "/owpc/pc/race/raceindex",
       "paths": [
         "/owpc/pc/race/index",
         "/owpc/pc/race/raceindex",
@@ -26,6 +27,9 @@
     },
     "keirin": {
       "origin": "https://keirin.jp",
+      "live_path": "/pc/racelive",
+      "json_path": "/pc/json",
+      "identity_json_type": "JST015",
       "paths": [
         "/pc/top",
         "/pc/json",
@@ -42,6 +46,7 @@
     },
     "auto": {
       "origin": "https://autorace.jp",
+      "program_path": "/race_info/OtherRaceInfo",
       "paths": [
         "/race_info/XML/Hold/Today",
         "/race_info/Odds",
@@ -59,6 +64,7 @@
   "plan_horizon_seconds": 86400,
   "guest_session_seconds": 1800,
   "discovery": {
+    "maximum_program_age_seconds": 600,
     "clock_timezone_offset_minutes": 540,
     "maximum_clock_hour": 29,
     "maximum_race_number": 99,

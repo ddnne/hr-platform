@@ -10,7 +10,7 @@ export type Race = {race_id:string;race_date:string;venue:number;race:number;
  time_semantics:'PROVIDER_ADVERTISED_PROGRAM';final_race_number:number|null};
 const integer=(v:unknown,max:number)=>{const n=Number(v);if(!Number.isInteger(n)||n<1||n>max)throw new Error('PROGRAM_ID');return n;};
 const raceNumber=(v:unknown)=>integer(String(v).replace(/^(\d+)R$/,'$1'),config.discovery.maximum_race_number);
-function date(value:unknown):string {
+export function date(value:unknown):string {
  const s=String(value).replaceAll('-','');if(!/^\d{8}$/.test(s))throw new Error('PROGRAM_DATE');
  const iso=`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
  const milliseconds=Date.parse(iso+'T00:00:00Z');
@@ -27,6 +27,7 @@ export function programClock(day:string,label:unknown):string|null {
 const label=(value:unknown)=>value===undefined||value===null||value===''?null:String(value);
 function race(sport:Sport,day:string,venue:number,no:number,start:unknown,close:unknown,last:unknown=null):Race {
  const start_label=label(start),close_label=label(close);
+ if(last!==null&&integer(last,config.discovery.maximum_race_number)<no)throw new Error('PROGRAM_INCOMPLETE');
  return {race_id:`${sport}:${day}:${venue}:${no}`,race_date:day,venue,race:no,
   start_at:programClock(day,start_label),close_at:programClock(day,close_label),start_label,close_label,
   time_semantics:'PROVIDER_ADVERTISED_PROGRAM',final_race_number:last===null?null:integer(last,config.discovery.maximum_race_number)};
@@ -94,11 +95,19 @@ export function keirinProgram(raw:string):{selected:Race;navigation:{position:nu
  return {selected,navigation};
 }
 
+export function keirinIdentity(raw:string,expected:{race_date:string;venue:number;race:number}):Race {
+ const v=JSON.parse(raw),d=v.data;if(v.resultCd!==0||!d)throw new Error('PROGRAM_NOT_READY');
+ const day=date(d.kaisaiDate),venue=integer(d.keirinJyoCd,config.discovery.maximum_venue_number),no=raceNumber(d.raceNo);
+ if(day!==date(expected.race_date)||venue!==expected.venue||expected.race!==0&&no!==expected.race)throw new Error('PROGRAM_IDENTITY');
+ // JST015 confirms the identity; it contains no advertised start or cutoff clocks.
+ return race('keirin',day,venue,no,null,null);
+}
+
 export function supportsProgram(t:Target):boolean {
  const u=new URL(t.url);
  return t.kind==='schedule'&&(t.sport==='auto'&&['/race_info/XML/Hold/Today','/race_info/OtherRaceInfo'].includes(u.pathname)
   ||t.sport==='boat'&&['/owpc/pc/race/index','/owpc/pc/race/raceindex'].includes(u.pathname)
-  ||t.sport==='keirin'&&u.pathname==='/pc/json'&&u.searchParams.get('type')==='JSJ048')
+  ||t.sport==='keirin'&&u.pathname==='/pc/json'&&['JSJ048',config.sources.keirin.identity_json_type].includes(u.searchParams.get('type')??''))
   ||t.sport==='keirin'&&t.kind==='guest'&&u.pathname==='/pc/racelive';
 }
 export function parseProgram(raw:string,t:Target) {
@@ -108,7 +117,13 @@ export function parseProgram(raw:string,t:Target) {
  else if(t.sport==='boat'){
   if(u.searchParams.get('hd')!==day||u.pathname.endsWith('/raceindex')&&Number(u.searchParams.get('jcd'))!==Number(venue))throw new Error('PROGRAM_IDENTITY');
   program=u.pathname.endsWith('/raceindex')?{races:boatProgram(raw,day,Number(venue))}:{venues:boatVenues(raw,day)};
- }else if(u.pathname==='/pc/json')program={venues:keirinVenues(raw)};
- else {program=keirinProgram(raw);if(program.selected.race_id!==t.race_id)throw new Error('PROGRAM_IDENTITY');}
- return {schema:'sports-program-v1',sport:t.sport,requested_race_id:t.race_id,source_updated_at:null,source_published_at:null,program};
+ }else if(u.pathname==='/pc/json'){
+  if(u.searchParams.get('type')==='JSJ048')program={venues:keirinVenues(raw)};
+  else {const navigation=u.searchParams.get('encp');if(!navigation)throw new Error('PROGRAM_NAVIGATION');
+   program={selected:keirinIdentity(raw,{race_date:day,venue:Number(venue),race:Number(t.race_id.split(':')[3])}),public_navigation:navigation};}
+ }else {program=keirinProgram(raw);
+  const selected=program.selected,venueScope=t.race_id===`keirin:${selected.race_date}:${selected.venue}:0`&&t.discovery_stage==='venue';
+  if(selected.race_id!==t.race_id&&!venueScope)throw new Error('PROGRAM_IDENTITY');}
+ return {schema:'sports-program-v1' as const,sport:t.sport,requested_race_id:t.race_id,discovery_stage:t.discovery_stage??'venue',source_updated_at:null,source_published_at:null,program};
 }
+export type Program = ReturnType<typeof parseProgram>;

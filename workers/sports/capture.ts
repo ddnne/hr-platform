@@ -2,7 +2,7 @@ import {boundedBody,discard,fetchPublic,retryAfter} from '../http';
 import {digest,iso,publishCapture,saveCapture,type CaptureManifest} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
 import {normalize,resourceId} from './storage';
-import {supportsProgram} from './discovery';
+import {date,supportsProgram} from './discovery';
 import type {SportsEnv,Target,Sport} from './types';
 export const sourceFor=(sport:Sport)=>`sports-${sport}`;
 export function validateTarget(t:Target):void {
@@ -10,6 +10,9 @@ export function validateTarget(t:Target):void {
  if(!p || u.origin!==p.origin || !(p.paths as string[]).includes(u.pathname) && !(t.sport==='auto' && config.sources.auto.guest_pages.includes(u.pathname)))throw new Error('TARGET_ORIGIN');
  if(u.username||u.password||u.hash || !['odds','guest','schedule','result'].includes(t.kind))throw new Error('TARGET_KIND');
  if(!new RegExp(`^${t.sport}:\\d{8}:\\d{1,2}:\\d{1,2}$`).test(t.race_id))throw new Error('RACE_ID');
+ const [,day,venue,no]=t.race_id.split(':');date(day);
+ if(['odds','result'].includes(t.kind)&&(Number(venue)<1||Number(venue)>config.discovery.maximum_venue_number||Number(no)<1||Number(no)>config.discovery.maximum_race_number))throw new Error('RACE_ID');
+ if(t.discovery_stage!==undefined&&(!['venue','race'].includes(t.discovery_stage)||!['schedule','guest'].includes(t.kind)))throw new Error('DISCOVERY_STAGE');
  if(t.sport==='boat'&&['odds','result'].includes(t.kind)){const race=`boat:${u.searchParams.get('hd')}:${Number(u.searchParams.get('jcd'))}:${Number(u.searchParams.get('rno'))}`;if(t.race_id!==race)throw new Error('RACE_ID');}
  if(t.sport==='keirin'&&t.kind==='odds'&&(!t.entrants||!t.market||!t.context_event||!u.searchParams.get('encp')))throw new Error('RACE_CONTEXT_REQUIRED');
  if(t.sport==='keirin'&&u.pathname==='/pc/json'&&!config.sources.keirin.read_json_types.includes(u.searchParams.get('type')??''))throw new Error('READ_API_REQUIRED');
