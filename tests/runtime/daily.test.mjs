@@ -30,8 +30,8 @@ export class TestCollector extends NarCollector {
     await ctx.storage.put('notification',{alarm,job});throw new Error('synthetic parser failure');
   })();return notification;}}:undefined;
   super(ctx,{...env,INDEX:index,RESEARCH:research});this.notification=()=>notification.catch(()=>null);}
- async wake(now){const realNow=Date.now;Date.now=()=>now;
-  try{await this.ctx.storage.deleteAlarm();await this.ensure();return {job:await this.ctx.storage.get('job'),alarm:await this.ctx.storage.getAlarm()};}
+ async wake(now,preserve=false){const realNow=Date.now;Date.now=()=>now;
+  try{if(!preserve)await this.ctx.storage.deleteAlarm();await this.ensure();return {job:await this.ctx.storage.get('job'),alarm:await this.ctx.storage.getAlarm()};}
   finally{Date.now=realNow}}
  async drive(at,kind,now){const plan=await this.env.INDEX.prepare('SELECT * FROM page_capture_plans WHERE event_id=?').bind('nar-daily-'+kind+':'+at).first();
  const page=['state','payout'].includes(kind)?plan:undefined;
@@ -55,6 +55,7 @@ export default {async fetch(request,env){const u=new URL(request.url);
  if(u.pathname==='/monthly')return Response.json({...nextMonthly(Number(u.searchParams.get('at')),u.searchParams.has('previous')?Number(u.searchParams.get('previous')):null),...monthlyTarget(Number(u.searchParams.get('at')))});
  const stub=env.COLLECTOR.getByName('synthetic');
  if(u.pathname==='/wake')return Response.json(await stub.wake(Number(u.searchParams.get('now'))));
+ if(u.pathname==='/ensure')return Response.json(await stub.wake(Number(u.searchParams.get('now')),true));
  return Response.json(await stub.drive(Number(u.searchParams.get('at')),u.searchParams.get('kind'),Number(u.searchParams.get('now'))));}};
 `,sourcefile:'daily-harness.ts',resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
 const schema = await readFile('migrations/0001_capture.sql','utf8') + await readFile('migrations/0002_processing_metrics.sql','utf8') + await readFile('migrations/0007_page_evidence.sql','utf8') + await readFile('migrations/0009_evidence_packet_owner.sql','utf8');
@@ -75,6 +76,91 @@ async function runtime(responses, enabled=true, fault="", monthly=false) {
   assert.equal(response.status,200);return response.json();}};
 }
 const zip=new Uint8Array([0x50,0x4b,3,4]);
+
+test('new night payout reservation advances the existing morning alarm without fetching early',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  const at=Date.parse('2000-01-01T13:59:00Z'),pageAt=at+600000;
+  const old=await r.drive(at,'odds',at);
+  assert.ok(old.alarm>pageAt);
+  const unchanged=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+  assert.deepEqual(unchanged.job,old.job);assert.equal(unchanged.alarm,old.alarm);
+  // An expired queue head must not hide a later, usable new reservation.
+  await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+   .bind('nar-daily-payout:'+(at-600000),at-600000,'payout',
+    'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/RaceMarkTable?k_raceDate=2000/01/01&k_raceNo=2&k_babaCode=03',
+    '20000101:SYNTHETIC:2',new Date(at-900000).toISOString()).run();
+  await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+   .bind('nar-daily-payout:'+pageAt,pageAt,'payout',
+    'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/RaceMarkTable?k_raceDate=2000/01/01&k_raceNo=1&k_babaCode=03',
+    '20000101:SYNTHETIC:1',new Date(at).toISOString()).run();
+  await r.db.prepare("UPDATE source_control SET blocked=1").run();
+  const blocked=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+  assert.deepEqual(blocked.job,old.job);assert.equal(blocked.alarm,old.alarm);
+  await r.db.prepare("UPDATE source_control SET blocked=0").run();
+  const next=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+  assert.equal(next.job.kind,'payout');assert.equal(next.job.at,pageAt);assert.equal(next.alarm,pageAt);
+  const repeated=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+  assert.deepEqual(repeated,next);
+  assert.equal(r.requests.length,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('reservation updates preserve a due page waiting for the provider gate',async()=>{
+ const r=await runtime([]);
+ try{
+  const at=Date.parse('2000-01-01T04:12:00Z');
+  for(const [kind,time] of [['state',at],['payout',at-600000]]){
+   await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+    .bind('nar-daily-'+kind+':'+time,time,kind,
+     'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/'+(kind==='state'?'OddsTanFuku':'RaceMarkTable')+'?k_raceDate=2000/01/01&k_raceNo=1&k_babaCode=03',
+     '20000101:SYNTHETIC:1',new Date(at-900000).toISOString()).run();
+  }
+  await r.db.prepare('UPDATE source_control SET next_allowed_at=?').bind(at+5000).run();
+  const old=await r.drive(at,'state',at);
+  const ensured=await(await r.mf.dispatchFetch('http://local/ensure?now='+at)).json();
+  assert.deepEqual(ensured.job,old.job);assert.equal(ensured.alarm,at+5000);assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
+
+test('reservation updates preserve regular work during 429 waits and ignore expired pages',async()=>{
+ for(const response of [{status:429,headers:{'retry-after':'1200'}},{body:zip}]){
+  const r=await runtime([response]);
+  try{
+   const at=Date.parse('2000-01-01T04:12:00Z');
+   const old=await r.drive(at,'odds',at);
+   const pageAt=response.status===429?at+300000:at-600000;
+   await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+    .bind('nar-daily-payout:'+pageAt,pageAt,'payout',
+     'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/RaceMarkTable?k_raceDate=2000/01/01&k_raceNo=1&k_babaCode=03',
+     '20000101:SYNTHETIC:1',new Date(at-900000).toISOString()).run();
+   const ensured=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+   assert.deepEqual(ensured.job,old.job);assert.equal(ensured.alarm,old.alarm);assert.equal(r.requests.length,1);
+  }finally{await r.mf.dispose();}
+ }
+});
+
+test('a newly reserved page can wait within its own window and take the regular slot',async()=>{
+ for(const time of ['2000-01-01T04:12:00Z','2000-01-01T13:59:00Z']){
+  const r=await runtime([{status:429,headers:{'retry-after':'1200'}},
+   {body:'<html>SYNTHETIC payout</html>',headers:{'content-type':'text/html'}}]);
+  try{
+   const at=Date.parse(time),pageAt=at+1140000,allowedAt=at+1200000;
+   await r.drive(at,'odds',at);
+   await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+    .bind('nar-daily-payout:'+pageAt,pageAt,'payout',
+     'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/RaceMarkTable?k_raceDate=2000/01/01&k_raceNo=1&k_babaCode=03',
+     '20000101:SYNTHETIC:1',new Date(at).toISOString()).run();
+   const ensured=await(await r.mf.dispatchFetch('http://local/ensure?now='+(at+60000))).json();
+   assert.equal(ensured.job.at,pageAt);assert.equal(ensured.job.kind,'payout');assert.equal(ensured.alarm,allowedAt);
+   assert.equal(r.requests.length,1);
+   const captured=await r.drive(pageAt,'payout',allowedAt);
+   assert.equal(captured.error,null);assert.equal(r.requests.length,2);
+   assert.equal((await r.db.prepare('SELECT status FROM captures WHERE event_id=?')
+    .bind('nar-daily-payout:'+pageAt).first()).status,'RAW_STORED');
+  }finally{await r.mf.dispose();}
+ }
+});
 
 test('failed stop writes are never mistaken for an authorized release',async()=>{
  const r=await runtime([{status:403}],true,'refusal-persistent');
