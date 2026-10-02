@@ -1,0 +1,60 @@
+{
+  "version": "sports-shadow-v1",
+  "parser_version": "sports-odds-v1",
+  "interval_seconds": 120,
+  "request_spacing_seconds": 5,
+  "request_timeout_seconds": 20,
+  "capture_window_seconds": 90,
+  "maximum_raw_bytes": 2097152,
+  "maximum_plan_entries": 64,
+  "maximum_pending_requests": 256,
+  "maximum_history_rows": 100,
+  "sources": {
+    "boat": {
+      "origin": "https://www.boatrace.jp",
+      "paths": [
+        "/owpc/pc/race/index",
+        "/owpc/pc/race/raceindex",
+        "/owpc/pc/race/odds3t",
+        "/owpc/pc/race/odds3f",
+        "/owpc/pc/race/odds2tf",
+        "/owpc/pc/race/oddsk",
+        "/owpc/pc/race/oddstf",
+        "/owpc/pc/race/raceresult"
+      ]
+    },
+    "keirin": {
+      "origin": "https://keirin.jp",
+      "paths": [
+        "/pc/top",
+        "/pc/json",
+        "/pc/racelive"
+      ],
+      "read_json_types": [
+        "JSJ048",
+        "JSJ001",
+        "JST015",
+        "JST010",
+        "JST011",
+        "JSJ012"
+      ]
+    },
+    "auto": {
+      "origin": "https://autorace.jp",
+      "paths": [
+        "/race_info/XML/Hold/Today",
+        "/race_info/Odds",
+        "/race_info/OtherRaceInfo"
+      ],
+      "guest_pages": [
+        "/race_info/Live/kawaguchi",
+        "/race_info/Live/isesaki",
+        "/race_info/Live/hamamatsu",
+        "/race_info/Live/iizuka",
+        "/race_info/Live/sanyou"
+      ]
+    }
+  },
+  "plan_horizon_seconds": 86400,
+  "guest_session_seconds": 1800
+}

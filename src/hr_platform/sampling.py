@@ -101,12 +101,25 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def open_response(item):
-    """The only native provider request entry point; no cookies or auth state."""
+def open_response(item, *, json_body=None, form_body=None, extra_headers=None):
+    """The native provider transport; no redirects, cookie jar or automatic retries.
+
+    Optional bodies are for public read APIs. Guest session headers are supplied
+    by the caller; this transport never logs in or retains a session.
+    """
     enabled()
-    request = urllib.request.Request(item["url"], headers={
+    if json_body is not None and form_body is not None:
+        raise ValueError("REQUEST_BODY")
+    data = None if json_body is None else canonical(json_body)
+    if form_body is not None:
+        from urllib.parse import urlencode
+        data = urlencode(form_body).encode()
+    request = urllib.request.Request(item["url"], data=data, headers={
         "User-Agent": "hr-platform-personal-research/0.1",
         "Accept": "application/zip" if item["kind"] in ZIP_KINDS else "text/html",
+        **({"Content-Type": "application/x-www-form-urlencoded" if form_body is not None else "application/json"}
+           if data is not None else {}),
+        **(extra_headers or {}),
     })
     try:
         return urllib.request.build_opener(NoRedirect()).open(request, timeout=30)

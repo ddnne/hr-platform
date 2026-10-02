@@ -23,4 +23,7 @@ jobs:
       - run: npm run build
         env:
           WRANGLER_SEND_METRICS: 'false'
+      - run: npm run build:sports
+        env:
+          WRANGLER_SEND_METRICS: 'false'
       # No provider download, cloud credentials, remote migration, deploy, artifact upload, or report publication.

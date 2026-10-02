@@ -7,7 +7,8 @@
     "typegen": "wrangler types --strict-vars false",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/runtime/*.test.mjs",
-    "build": "wrangler deploy --dry-run --outdir private/worker-build"
+    "build": "wrangler deploy --dry-run --outdir private/worker-build",
+    "build:sports": "wrangler deploy --dry-run --config wrangler.sports.jsonc --outdir private/sports-worker-build"
   },
   "devDependencies": {
     "wrangler": "4.142.0",
