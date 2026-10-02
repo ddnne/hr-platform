@@ -342,10 +342,19 @@ def bounds(omega, markets, refs, target, selection, epsilon=1e-6):
     }
 
 
-def reference_consistency(omega, markets, refs, target):
+def reference_consistency(omega, markets, refs, target, solver_tolerance=None):
     """Minimum common absolute probability slack; independent of KL regularization."""
     if target in refs or not refs or len(set(refs)) != len(refs):
         raise ModelError("REFERENCE_CONFIG")
+    options = None
+    if solver_tolerance is not None:
+        # Optional for old experiment versions. The new solver request must be
+        # stricter than the unchanged witness check below, and within HiGHS' range.
+        if (type(solver_tolerance) not in {int, float} or not np.isfinite(solver_tolerance)
+                or not 1e-10 <= solver_tolerance < 1e-8):
+            raise ModelError("CONSISTENCY_SOLVER_CONFIG")
+        options = {"primal_feasibility_tolerance": solver_tolerance,
+                   "dual_feasibility_tolerance": solver_tolerance}
     references = {h: reference(omega, h, markets[h]["quotes"]) for h in refs}
     a = sparse.vstack([references[h][1] for h in refs], format="csr")
     v = np.concatenate([references[h][2] for h in refs])
@@ -355,7 +364,7 @@ def reference_consistency(omega, markets, refs, target):
         np.r_[np.zeros(len(omega)), 1.0],
         A_ub=sparse.vstack([sparse.hstack([a, slack]), sparse.hstack([-a, slack])]),
         b_ub=np.r_[v, -v], A_eq=np.array([np.r_[np.ones(len(omega)), 0.0]]),
-        b_eq=[1.0], bounds=(0, None), method="highs",
+        b_eq=[1.0], bounds=(0, None), method="highs", options=options,
     )
     if not result.success or result.x is None or not np.isfinite(result.x).all():
         raise ModelError("CONSISTENCY_LP_FAILED")
@@ -373,6 +382,8 @@ def reference_consistency(omega, markets, refs, target):
         "interpretation": "reference_compatibility_not_price_edge_or_cause",
         "strategy_threshold_changed": False,
     }
+    if solver_tolerance is not None:
+        report["solver_feasibility_tolerance"] = solver_tolerance
     if "win" in refs and "exacta" in refs:
         wins, _, vw, _, _ = references["win"]
         pairs, _, ve, _, _ = references["exacta"]
@@ -466,7 +477,7 @@ def analyze(runners, markets, config):
             row["regularization_adjustment"] = float(row["p_ref"] - baseline)
     best = max(range(len(rows)), key=lambda i: rows[i]["implied_edge_at_quote"])
     identification = bounds(omega, markets, refs, target, selections[best], config["identification_epsilon"])
-    consistency = reference_consistency(omega, markets, refs, target)
+    consistency = reference_consistency(omega, markets, refs, target, config.get("consistency_solver_tolerance"))
     sensitivity = []
     for value in config["sensitivity_lambdas"]:
         qs, ds = fit(omega, markets, target, refs, value, max_iter=config["solver_max_iter"], solver=config["solver"])
