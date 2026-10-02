@@ -1,8 +1,11 @@
 import {boundedBody,discard,fetchPublic,retryAfter} from '../http';
 import {digest,iso,publishCapture,saveCapture,type CaptureManifest} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
-import {normalize,resourceId} from './storage';
-import {date,supportsProgram} from './discovery';
+import {normalize,normalizationKind,resourceId} from './storage';
+import {validateContext,RaceContextError} from './context';
+export {validateContext} from './context';
+import {date} from './discovery';
+import {supportsResult} from './results';
 import type {SportsEnv,Target,Sport} from './types';
 export const sourceFor=(sport:Sport)=>`sports-${sport}`;
 export function validateTarget(t:Target):void {
@@ -14,30 +17,22 @@ export function validateTarget(t:Target):void {
  if(['odds','result'].includes(t.kind)&&(Number(venue)<1||Number(venue)>config.discovery.maximum_venue_number||Number(no)<1||Number(no)>config.discovery.maximum_race_number))throw new Error('RACE_ID');
  if(t.discovery_stage!==undefined&&(!['venue','race'].includes(t.discovery_stage)||!['schedule','guest'].includes(t.kind)))throw new Error('DISCOVERY_STAGE');
  if(t.sport==='boat'&&['odds','result'].includes(t.kind)){const race=`boat:${u.searchParams.get('hd')}:${Number(u.searchParams.get('jcd'))}:${Number(u.searchParams.get('rno'))}`;if(t.race_id!==race)throw new Error('RACE_ID');}
- if(t.sport==='keirin'&&t.kind==='odds'&&(!t.entrants||!t.market||!t.context_event||!u.searchParams.get('encp')))throw new Error('RACE_CONTEXT_REQUIRED');
+ if(t.kind==='result'&&!supportsResult(t))throw new Error('RESULT_RESOURCE');
+ if(t.sport==='auto'&&u.pathname==='/race_info/RaceResult'&&t.kind!=='result')throw new Error('RESULT_RESOURCE');
+ if(t.sport==='keirin'&&(['odds','result'].includes(t.kind)&&(!t.context_event||!u.searchParams.get('encp'))||t.kind==='odds'&&(!t.entrants||!t.market)))throw new Error('RACE_CONTEXT_REQUIRED');
  if(t.sport==='keirin'&&u.pathname==='/pc/json'&&!config.sources.keirin.read_json_types.includes(u.searchParams.get('type')??''))throw new Error('READ_API_REQUIRED');
- if(t.sport==='auto'&&['/race_info/Odds','/race_info/OtherRaceInfo'].includes(u.pathname)&&t.body===undefined)throw new Error('READ_POST_REQUIRED');
+ if(t.sport==='auto'&&['/race_info/Odds','/race_info/OtherRaceInfo','/race_info/RaceResult'].includes(u.pathname)&&t.body===undefined)throw new Error('READ_POST_REQUIRED');
  if(t.form){if(t.sport!=='keirin'||u.pathname!=='/pc/racelive'||t.kind!=='guest'||new URLSearchParams(t.body).size!==1||!new URLSearchParams(t.body).get('encp'))throw new Error('READ_FORM_REQUIRED');}
- else if(t.body!==undefined){if(t.sport!=='auto'||!['/race_info/Odds','/race_info/OtherRaceInfo'].includes(u.pathname))throw new Error('READ_POST_REQUIRED');
+ else if(t.body!==undefined){if(t.sport!=='auto'||!['/race_info/Odds','/race_info/OtherRaceInfo','/race_info/RaceResult'].includes(u.pathname))throw new Error('READ_POST_REQUIRED');
   const b=JSON.parse(t.body);if(Object.keys(b).sort().join(',')!=='placeCode,raceDate,raceNo'||!Number.isInteger(b.placeCode)||!Number.isInteger(b.raceNo)||!/^\d{4}-\d{2}-\d{2}$/.test(b.raceDate))throw new Error('READ_POST_BODY');
   if(t.race_id!==`auto:${b.raceDate.replaceAll('-','')}:${b.placeCode}:${b.raceNo}`)throw new Error('RACE_ID');}
-}
-export async function validateContext(t:Target,env:SportsEnv):Promise<void> {
- if(t.sport==='keirin'&&t.kind==='odds'){
-  const evidence=await env.INDEX.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=? AND dataset_kind=\'SPORT_KEIRIN_SCHEDULE\'').bind(t.context_event).first<{raw_sha256:string}>();
-  const meta=await env.RAW.get(`manifests/${t.context_event}.json`);if(!evidence||!meta)throw new Error('RACE_CONTEXT_REQUIRED');
-  const manifest=await meta.json<CaptureManifest>();const request=new URL(manifest.url!);
-  if(request.searchParams.get('type')!=='JST015'||request.searchParams.get('encp')!==new URL(t.url).searchParams.get('encp'))throw new Error('RACE_CONTEXT_IDENTITY');
-  const object=await env.RAW.get(`raw/${evidence.raw_sha256}`);if(!object)throw new Error('RACE_CONTEXT_REQUIRED');const response=await object.json<any>();const d=response.data;
-  if(response.resultCd!==0||t.race_id!==`keirin:${d.kaisaiDate}:${Number(d.keirinJyoCd)}:${Number(d.raceNo)}`)throw new Error('RACE_CONTEXT_IDENTITY');
- }
 }
 export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers}> {
  validateTarget(t);
  const resource=await resourceId(t),event=`sports:${t.sport}:${at}:${resource}`,source=sourceFor(t.sport),started=Date.now();
  const active=env.SPORTS_ENABLED==='true'&&JSON.parse(env.SPORTS_PROVIDERS_JSON).includes(t.sport);
  if(!active)return {status:'DISABLED',event_id:event};
- try{await validateContext(t,env);}catch{await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status,error_code) VALUES(?,?,'FAILED','INVALID_CONTEXT')").bind(event,iso(at)).run();return {status:'INVALID_CONTEXT',event_id:event};}
+ try{await validateContext(t,env);}catch(e){if(!(e instanceof RaceContextError))throw e;await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status,error_code) VALUES(?,?,'FAILED','INVALID_CONTEXT')").bind(event,iso(at)).run();return {status:'INVALID_CONTEXT',event_id:event};}
  const prior=await env.INDEX.prepare('SELECT status,error_code FROM captures WHERE event_id=?').bind(event).first<{status:string;error_code:string|null}>();
  if(prior){
   if(['SOURCE_DENIED','CHALLENGE','INCOMPLETE_FETCH'].includes(prior.error_code??''))await env.INDEX.prepare('UPDATE source_control SET blocked=1 WHERE source=?').bind(source).run();
@@ -51,7 +46,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
     env.INDEX.prepare('UPDATE source_control SET blocked=1 WHERE source=?').bind(source)]);
   }
   const saved=await env.INDEX.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=?').bind(event).first<{raw_sha256:string}>();
-  if(saved&&(t.kind==='odds'||supportsProgram(t)))await normalize(env,event,t);
+  if(saved&&normalizationKind(t))await normalize(env,event,t);
   return {status:saved?'RAW_STORED':prior.status,event_id:event};
  }
  if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000){
@@ -80,7 +75,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
    etag:null,validator_sent:null,validator_raw_sha256:null,file_name:null,file_timestamp:null,duration_ms:Date.now()-started,
    dataset_kind:`SPORT_${t.sport.toUpperCase()}_${t.kind.toUpperCase()}`,url:t.url,race_id:t.race_id,target:safeTarget};
   await saveCapture(env,m,present?null:body,started);
-  if(t.kind==='odds'||supportsProgram(t))await normalize(env,event,t);
+  if(normalizationKind(t))await normalize(env,event,t);
   return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers};
  }catch(e){const reason=e instanceof Error?e.message:'';
   if(reason==='GUEST_FORMAT')stop=true;

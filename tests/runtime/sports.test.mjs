@@ -6,6 +6,7 @@ import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
 const pure=await build({entryPoints:['workers/sports/parsers.ts'],bundle:true,write:false,format:'esm',platform:'node'});
 const parser=await import(`data:text/javascript;base64,${Buffer.from(pure.outputFiles[0].text).toString('base64')}`);
 import {ids,autoBody,autoProgram,keirinIdentity} from '../fixtures/synthetic/sports.mjs';
+import {autoResult,keirinResult} from '../fixtures/synthetic/sports-results.mjs';
 const target={sport:'auto',race_id:'auto:20000101:6:8',url:'https://autorace.jp/race_info/Odds',kind:'odds',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:8})};
 test('synthetic full seven markets, ranges and explicit zero; unknown source timestamp stays null',()=>{
  const s=parser.parseAuto(autoBody('0.0'),target);
@@ -38,7 +39,8 @@ const bundle=await build({stdin:{contents:`import {collect,validateTarget} from 
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
  if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
- if(v.op==='reparse')return new Response(await normalize(env,v.event,v.target,v.version));
+ if(v.op==='reparse'){const store=v.fault==='context'?{...env,RAW:{get:async(k)=>{if(k==='manifests/'+v.context+'.json')throw new Error('R2_TEMPORARY');return env.RAW.get(k);},put:env.RAW.put.bind(env.RAW)}}:env;
+ try{return new Response(await normalize(store,v.event,v.target,v.version));}catch(e){return new Response(e.message,{status:503});}}
  if(v.op==='programPlan'){try{const s=await savedProgram(env,v.event,v.now??Date.now());return Response.json({...s,plan:discoveryTargets(s.value,v.event)});}catch(e){return Response.json({error:e.message});}}
  const bindings=v.fault==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async()=>{throw new Error('INDEX_FAILED');}}}:v.fault==='normalized'?{...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),put:async(k,b)=>{if(k.startsWith('sports/normalized/'))throw new Error('R2_FAILED');return env.RAW.put(k,b);}}}:env;
  return Response.json(await collect(v.at,bindings,v.target));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
@@ -60,7 +62,7 @@ async function runtime(responses=[],enabled=true,doClass=null){
 test('append same body at a later time, redelivery is silent, changed recovery and as-of stay immutable',async()=>{
  const r=await runtime([{},{},{status:500},{body:autoBody('5.0')}]);try{
  const one=await r.tick();await r.reset();const two=await r.tick();await r.reset();const cut=new Date().toISOString();
- await r.tick(Date.now(),{...target,kind:'result',url:'https://autorace.jp/race_info/OtherRaceInfo'});await r.reset();
+ await r.tick(Date.now(),{...target,kind:'result',url:'https://autorace.jp/race_info/RaceResult'});await r.reset();
  await r.tick();await r.tick(Number(one.event_id.split(':')[2]));
  assert.equal(r.requests.length,4);const rows=(await r.db.prepare('SELECT * FROM raw_observations').all()).results;
  assert.equal(rows.length,3);assert.equal(rows[0].raw_sha256,rows[1].raw_sha256);assert.notEqual(rows[1].raw_sha256,rows[2].raw_sha256);
@@ -114,6 +116,50 @@ test('a newer failed program revision rejects preview instead of reviving an old
  assert.deepEqual(await (await r.call({op:'programPlan',event:one.event_id,now:earlier})).json(),past);
  assert.equal((await (await r.call({op:'programPlan',event:one.event_id,now:later})).json()).error,'PROGRAM_UNAVAILABLE');
  assert.equal(r.requests.length,1);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+test('result pending/published history is separated from odds and remains immutable across later observations and reparse',async()=>{
+ const r=await runtime([{},{body:autoResult(true)},{body:autoResult()},{body:autoResult()}]);try{
+ await r.tick();await r.reset();const t={...target,kind:'result',url:'https://autorace.jp/race_info/RaceResult'};
+ const pending=await r.tick(Date.now(),t);await r.reset();const cutoff=new Date().toISOString();
+ const past=await (await r.call({op:'history',kind:'result',cutoff})).json();assert.deepEqual(past.map(v=>v.status),['RESULT_PENDING']);
+ await new Promise(resolve=>setTimeout(resolve,2));const one=await r.tick(Date.now(),t);await r.reset();await r.tick(Date.now(),t);
+ await r.call({op:'reparse',event:pending.event_id,target,version:'sports-result-v2'});
+ assert.deepEqual(await (await r.call({op:'history',kind:'result',cutoff})).json(),past);
+ const now=new Date().toISOString();assert.equal((await (await r.call({op:'history',cutoff:now})).json()).length,1);
+ assert.equal((await (await r.call({op:'history',kind:'program',cutoff:now})).json()).length,0);
+ const rows=(await (await r.call({op:'history',kind:'result',cutoff:now})).json()).filter(v=>v.status==='RESULT_PARSED');assert.equal(rows.length,2);
+ assert.equal(rows[0].raw_sha256,rows[1].raw_sha256);await r.tick(Number(one.event_id.split(':')[2]),t);assert.equal(r.requests.length,4);
+ }finally{await r.mf.dispose();}
+});
+test('keirin result collection verifies the same public navigation context before HTTP and again during normalization',async()=>{
+ const r=await runtime([{body:keirinIdentity},{body:keirinResult()}]);try{
+ const ctx={sport:'keirin',race_id:'keirin:20000101:47:2',kind:'schedule',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
+ const evidence=await r.tick(Date.now(),ctx);await r.reset();const t={...ctx,kind:'result',url:ctx.url.replace('JST015','JSJ012'),context_event:evidence.event_id};
+ assert.equal((await r.tick(Date.now(),{...t,race_id:'keirin:20000101:47:3'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
+ const result=await r.tick(Date.now(),t),row=await r.db.prepare("SELECT * FROM sports_parses WHERE observation_id=? AND status='RESULT_PARSED'").bind(result.event_id).first();
+ assert.ok(row);const bucket=await r.mf.getR2Bucket('RAW'),normalized=await (await bucket.get(row.normalized_key)).json();
+ assert.equal(normalized.identity_status,'CONTEXT_VERIFIED');assert.equal(normalized.identity_evidence,evidence.event_id);assert.equal(normalized.settlement_qualified,false);assert.equal(r.requests.length,2);
+ // A temporary context read failure must not freeze an invalid parse version.
+ const failed=await r.mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify({op:'reparse',event:result.event_id,target:t,version:'sports-result-v2',fault:'context',context:evidence.event_id})});
+ assert.equal(failed.status,503);assert.equal(await failed.text(),'R2_TEMPORARY');
+ assert.equal((await r.db.prepare("SELECT count(*) AS n FROM sports_parses WHERE parser_version='sports-result-v2'").first()).n,0);
+ assert.equal(await (await r.call({op:'reparse',event:result.event_id,target:t,version:'sports-result-v2'})).text(),'RESULT_PARSED');assert.equal(r.requests.length,2);
+ // An older raw capture without identity provenance must fail even if the caller supplies a valid target now.
+ const legacy='sports:keirin:1:'+'0'.repeat(64),raw=await r.db.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=?').bind(result.event_id).first();
+ await r.db.prepare("INSERT INTO captures(event_id,scheduled_capture_at,status) VALUES(?,'2000-01-01T00:00:00.000000+00:00','RAW_STORED')").bind(legacy).run();
+ await r.db.prepare("INSERT INTO raw_observations VALUES(?,?,'2000-01-01T00:00:00.000000+00:00','2000-01-01T00:00:00.000000+00:00','body_200','SPORT_KEIRIN_RESULT',NULL,NULL)").bind(legacy,raw.raw_sha256).run();
+ await bucket.put('manifests/'+legacy+'.json',JSON.stringify({target:{...t,context_event:undefined}}));
+ assert.equal(await (await r.call({op:'reparse',event:legacy,target:t,version:'sports-result-v1'})).text(),'PARSE_ERROR');assert.equal(r.requests.length,2);
+ }finally{await r.mf.dispose();}
+});
+test('result normalized-storage failure recovers from the original raw without a second HTTP or observation',async()=>{
+ const r=await runtime([{body:autoResult()}]);try{
+ const at=Date.now(),t={...target,kind:'result',url:'https://autorace.jp/race_info/RaceResult'};
+ assert.equal((await (await r.call({at,target:t,fault:'normalized'})).json()).status,'STORAGE_ERROR');
+ assert.equal((await r.tick(at,t)).status,'RAW_STORED');assert.equal(r.requests.length,1);
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
+ assert.equal((await r.db.prepare("SELECT count(*) AS n FROM sports_parses WHERE status='RESULT_PARSED'").first()).n,1);
  }finally{await r.mf.dispose();}
 });
 test('NAR and extra sports can publish concurrently in shared D1/R2; NAR history query excludes all sports rows',async()=>{
