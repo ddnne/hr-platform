@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 from hr_platform import fixtures as f
-from hr_platform.cloud_paper_schedule import delayed_payout_packet, schedule_day
+from hr_platform.cloud_paper_schedule import delayed_payout_packet, packet, schedule_day
 from hr_platform.common import instant, stamp
 from test_cloud_history import cloud as cloud_fixture
 from test_cloud_paper import engine
@@ -104,6 +104,35 @@ def test_registration_failure_recovers_existing_packet_once_without_backdating(c
         assert (await p.plan(result['plan_id']))['registered_at'] == stamp(f.at(-5))
         assert len(await p.all('SELECT * FROM page_capture_plans')) == 3
         assert len(await p.all('SELECT * FROM cloud_paper_plans')) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(('spacing', 'decided', 'expected'), [
+    (6, False, 'NO_FUTURE_SLOT'), (7, False, 'NO_FUTURE_SLOT'),
+    (-26, False, 'NO_FUTURE_SLOT'), (8, False, 'ENROLLED'), (6, True, 'ENROLLED'),
+])
+def test_new_packet_preserves_existing_races_last_odds_slot(cloud, config, spacing, decided, expected):
+    async def run():
+        p = engine(cloud)
+        await observed(p, cloud)
+        policy, collection = policies()
+        other = '20000101:SYNTHETIC:12'
+        await p.run('''INSERT INTO cloud_paper_plans
+            (plan_id,experiment,race_id,day,asof_at,plan_body,registered_at,decisions)
+            VALUES(?,?,?,?,?,?,?,?)''', 'other', 'synthetic', other, '20000101',
+            stamp(f.at(4-spacing)), json.dumps({'revision_id': 'other', 'config': config}),
+            stamp(f.at(-15)), '[]' if decided else None)
+        for r in packet(other, f.at(14-spacing), f.at(4-spacing), policy, collection):
+            await p.run('INSERT INTO page_capture_plans VALUES(?,?,?,?,?,?,?,?)',
+                f"nar-daily-{r['kind']}:{r['at']}", r['at'], r['kind'], r['url'], other,
+                stamp(f.at(-15)), policy['version'], 'synthetic-revision')
+        before = await p.all('SELECT * FROM page_capture_plans WHERE race_id=?', other)
+        collector = Collector(p)
+        # Existing pages do not intersect the new race's window. Its state page
+        # still steals the earlier race's final odds via nextPage's lookahead.
+        assert (await schedule_day(p, collector, config, policy, collection))['status'] == expected
+        assert len(collector.calls) == (expected == 'ENROLLED')
+        assert await p.all('SELECT * FROM page_capture_plans WHERE race_id=?', other) == before
     asyncio.run(run())
 
 
