@@ -26,6 +26,8 @@ test('keirin links first resolve a response identity then obtain that race clock
  assert.ok(plan.targets.every(t=>t.race_id==='keirin:20000101:47:0'));assert.deepEqual(plan.targets.map(t=>new URL(t.url).searchParams.get('encp')),['synthetic-public-navigation-1','synthetic-public-navigation-2','synthetic-public-navigation-3']);
  const resolved=d.parseProgram(fixture.keirinIdentity,plan.targets[0]);const children=d.discoveryTargets(resolved,'synthetic-identity-observation').targets;assert.equal(children.length,2);const child=children[0];
  assert.equal(new URL(children[1].url).searchParams.get('type'),'JST010');assert.equal(children[1].context_event,'synthetic-identity-observation');
+ assert.equal(new URL(children[1].url).searchParams.get('url.media.flg'),'1');assert.equal(new URL(children[1].url).searchParams.has('mode'),false);
+ assert.throws(()=>d.validateTarget({...children[1],url:children[1].url.replace('url.media.flg=1','mode=0')}),/READ_API_PARAMS/);
  assert.equal(d.discoveryTargets(resolved).deferred[0].reason,'RACE_CONTEXT_REQUIRED');
  assert.equal(child.race_id,'keirin:20000101:47:2');assert.equal(child.context_event,'synthetic-identity-observation');assert.equal(new URLSearchParams(child.body).get('encp'),'synthetic-public-navigation-1');
  assert.deepEqual(d.discoveryTargets(d.parseProgram(fixture.keirinProgram,child)).targets,[]);

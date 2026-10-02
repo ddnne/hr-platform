@@ -20,6 +20,7 @@ export function validateTarget(t:Target):void {
  if(t.kind==='result'&&!supportsResult(t))throw new Error('RESULT_RESOURCE');
  if(t.sport==='auto'&&u.pathname==='/race_info/RaceResult'&&t.kind!=='result')throw new Error('RESULT_RESOURCE');
  if(t.sport==='keirin'&&(requiresContext(t)&&(!t.context_event||!contextNavigation(t))||t.kind==='odds'&&(!t.entrants||!t.market)))throw new Error('RACE_CONTEXT_REQUIRED');
+ if(t.sport==='keirin'&&u.searchParams.get('type')==='JST010'&&(t.kind!=='schedule'||u.searchParams.get('url.media.flg')!==config.sources.keirin.runners_media_flag))throw new Error('READ_API_PARAMS');
  if(t.sport==='keirin'&&u.pathname==='/pc/json'&&!config.sources.keirin.read_json_types.includes(u.searchParams.get('type')??''))throw new Error('READ_API_REQUIRED');
  if(t.sport==='auto'&&['/race_info/Odds','/race_info/OtherRaceInfo','/race_info/RaceResult'].includes(u.pathname)&&t.body===undefined)throw new Error('READ_POST_REQUIRED');
  if(t.form){if(t.sport!=='keirin'||u.pathname!=='/pc/racelive'||t.kind!=='guest'||new URLSearchParams(t.body).size!==1||!new URLSearchParams(t.body).get('encp'))throw new Error('READ_FORM_REQUIRED');}

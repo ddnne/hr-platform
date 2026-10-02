@@ -45,7 +45,8 @@
         "JSJ012"
       ],
       "maximum_entrant_number": 9,
-      "maximum_frame_number": 6
+      "maximum_frame_number": 6,
+      "runners_media_flag": "1"
     },
     "auto": {
       "origin": "https://autorace.jp",
