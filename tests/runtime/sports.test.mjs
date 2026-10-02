@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
 const pure=await build({entryPoints:['workers/sports/parsers.ts'],bundle:true,write:false,format:'esm',platform:'node'});
 const parser=await import(`data:text/javascript;base64,${Buffer.from(pure.outputFiles[0].text).toString('base64')}`);
-import {ids,autoBody,autoProgram} from '../fixtures/synthetic/sports.mjs';
+import {ids,autoBody,autoProgram,keirinIdentity} from '../fixtures/synthetic/sports.mjs';
 const target={sport:'auto',race_id:'auto:20000101:6:8',url:'https://autorace.jp/race_info/Odds',kind:'odds',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:8})};
 test('synthetic full seven markets, ranges and explicit zero; unknown source timestamp stays null',()=>{
  const s=parser.parseAuto(autoBody('0.0'),target);
@@ -34,14 +34,17 @@ test('boat rowspan table maps every trifecta to the correct runner identities',(
  assert.equal(r.phase,'CLOSE_ONLY');assert.equal(r.markets[0].complete,true);assert.equal(r.markets[0].quotes.length,120);
  for(const q of r.markets[0].quotes)assert.equal(q.lower,q.combination[0]*100+q.combination[1]*10+q.combination[2]);
 });
-const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize} from './workers/sports/storage';import {capture} from './workers/ingestion/capture';
+const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
  if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
  if(v.op==='reparse')return new Response(await normalize(env,v.event,v.target,v.version));
+ if(v.op==='programPlan'){try{const s=await savedProgram(env,v.event,v.now??Date.now());return Response.json({...s,plan:discoveryTargets(s.value,v.event)});}catch(e){return Response.json({error:e.message});}}
  const bindings=v.fault==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async()=>{throw new Error('INDEX_FAILED');}}}:v.fault==='normalized'?{...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),put:async(k,b)=>{if(k.startsWith('sports/normalized/'))throw new Error('R2_FAILED');return env.RAW.put(k,b);}}}:env;
  return Response.json(await collect(v.at,bindings,v.target));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
+const settings=JSON.parse(await readFile('configs/sports-collection.json','utf8'));
+const nextProgramVersion=settings.program_parser_version.replace(/\d+$/,v=>String(Number(v)+1));
 async function runtime(responses=[],enabled=true,doClass=null){
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({name:'sports',modules:true,script:(doClass?doBundle:bundle).outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
@@ -81,10 +84,36 @@ test('program versions share persistence but never enter odds history; later pro
  const one=await r.tick(Date.now(),t);await r.reset();const cutoff=new Date().toISOString();
  const past=await (await r.call({op:'history',kind:'program',cutoff})).json();assert.equal(past.length,1);assert.equal(past[0].status,'PROGRAM_PARSED');
  assert.equal((await (await r.call({op:'history',cutoff})).json()).length,1);
- await new Promise(resolve=>setTimeout(resolve,2));await r.tick(Date.now(),t);await r.call({op:'reparse',event:one.event_id,target:t,version:'sports-program-v2'});
+ await new Promise(resolve=>setTimeout(resolve,2));await r.tick(Date.now(),t);await r.call({op:'reparse',event:one.event_id,target:t,version:nextProgramVersion});
  assert.deepEqual(await (await r.call({op:'history',kind:'program',cutoff})).json(),past);
  assert.equal((await (await r.call({op:'history',cutoff:new Date().toISOString()})).json()).length,1);
  assert.equal((await (await r.call({op:'history',kind:'program',cutoff:new Date().toISOString()})).json()).length,3);
+ }finally{await r.mf.dispose();}
+});
+test('saved program plans use availability and receipt freshness; reparsing does not refresh old input',async()=>{
+ const r=await runtime([{body:keirinIdentity}]);try{
+ const before=Date.now()-1,t={sport:'keirin',race_id:'keirin:20000101:47:0',kind:'schedule',discovery_stage:'race',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
+ const one=await r.tick(Date.now(),t);
+ assert.equal((await (await r.call({op:'programPlan',event:one.event_id,now:before})).json()).error,'PROGRAM_UNAVAILABLE');
+ const saved=await (await r.call({op:'programPlan',event:one.event_id})).json();assert.equal(saved.value.program.selected.race_id,'keirin:20000101:47:2');assert.equal(saved.plan.targets[0].race_id,'keirin:20000101:47:2');
+ await r.call({op:'reparse',event:one.event_id,target:t,version:nextProgramVersion});
+ const staleAt=Date.parse(saved.received_at)+settings.discovery.maximum_program_age_seconds*1000+1;
+ assert.equal((await (await r.call({op:'programPlan',event:one.event_id,now:staleAt})).json()).error,'PROGRAM_STALE');
+ assert.equal(r.requests.length,1);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+test('a newer failed program revision rejects preview instead of reviving an old success; past cutoffs stay usable',async()=>{
+ const r=await runtime([{body:keirinIdentity}]);try{
+ const t={sport:'keirin',race_id:'keirin:20000101:47:0',kind:'schedule',discovery_stage:'race',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
+ const one=await r.tick(Date.now(),t),past=await (await r.call({op:'programPlan',event:one.event_id})).json();
+ const earlier=Date.parse(past.available_at),later=earlier+1,available=new Date(later).toISOString().replace('Z','000+00:00');
+ // Fabricated later parser outcomes for the same immutable observation, including a same-time numeric version tie.
+ for(const [version,status,key] of [['sports-program-v9','PROGRAM_PARSED','normalized_key'],['sports-program-v10','PARSE_ERROR','NULL']])
+  await r.db.prepare(`INSERT INTO sports_parses SELECT observation_id,?,sport,race_id,resource_id,?,?,?,${key},NULL FROM sports_parses WHERE observation_id=? AND parser_version=?`)
+   .bind(version,available,available,status,one.event_id,settings.program_parser_version).run();
+ assert.deepEqual(await (await r.call({op:'programPlan',event:one.event_id,now:earlier})).json(),past);
+ assert.equal((await (await r.call({op:'programPlan',event:one.event_id,now:later})).json()).error,'PROGRAM_UNAVAILABLE');
+ assert.equal(r.requests.length,1);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
  }finally{await r.mf.dispose();}
 });
 test('NAR and extra sports can publish concurrently in shared D1/R2; NAR history query excludes all sports rows',async()=>{

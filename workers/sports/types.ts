@@ -6,7 +6,9 @@ export type Snapshot = {schema: 'sports-odds-v1'; sport: Sport; race_id: string;
  source_updated_at: null; source_published_at: string | null; time_semantics: string; markets: Market[]};
 export type Target = {sport: Sport; race_id: string; url: string; body?: string; form?: boolean;
  // Public navigation/guest headers only. Never persisted in capture manifests or logs.
- headers?: Record<string,string>; kind: 'odds' | 'schedule' | 'result' | 'guest'; market?: string; entrants?: number[]; frames?: Record<string,number>; context_event?: string};
+ headers?: Record<string,string>; kind: 'odds' | 'schedule' | 'result' | 'guest'; market?: string; entrants?: number[]; frames?: Record<string,number>; context_event?: string;
+ // Venue navigation may discover an unknown race; a race detail must not fan out again.
+ discovery_stage?: 'venue' | 'race'};
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
  SPORTS: DurableObjectNamespace<import('./index').SportsCollector>;

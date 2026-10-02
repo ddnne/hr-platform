@@ -16,6 +16,7 @@ export const autoProgram=JSON.stringify({result:'Success',body:{placeCode:6,race
 export const boatCatalog='<a href="/owpc/pc/race/raceindex?jcd=02&amp;hd=20000101">synthetic</a><a href="/owpc/pc/race/raceindex?jcd=05&amp;hd=19991231">old</a>';
 export const boatProgram='<table>'+[1,2,3].map(no=>`<tr><td><a href="/owpc/pc/race/odds3t?jcd=02&amp;hd=20000101&amp;rno=${no}">${no}R</a></td><td>10:${String(no*10).padStart(2,'0')}</td><td>synthetic</td></tr>`).join('')+'</table>';
 export const keirinCatalog=JSON.stringify({resultCd:0,RaceList:[{kaisaiDate:'20000101',naibuKeirinCd:'47',raceNum:'0',touhyouLivePara:'synthetic-public-navigation',tyusiKbn:'synthetic-cancel-label'}]});
+export const keirinIdentity=JSON.stringify({resultCd:0,data:{kaisaiDate:'20000101',keirinJyoCd:'47',raceNo:'2'}});
 export const keirinProgram='<script>jsonData["PC0201"] = '+JSON.stringify({resultCd:0,C0201data:{selKaisai:'20000101',selKjyoCd:'47',selRaceNo:'2',cntRace:0,
  C0201racedtl:{aftStartTime:'17:05',aftBetTime:'17:02',bfrStartTime:'17:00',bfrBetTime:'16:57'},
  C0201race:[1,2,3].map(i=>({encParaR:'synthetic-public-navigation-'+i,flgRaceEnd:i===1?'1':'0'}))}})+';</script>';
