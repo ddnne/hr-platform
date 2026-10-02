@@ -1,6 +1,6 @@
 /** Pure provider adapters. Missing combinations remain missing; zero is a display, not a probability. */
 import type {Market,Quote,Snapshot,Target} from './types';
-const text = (s:string) => s.replace(/<br\s*\/?\s*>/gi,' ').replace(/<[^>]*>/g,'').replace(/&nbsp;|&#160;/g,' ').replace(/&amp;/g,'&').replace(/\s+/g,' ').trim();
+export const text = (s:string) => s.replace(/<br\s*\/?\s*>/gi,' ').replace(/<[^>]*>/g,'').replace(/&nbsp;|&#160;/g,' ').replace(/&amp;/g,'&').replace(/\s+/g,' ').trim();
 export function quote(combination:number[], value:unknown): Quote {
  const display = typeof value === 'object' && value !== null
    ? `${(value as any).min} - ${(value as any).max}` : text(String(value ?? ''));

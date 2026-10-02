@@ -1,6 +1,7 @@
 {
   "version": "sports-shadow-v1",
   "parser_version": "sports-odds-v1",
+  "program_parser_version": "sports-program-v1",
   "interval_seconds": 120,
   "request_spacing_seconds": 5,
   "request_timeout_seconds": 20,
@@ -56,5 +57,11 @@
     }
   },
   "plan_horizon_seconds": 86400,
-  "guest_session_seconds": 1800
+  "guest_session_seconds": 1800,
+  "discovery": {
+    "clock_timezone_offset_minutes": 540,
+    "maximum_clock_hour": 29,
+    "maximum_race_number": 99,
+    "maximum_venue_number": 99
+  }
 }

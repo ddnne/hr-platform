@@ -2,6 +2,7 @@ import {boundedBody,discard,fetchPublic,retryAfter} from '../http';
 import {digest,iso,publishCapture,saveCapture,type CaptureManifest} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
 import {normalize,resourceId} from './storage';
+import {supportsProgram} from './discovery';
 import type {SportsEnv,Target,Sport} from './types';
 export const sourceFor=(sport:Sport)=>`sports-${sport}`;
 export function validateTarget(t:Target):void {
@@ -46,7 +47,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
     env.INDEX.prepare('UPDATE source_control SET blocked=1 WHERE source=?').bind(source)]);
   }
   const saved=await env.INDEX.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=?').bind(event).first<{raw_sha256:string}>();
-  if(saved&&t.kind==='odds')await normalize(env,event,t);
+  if(saved&&(t.kind==='odds'||supportsProgram(t)))await normalize(env,event,t);
   return {status:saved?'RAW_STORED':prior.status,event_id:event};
  }
  if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000){
@@ -75,7 +76,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
    etag:null,validator_sent:null,validator_raw_sha256:null,file_name:null,file_timestamp:null,duration_ms:Date.now()-started,
    dataset_kind:`SPORT_${t.sport.toUpperCase()}_${t.kind.toUpperCase()}`,url:t.url,race_id:t.race_id,target:safeTarget};
   await saveCapture(env,m,present?null:body,started);
-  if(t.kind==='odds')await normalize(env,event,t);
+  if(t.kind==='odds'||supportsProgram(t))await normalize(env,event,t);
   return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers};
  }catch(e){const reason=e instanceof Error?e.message:'';
   if(reason==='GUEST_FORMAT')stop=true;

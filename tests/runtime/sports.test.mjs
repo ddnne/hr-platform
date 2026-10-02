@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
 const pure=await build({entryPoints:['workers/sports/parsers.ts'],bundle:true,write:false,format:'esm',platform:'node'});
 const parser=await import(`data:text/javascript;base64,${Buffer.from(pure.outputFiles[0].text).toString('base64')}`);
-import {ids,autoBody} from '../fixtures/synthetic/sports.mjs';
+import {ids,autoBody,autoProgram} from '../fixtures/synthetic/sports.mjs';
 const target={sport:'auto',race_id:'auto:20000101:6:8',url:'https://autorace.jp/race_info/Odds',kind:'odds',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:8})};
 test('synthetic full seven markets, ranges and explicit zero; unknown source timestamp stays null',()=>{
  const s=parser.parseAuto(autoBody('0.0'),target);
@@ -37,7 +37,7 @@ test('boat rowspan table maps every trifecta to the correct runner identities',(
 const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize} from './workers/sports/storage';import {capture} from './workers/ingestion/capture';
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
- if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff));
+ if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
  if(v.op==='reparse')return new Response(await normalize(env,v.event,v.target,v.version));
  const bindings=v.fault==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async()=>{throw new Error('INDEX_FAILED');}}}:v.fault==='normalized'?{...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),put:async(k,b)=>{if(k.startsWith('sports/normalized/'))throw new Error('R2_FAILED');return env.RAW.put(k,b);}}}:env;
  return Response.json(await collect(v.at,bindings,v.target));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
@@ -70,6 +70,20 @@ for(const status of [403,419,429])test('provider '+status+' is isolated from NAR
  const r=await runtime([{status,headers:{'retry-after':'600'}}]);try{const result=await r.tick();const source=await r.db.prepare("SELECT * FROM source_control WHERE source='sports-auto'").first();
  assert.equal(result.status,status===429?'RATE_LIMITED':'SOURCE_DENIED');assert.equal(source.blocked,status===429?0:1);assert.ok(source.next_allowed_at>Date.now());
  await r.tick();assert.equal(r.requests.length,1);assert.equal((await r.db.prepare("SELECT blocked FROM source_control WHERE source='nar-daily-odds'").first()).blocked,0);
+ }finally{await r.mf.dispose();}
+});
+test('program versions share persistence but never enter odds history; later programs/reparse cannot change a past cutoff',async()=>{
+ const program=JSON.parse(autoProgram);program.body.raceNo=8;
+ const changed=structuredClone(program);changed.body.telvoteTime='24:01';
+ const r=await runtime([{},{body:JSON.stringify(program)},{body:JSON.stringify(changed)}]);try{
+ await r.tick();await r.reset();const t={...target,kind:'schedule',url:'https://autorace.jp/race_info/OtherRaceInfo'};
+ const one=await r.tick(Date.now(),t);await r.reset();const cutoff=new Date().toISOString();
+ const past=await (await r.call({op:'history',kind:'program',cutoff})).json();assert.equal(past.length,1);assert.equal(past[0].status,'PROGRAM_PARSED');
+ assert.equal((await (await r.call({op:'history',cutoff})).json()).length,1);
+ await new Promise(resolve=>setTimeout(resolve,2));await r.tick(Date.now(),t);await r.call({op:'reparse',event:one.event_id,target:t,version:'sports-program-v2'});
+ assert.deepEqual(await (await r.call({op:'history',kind:'program',cutoff})).json(),past);
+ assert.equal((await (await r.call({op:'history',cutoff:new Date().toISOString()})).json()).length,1);
+ assert.equal((await (await r.call({op:'history',kind:'program',cutoff:new Date().toISOString()})).json()).length,3);
  }finally{await r.mf.dispose();}
 });
 test('NAR and extra sports can publish concurrently in shared D1/R2; NAR history query excludes all sports rows',async()=>{
@@ -130,17 +144,19 @@ test('DO concurrent reservations survive an in-flight capture and are drained se
  assert.equal((await db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
  }finally{release();await mf.dispose();}
 });
-for(const delay of [6000,100000])test('auto guest publication failure recovers at delay '+delay+' without duplicate guest HTTP',async()=>{
+for(const kind of ['odds','schedule'])for(const delay of [6000,100000])test('auto '+kind+' guest publication failure recovers at delay '+delay+' without duplicate guest HTTP',async()=>{
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({name:'guest-do',modules:true,script:doBundle.outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
  bindings:{SPORTS_ENABLED:'true',SPORTS_PROVIDERS_JSON:'["auto"]'},durableObjects:{SPORTS:{className:'TestGuest',useSQLite:true}},d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),
- outboundService:async req=>{requests.push({method:req.method,url:req.url});return req.method==='GET'?new Response('<meta name="csrf-token" content="SYNTHETIC_TOKEN">',{headers:{'set-cookie':'guest=SYNTHETIC; Path=/'}}):new Response(autoBody());}}));
+ outboundService:async req=>{requests.push({method:req.method,url:req.url});const p=JSON.parse(autoProgram);p.body.raceNo=8;return req.method==='GET'?new Response('<meta name="csrf-token" content="SYNTHETIC_TOKEN">',{headers:{'set-cookie':'guest=SYNTHETIC; Path=/'}}):new Response(kind==='odds'?autoBody():JSON.stringify(p));}}));
  try{const db=await mf.getD1Database('INDEX');for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
  const call=v=>mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)}),at=Date.now()+60000;
- await call({op:'schedule',entries:[{at,target}]});await call({op:'alarm',now:at});
+ const scheduled=kind==='odds'?target:{...target,kind:'schedule',url:'https://autorace.jp/race_info/OtherRaceInfo'};
+ await call({op:'schedule',entries:[{at,target:scheduled}]});await call({op:'alarm',now:at});
  assert.equal(await (await call({op:'pending'})).json(),1);assert.equal(requests.length,1);
  await call({op:'alarm',now:at+delay});assert.deepEqual(requests.map(r=>r.method),delay<90000?['GET','POST']:['GET']);
  assert.equal(await (await call({op:'pending'})).json(),0);assert.equal((await db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,delay<90000?2:1);
- assert.equal((await db.prepare("SELECT count(*) AS n FROM sports_parses WHERE status='COMPLETE'").first()).n,delay<90000?1:0);
+ assert.equal((await db.prepare("SELECT count(*) AS n FROM sports_parses WHERE status='COMPLETE'").first()).n,delay<90000&&kind==='odds'?1:0);
+ assert.equal((await db.prepare("SELECT count(*) AS n FROM sports_parses WHERE status='PROGRAM_PARSED'").first()).n,delay<90000&&kind==='schedule'?1:0);
  }finally{await mf.dispose();}
 });
