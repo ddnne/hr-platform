@@ -1,0 +1,12 @@
+{
+  "version": "quinella-trio-joint-kelly-v1",
+  "markets": ["quinella", "trio"],
+  "methods": ["reference", "same_marginals", "pooled", "robust"],
+  "capital_fractions": {"half": 0.5, "quarter": 0.25},
+  "candidates_per_market": 6,
+  "candidate_rule": "best_single_unit_log_growth_across_models_and_capital_fractions",
+  "objective": "joint_top3_state_log_wealth_including_cash",
+  "development_dates": ["20261001", "20261002"],
+  "validation_not_before_date": "20261003",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}

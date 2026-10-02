@@ -1,0 +1,21 @@
+{
+  "version": "quinella-constrained-fractional-kelly-v1",
+  "target": "quinella",
+  "methods": ["reference", "pooled", "robust"],
+  "capital_fractions": {"full": 1.0, "half": 0.5, "quarter": 0.25},
+  "pool_weights": {
+    "reference": 0.14285714285714285,
+    "marginal": 0.14285714285714285,
+    "direct": 0.14285714285714285,
+    "win_pl": 0.14285714285714285,
+    "win_exacta_chain": 0.14285714285714285,
+    "exacta_power": 0.14285714285714285,
+    "ensemble": 0.14285714285714285
+  },
+  "fractional_rule": "optimize_log_wealth_on_fraction_of_reference_bankroll_with_integer_stakes_and_same_limits",
+  "bankroll_rule": "fixed_reference_bankroll_no_outcome_compounding",
+  "uncertainty_interpretation": "finite_model_scenarios_not_a_statistical_confidence_set",
+  "development_dates": ["20261001", "20261002"],
+  "validation_not_before_date": "20261003",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}
