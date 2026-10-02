@@ -1,0 +1,17 @@
+{
+  "version": "quinella-joint-portfolio-v1",
+  "target": "quinella",
+  "stake_unit_yen": 100,
+  "race_budget_yen": 300,
+  "max_tickets_per_race": 3,
+  "enumeration_batch_size": 8192,
+  "probability_fields": ["p_ref", "p_unregularized", "p_marg", "p_direct"],
+  "sensitivity_families": ["sensitivity", "weight_sensitivity"],
+  "variants": ["reference_joint", "robust_joint"],
+  "allocation_rule": "all_combinations_with_integer_stakes_up_to_budget_or_cash",
+  "objective": "expected_log_wealth_reference_or_worst_normalized_model_scenario",
+  "uncertainty_interpretation": "model_sensitivity_not_statistical_confidence_interval",
+  "development_dates": ["20261001"],
+  "validation_not_before_date": "20261002",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}
