@@ -94,7 +94,7 @@ test('monthly first-day scope and rolling interval survive month/year boundaries
  try{
   const jan=Date.parse('2027-01-01T00:00:00Z');
   const first=await(await r.mf.dispatchFetch('http://local/monthly?at='+jan)).json();
-  assert.equal(first.month,'202612');assert.equal(first.at,Date.parse('2027-01-01T05:10:00Z'));
+  assert.equal(first.month,'202612');assert.equal(first.at,Date.parse('2027-01-01T01:00:00Z'));
   const previous=Date.parse('2026-12-31T05:12:00Z');
   const delayed=await(await r.mf.dispatchFetch('http://local/monthly?at='+jan+'&previous='+previous)).json();
   assert.equal(delayed.at,Date.parse('2027-01-01T05:12:00Z'));

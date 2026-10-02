@@ -4,7 +4,7 @@
   "day_start": "07:00",
   "day_end": "23:00",
   "race_refresh_seconds": 1800,
-  "monthly_capture_time": "14:10",
+  "monthly_capture_time": "10:00",
   "monthly_min_interval_seconds": 86400,
   "request_timeout_seconds": 20,
   "max_raw_bytes": 16777216,
