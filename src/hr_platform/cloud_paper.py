@@ -3,6 +3,7 @@
 One D1 statement freezes all three models with a common completion clock and
 atomic daily limits. Failed/late computations consume the fixed decision as NO_BET.
 """
+import asyncio
 import json
 from datetime import timedelta
 from uuid import uuid4
@@ -19,7 +20,8 @@ class CloudPaper(CloudHistory):
 
     def __init__(self, bucket, database, clock=utcnow, *, storage_policy=None, paper_policy):
         super().__init__(bucket, database, clock, storage_policy=storage_policy)
-        if (set(paper_policy) != {'version', 'lease_seconds', 'max_future_seconds', 'max_pending_plans'}
+        if (set(paper_policy) != {'version', 'lease_seconds', 'max_future_seconds', 'max_pending_plans',
+                                  'decision_lookahead_seconds'}
                 or paper_policy['version'] != 'cloud-paper-v1'
                 or any(type(paper_policy[k]) is not int or paper_policy[k] <= 0 for k in paper_policy if k != 'version')):
             raise ValueError('CLOUD_PAPER_POLICY')
@@ -231,7 +233,7 @@ class CloudPaper(CloudHistory):
         saved = await self.first('SELECT * FROM cloud_paper_settlements WHERE plan_id=? AND evidence_id=?', plan_id, evidence['id'])
         return {**await self.read_body(saved['body_hash']), 'recorded_at': saved['available_at']}
 
-    async def tick(self):
+    async def tick(self, *, wait_for_due=False):
         pending = await self.all('SELECT plan_id,plan_body FROM cloud_paper_plans WHERE decisions IS NULL')
         for row in pending:
             plan = json.loads(row['plan_body'])
@@ -241,6 +243,18 @@ class CloudPaper(CloudHistory):
             AND (owner IS NULL OR lease_until<=?) ORDER BY asof_at,plan_id LIMIT 1''', now, now)
         if due:
             return await self.decide(due['plan_id'], refresh=False)
+        if wait_for_due:
+            # Cron can start partway through a minute. Discover the next fixed
+            # decision before its minute, then wait locally without changing as-of.
+            horizon = stamp((instant(now) + timedelta(seconds=self.policy['decision_lookahead_seconds'])).isoformat())
+            upcoming = await self.first('''SELECT plan_id,asof_at FROM cloud_paper_plans
+                WHERE decisions IS NULL AND asof_at>? AND asof_at<=?
+                AND (owner IS NULL OR lease_until<=?) ORDER BY asof_at,plan_id LIMIT 1''', now, horizon, now)
+            if upcoming:
+                await asyncio.sleep(max(0, seconds(upcoming['asof_at'], await self.now())))
+                # A revised schedule can postpone/cancel this attempt. Actual
+                # completion time still enforces the original decision deadline.
+                return await self.decide(upcoming['plan_id'])
         pending = await self.first('''SELECT p.plan_id FROM cloud_paper_plans p WHERE p.decisions IS NOT NULL
             AND (NOT EXISTS(SELECT 1 FROM cloud_paper_settlements s WHERE s.plan_id=p.plan_id)
               OR EXISTS(SELECT 1 FROM page_parses e WHERE e.kind='payout' AND e.race_id=p.race_id
