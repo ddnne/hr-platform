@@ -4,10 +4,18 @@ import config from '../../configs/sports-collection.json';
 import {collect,validateTarget,validateContext,sourceFor} from './capture';
 import {history,resourceId,normalize,savedProgram} from './storage';
 import {discoveryTargets} from './discovery-plan';
+import {oddsTargets} from './odds-plan';
 import type {Sport,SportsEnv,Target} from './types';
 import type {CaptureManifest} from '../capture-storage';
 type Entry={at:number;target:Target};
 type Session={cookie:string;token?:string;expires:number};
+function planTime(event:string,at:number):number {
+ const now=Date.now();if(!/^sports:(?:auto|boat|keirin):\d+:[0-9a-f]{64}$/.test(event)||!Number.isSafeInteger(at)||at<now||at>now+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');return now;
+}
+function planEntries(targets:Target[],at:number,now:number):Entry[] {
+ const entries=targets.map((target,i)=>({at:at+i*config.request_spacing_seconds*1000,target}));
+ if(entries.length>config.maximum_plan_entries||entries.some(e=>e.at>now+config.plan_horizon_seconds*1000))throw new Error('PLAN_WINDOW');return entries;
+}
 export class SportsCollector extends DurableObject<SportsEnv> {
  async schedule(entries:Entry[]):Promise<string> {
   if(this.env.SPORTS_ENABLED!=='true')return 'DISABLED';
@@ -88,11 +96,19 @@ export class SportsCollector extends DurableObject<SportsEnv> {
 }
 export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async discoveryPlan(event:string,at:number):Promise<string> {
-  const now=Date.now();if(!/^sports:(?:auto|boat|keirin):\d+:[0-9a-f]{64}$/.test(event)||!Number.isSafeInteger(at)||at<now||at>now+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');
+  const now=planTime(event,at);
   const source=await savedProgram(this.env,event,now),plan=discoveryTargets(source.value,event);
-  const entries=plan.targets.map((target,i)=>({at:at+i*config.request_spacing_seconds*1000,target}));
-  if(entries.some(e=>e.at>now+config.plan_horizon_seconds*1000))throw new Error('PLAN_WINDOW');
+  const entries=planEntries(plan.targets,at,now);
   return JSON.stringify({parent_observation:event,available_at:source.available_at,received_at:source.received_at,entries,deferred:plan.deferred});
+ }
+ async oddsPlan(event:string,raceId:string,at:number,runnersEvent?:string):Promise<string> {
+  const now=planTime(event,at);if(runnersEvent)planTime(runnersEvent,at);
+  const source=await savedProgram(this.env,event,now),runners=runnersEvent?await savedProgram(this.env,runnersEvent,now):undefined;
+  await validateContext(source.target,this.env);if(runners)await validateContext(runners.target,this.env);
+  const plan=oddsTargets(source,raceId,at,runners);
+  return JSON.stringify({parent_observation:event,available_at:source.available_at,received_at:source.received_at,
+   runners_observation:runnersEvent??null,runners_available_at:runners?.available_at??null,runners_received_at:runners?.received_at??null,
+   entries:planEntries(plan.targets,at,now),deferred:plan.deferred});
  }
  async planState(sport:Sport):Promise<string> {
   if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');

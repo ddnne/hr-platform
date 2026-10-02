@@ -36,7 +36,9 @@ test('boat rowspan table maps every trifecta to the correct runner identities',(
  for(const q of r.markets[0].quotes)assert.equal(q.lower,q.combination[0]*100+q.combination[1]*10+q.combination[2]);
 });
 const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
+export {SportsControl} from './workers/sports/index';
 export default {async fetch(req,env){const v=await req.json();
+ if(v.op==='oddsPlan'){try{return Response.json(JSON.parse(await env.CONTROL.oddsPlan(v.event,v.race_id,v.at,v.runners)));}catch(e){return Response.json({error:e.message});}}
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
  if(v.op==='scopedHistory')return Response.json(await history(env,v.sport,v.race_id,v.cutoff,100,'',v.kind));
  if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
@@ -52,6 +54,7 @@ async function runtime(responses=[],enabled=true,doClass=null){
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({name:'sports',modules:true,script:(doClass?doBundle:bundle).outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
  ...(doClass?{durableObjects:{SPORTS:{className:doClass,useSQLite:true}}}:{}),
+ ...(!doClass?{serviceBindings:{CONTROL:{name:'sports',entrypoint:'SportsControl'}}}:{}),
  bindings:{SPORTS_ENABLED:String(enabled),SPORTS_PROVIDERS_JSON:'["auto","boat","keirin"]',COLLECTION_ENABLED:'true',SOURCE_APPROVED:'true'},d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),
  outboundService:async req=>{requests.push({url:req.url,method:req.method,body:await req.text(),cookie:req.headers.get('Cookie')});const matching=responses.findIndex(r=>r.route&&req.url.includes(r.route));const r=responses.splice(matching<0?0:matching,1)[0];if(r instanceof Error)throw r;if(!r)throw new Error('UNEXPECTED_FETCH');return new Response(r.body??autoBody(),{status:r.status??200,headers:r.headers});}}));
  const db=await mf.getD1Database('INDEX');for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
@@ -171,6 +174,26 @@ test('keirin runners reuse identity/storage/history and recover a temporary cont
  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM sports_parses WHERE observation_id=? AND parser_version=?').bind(capture.event_id,nextProgramVersion).first()).n,0);
  assert.equal(await (await r.call({op:'reparse',event:capture.event_id,target:t,version:nextProgramVersion})).text(),'PROGRAM_PARSED');assert.equal(r.requests.length,3);
  assert.deepEqual(await (await r.call({...q,cutoff})).json(),before);
+ }finally{await r.mf.dispose();}
+});
+test('oddsPlan RPC reads immutable clock and runner recipes without booking or HTTP; stale runners reject preview',async()=>{
+ const day=new Date(Date.now()+86400000).toISOString().slice(0,10).replaceAll('-',''),race_id=`keirin:${day}:47:2`;
+ const clockBody=keirinProgram.replaceAll('20000101',day).replace('17:05','29:55').replace('17:02','29:50');
+ const r=await runtime([{body:keirinIdentity.replaceAll('20000101',day)},{body:keirinRunners},{body:clockBody}]);try{
+ const ctx={sport:'keirin',race_id,kind:'schedule',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
+ const parent=await r.tick(Date.now(),ctx);await r.reset();
+ const runners=await r.tick(Date.now(),{...ctx,url:ctx.url.replace('JST015','JST010')+'&url.media.flg=1',context_event:parent.event_id});await r.reset();
+ const clock=await r.tick(Date.now(),{...ctx,kind:'guest',url:'https://keirin.jp/pc/racelive',form:true,body:'encp=synthetic-public-navigation',discovery_stage:'race',context_event:parent.event_id});
+ const query={op:'oddsPlan',event:clock.event_id,race_id,at:Date.now()+30000,runners:runners.event_id};
+ const p=await (await r.call(query)).json();assert.equal(p.entries.length,7);assert.deepEqual(p.deferred,[]);
+ assert.equal(p.parent_observation,clock.event_id);assert.equal(p.runners_observation,runners.event_id);
+ assert.equal(p.entries[0].at,query.at);assert.equal(p.entries[6].at,query.at+30000);
+ assert.ok(p.entries.every(e=>e.target.context_event===parent.event_id&&e.target.entrants.includes(3)));
+ assert.equal(r.requests.length,3);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM captures').first()).n,3);
+ await r.db.prepare('UPDATE raw_observations SET received_at=? WHERE observation_id=?')
+  .bind(new Date(Date.now()-(settings.discovery.maximum_program_age_seconds+1)*1000).toISOString(),runners.event_id).run();
+ assert.equal((await (await r.call(query)).json()).error,'PROGRAM_STALE');assert.equal(r.requests.length,3);
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM captures').first()).n,3);
  }finally{await r.mf.dispose();}
 });
 test('result normalized-storage failure recovers from the original raw without a second HTTP or observation',async()=>{

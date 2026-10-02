@@ -15,6 +15,13 @@
     "boat": {
       "origin": "https://www.boatrace.jp",
       "program_path": "/owpc/pc/race/raceindex",
+      "odds_pages": [
+        {"path": "/owpc/pc/race/odds3t", "market": "trifecta"},
+        {"path": "/owpc/pc/race/odds3f", "market": "trio"},
+        {"path": "/owpc/pc/race/odds2tf", "market": null},
+        {"path": "/owpc/pc/race/oddsk", "market": "wide"},
+        {"path": "/owpc/pc/race/oddstf", "market": null}
+      ],
       "paths": [
         "/owpc/pc/race/index",
         "/owpc/pc/race/raceindex",
@@ -46,11 +53,14 @@
       ],
       "maximum_entrant_number": 9,
       "maximum_frame_number": 6,
-      "runners_media_flag": "1"
+      "runners_media_flag": "1",
+      "odds_json_type": "JST011",
+      "odds_market_codes": {"trifecta": "6", "exacta": "2", "trio": "7", "quinella": "4", "frame_exacta": "3", "frame_quinella": "1", "wide": "5"}
     },
     "auto": {
       "origin": "https://autorace.jp",
       "program_path": "/race_info/OtherRaceInfo",
+      "odds_path": "/race_info/Odds",
       "paths": [
         "/race_info/XML/Hold/Today",
         "/race_info/Odds",
