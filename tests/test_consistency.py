@@ -1,6 +1,8 @@
 import math
+from pathlib import Path
 import numpy as np
 import pytest
+import yaml
 from hr_platform import fixtures as f
 from hr_platform.model import states, reference_consistency, dependence, ModelError
 
@@ -42,3 +44,28 @@ def test_large_field_dependency_reduction_matches_scalar_sums():
     np.testing.assert_allclose(np.diag(covariance), np.array(mu)*(1-np.array(mu)), atol=1e-12)
     assert np.isfinite(covariance).all()
     np.testing.assert_allclose(result['triple_difference'], 0, atol=1e-12)
+
+
+def test_dense_trifecta_precision_satisfies_unchanged_witness_check():
+    # Generated odds only, independent of any real race. Wide probability scales
+    # expose the default solver's looser feasibility tolerance.
+    omega = states(list(range(1, 13)))
+    rng = np.random.default_rng(27)
+    markets = {
+        market: {'quotes': {key: {'odds': float(value), 'display_status': 'FIXED'}
+                            for key, value in zip(keys, np.exp(rng.uniform(0, 12, len(keys))))}}
+        for market, keys in [('win', [str(h) for h in range(1, 13)]),
+                             ('trifecta', ['-'.join(map(str, state)) for state in omega])]
+    }
+    config = yaml.safe_load(Path('configs/research-trio-shadow.yaml').read_text())
+    result = reference_consistency(omega, markets, config['references'], config['target'],
+                                   config['consistency_solver_tolerance'])
+    assert max(result['per_market_max_residual'].values()) <= result['minimum_uniform_absolute_slack'] + 1e-8
+    assert result['solver_feasibility_tolerance'] == config['consistency_solver_tolerance']
+    assert result['minimum_uniform_absolute_slack'] > 0  # Precision does not erase incompatible markets.
+
+
+@pytest.mark.parametrize('value', [True, 0, float('nan'), 1e-12, 1e-8])
+def test_invalid_consistency_precision_is_rejected(value):
+    with pytest.raises(ModelError, match='CONSISTENCY_SOLVER_CONFIG'):
+        reference_consistency(states([1, 2, 3, 4]), f.markets(), ['win', 'exacta'], 'quinella', value)
