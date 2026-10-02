@@ -103,11 +103,23 @@ export function keirinIdentity(raw:string,expected:{race_date:string;venue:numbe
  return race('keirin',day,venue,no,null,null);
 }
 
+/** Preserve the published field, including withdrawals; never infer missing entrants. */
+export function keirinRunners(raw:string) {
+ const v=JSON.parse(raw),d=v.data;if(v.resultCd!==0||!d||!Array.isArray(d.sensyuInfoList))throw new Error('PROGRAM_NOT_READY');
+ const count=integer(d.syaCnt,config.sources.keirin.maximum_entrant_number);
+ if(d.sensyuInfoList.length!==count)throw new Error('PROGRAM_INCOMPLETE');
+ const entries=d.sensyuInfoList.map((p:any)=>({entrant:integer(p.syaban,config.sources.keirin.maximum_entrant_number),
+  frame:p.wakuBan===null||p.wakuBan===undefined||String(p.wakuBan).trim()===''||Number(p.wakuBan)===0?null:integer(p.wakuBan,config.sources.keirin.maximum_frame_number),
+  frame_label:label(p.wakuBan),cancellation_label:label(p.kesyaFlg)})).sort((a:any,b:any)=>a.entrant-b.entrant);
+ if(new Set(entries.map((p:any)=>p.entrant)).size!==entries.length)throw new Error('PROGRAM_DUPLICATE');
+ return {declared_count:count,frame_category_label:label(d.wakuKbn),entries};
+}
+
 export function supportsProgram(t:Target):boolean {
  const u=new URL(t.url);
  return t.kind==='schedule'&&(t.sport==='auto'&&['/race_info/XML/Hold/Today','/race_info/OtherRaceInfo'].includes(u.pathname)
   ||t.sport==='boat'&&['/owpc/pc/race/index','/owpc/pc/race/raceindex'].includes(u.pathname)
-  ||t.sport==='keirin'&&u.pathname==='/pc/json'&&['JSJ048',config.sources.keirin.identity_json_type].includes(u.searchParams.get('type')??''))
+  ||t.sport==='keirin'&&u.pathname==='/pc/json'&&['JSJ048','JST010',config.sources.keirin.identity_json_type].includes(u.searchParams.get('type')??''))
   ||t.sport==='keirin'&&t.kind==='guest'&&u.pathname==='/pc/racelive';
 }
 export function parseProgram(raw:string,t:Target) {
@@ -119,7 +131,11 @@ export function parseProgram(raw:string,t:Target) {
   program=u.pathname.endsWith('/raceindex')?{races:boatProgram(raw,day,Number(venue))}:{venues:boatVenues(raw,day)};
  }else if(u.pathname==='/pc/json'){
   if(u.searchParams.get('type')==='JSJ048')program={venues:keirinVenues(raw)};
-  else {const navigation=u.searchParams.get('encp');if(!navigation)throw new Error('PROGRAM_NAVIGATION');
+  else if(u.searchParams.get('type')==='JST010'){
+   const no=integer(t.race_id.split(':')[3],config.discovery.maximum_race_number);if(!t.context_event)throw new Error('RACE_CONTEXT_REQUIRED');
+   program={selected:race('keirin',date(day),integer(venue,config.discovery.maximum_venue_number),no,null,null),
+    runners:keirinRunners(raw),identity_evidence:t.context_event};
+  }else {const navigation=u.searchParams.get('encp');if(!navigation)throw new Error('PROGRAM_NAVIGATION');
    program={selected:keirinIdentity(raw,{race_date:day,venue:Number(venue),race:Number(t.race_id.split(':')[3])}),public_navigation:navigation};}
  }else {program=keirinProgram(raw);
   const selected=program.selected,venueScope=t.race_id===`keirin:${selected.race_date}:${selected.venue}:0`&&t.discovery_stage==='venue';

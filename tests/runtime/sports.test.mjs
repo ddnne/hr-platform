@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
 const pure=await build({entryPoints:['workers/sports/parsers.ts'],bundle:true,write:false,format:'esm',platform:'node'});
 const parser=await import(`data:text/javascript;base64,${Buffer.from(pure.outputFiles[0].text).toString('base64')}`);
-import {ids,autoBody,autoProgram,keirinIdentity} from '../fixtures/synthetic/sports.mjs';
+import {ids,autoBody,autoProgram,keirinIdentity,keirinRunners,keirinProgram} from '../fixtures/synthetic/sports.mjs';
 import {autoResult,keirinResult} from '../fixtures/synthetic/sports-results.mjs';
 const target={sport:'auto',race_id:'auto:20000101:6:8',url:'https://autorace.jp/race_info/Odds',kind:'odds',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:8})};
 test('synthetic full seven markets, ranges and explicit zero; unknown source timestamp stays null',()=>{
@@ -38,6 +38,7 @@ test('boat rowspan table maps every trifecta to the correct runner identities',(
 const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
+ if(v.op==='scopedHistory')return Response.json(await history(env,v.sport,v.race_id,v.cutoff,100,'',v.kind));
  if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
  if(v.op==='reparse'){const store=v.fault==='context'?{...env,RAW:{get:async(k)=>{if(k==='manifests/'+v.context+'.json')throw new Error('R2_TEMPORARY');return env.RAW.get(k);},put:env.RAW.put.bind(env.RAW)}}:env;
  try{return new Response(await normalize(store,v.event,v.target,v.version));}catch(e){return new Response(e.message,{status:503});}}
@@ -151,6 +152,25 @@ test('keirin result collection verifies the same public navigation context befor
  await r.db.prepare("INSERT INTO raw_observations VALUES(?,?,'2000-01-01T00:00:00.000000+00:00','2000-01-01T00:00:00.000000+00:00','body_200','SPORT_KEIRIN_RESULT',NULL,NULL)").bind(legacy,raw.raw_sha256).run();
  await bucket.put('manifests/'+legacy+'.json',JSON.stringify({target:{...t,context_event:undefined}}));
  assert.equal(await (await r.call({op:'reparse',event:legacy,target:t,version:'sports-result-v1'})).text(),'PARSE_ERROR');assert.equal(r.requests.length,2);
+ }finally{await r.mf.dispose();}
+});
+test('keirin runners reuse identity/storage/history and recover a temporary context read without another HTTP',async()=>{
+ const r=await runtime([{body:keirinIdentity},{body:keirinRunners},{body:keirinProgram}]);try{
+ const ctx={sport:'keirin',race_id:'keirin:20000101:47:2',kind:'schedule',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
+ const parent=await r.tick(Date.now(),ctx);await r.reset();const t={...ctx,url:ctx.url.replace('JST015','JST010'),context_event:parent.event_id};
+ assert.equal((await r.tick(Date.now(),{...t,race_id:'keirin:20000101:47:3'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
+ const clock={...t,kind:'guest',url:'https://keirin.jp/pc/racelive',form:true,body:'encp=synthetic-public-navigation',discovery_stage:'race'};
+ assert.equal((await r.tick(Date.now(),{...clock,race_id:'keirin:20000101:47:3'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
+ const cutoff=new Date(Date.now()-1).toISOString(),at=Date.now(),capture=await r.tick(at,t);
+ const q={op:'scopedHistory',kind:'program',sport:t.sport,race_id:t.race_id},before=await (await r.call({...q,cutoff})).json();assert.deepEqual(before.map(v=>v.observation_id),[parent.event_id]);
+ const row=await r.db.prepare('SELECT * FROM sports_parses WHERE observation_id=?').bind(capture.event_id).first();assert.equal(row.status,'PROGRAM_PARSED');
+ const bucket=await r.mf.getR2Bucket('RAW'),value=await (await bucket.get(row.normalized_key)).json();assert.equal(value.program.runners.declared_count,6);assert.equal(value.program.identity_evidence,parent.event_id);assert.equal(value.program.runners.entries[2].cancellation_label,'synthetic withdrawal');
+ await r.reset();assert.equal((await r.tick(Date.now(),clock)).status,'RAW_STORED');
+ assert.equal((await r.tick(at,t)).status,'RAW_STORED');assert.equal(r.requests.length,3);
+ const failed=await r.mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify({op:'reparse',event:capture.event_id,target:t,version:nextProgramVersion,fault:'context',context:parent.event_id})});assert.equal(failed.status,503);
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM sports_parses WHERE observation_id=? AND parser_version=?').bind(capture.event_id,nextProgramVersion).first()).n,0);
+ assert.equal(await (await r.call({op:'reparse',event:capture.event_id,target:t,version:nextProgramVersion})).text(),'PROGRAM_PARSED');assert.equal(r.requests.length,3);
+ assert.deepEqual(await (await r.call({...q,cutoff})).json(),before);
  }finally{await r.mf.dispose();}
 });
 test('result normalized-storage failure recovers from the original raw without a second HTTP or observation',async()=>{

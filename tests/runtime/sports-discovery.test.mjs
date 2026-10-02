@@ -62,3 +62,15 @@ test('keirin identity JSON resolves unknown race numbers without inventing cutof
  for(const id of ['keirin:20000102:47:0','keirin:20000101:48:0','keirin:20000101:47:3'])assert.throws(()=>d.parseProgram(fixture.keirinIdentity,{...t,race_id:id}),/IDENTITY/);
  assert.throws(()=>d.parseProgram(fixture.keirinIdentity.replace('"raceNo":"2"','"raceNo":"0"'),t),/ID/);
 });
+
+test('keirin runner support retains declared entrants, frame/withdrawal labels and rejects partial or duplicate support',()=>{
+ const t={sport:'keirin',kind:'schedule',race_id:'keirin:20000101:47:2',url:'https://keirin.jp/pc/json?type=JST010&encp=synthetic-public-navigation',context_event:'synthetic-identity'};
+ const program=d.parseProgram(fixture.keirinRunners,t).program;assert.equal(program.selected.close_at,null);assert.equal(program.identity_evidence,t.context_event);
+ assert.equal(program.runners.declared_count,6);assert.equal(program.runners.entries[2].cancellation_label,'synthetic withdrawal');
+ assert.equal(JSON.stringify(program).includes('synthetic unused name'),false);
+ const raw=JSON.parse(fixture.keirinRunners);raw.data.sensyuInfoList[0].wakuBan='0';assert.equal(d.keirinRunners(JSON.stringify(raw)).entries[0].frame,null);
+ raw.data.sensyuInfoList.pop();assert.throws(()=>d.keirinRunners(JSON.stringify(raw)),/INCOMPLETE/);
+ const duplicate=JSON.parse(fixture.keirinRunners);duplicate.data.sensyuInfoList[1].syaban='1';assert.throws(()=>d.keirinRunners(JSON.stringify(duplicate)),/DUPLICATE/);
+ assert.throws(()=>d.parseProgram(fixture.keirinRunners,{...t,context_event:undefined}),/CONTEXT/);
+ assert.throws(()=>d.parseProgram(fixture.keirinRunners,{...t,race_id:'keirin:20000101:47:0'}),/ID/);
+});

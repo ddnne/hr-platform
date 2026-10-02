@@ -34,7 +34,12 @@ export function discoveryTargets(value:Program,parentObservation?:string):{targe
   if('navigation' in program&&program.navigation&&(value.discovery_stage??'venue')==='venue'){
    if(new Set(program.navigation.map(n=>n.public_navigation)).size!==program.navigation.length)throw new Error('PROGRAM_NAVIGATION');
    for(const n of program.navigation)targets.push(identity(r.venue,n.public_navigation));
-  }else if('public_navigation' in program&&program.public_navigation)targets.push({...live(r.venue,r.race,program.public_navigation,'race'),context_event:parentObservation});
+  }else if('public_navigation' in program&&program.public_navigation){
+   if(!parentObservation)defer(r.race_id,'RACE_CONTEXT_REQUIRED');
+   else {targets.push({...live(r.venue,r.race,program.public_navigation,'race'),context_event:parentObservation});
+    targets.push({...make('keirin',r.venue,r.race),discovery_stage:'race',context_event:parentObservation,
+     url:config.sources.keirin.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:'JST010',encp:program.public_navigation,mode:'0'})});}
+  }
  }
  if(targets.length>config.maximum_plan_entries)throw new Error('PLAN_COUNT');
  for(const t of targets)validateTarget(t);
