@@ -1,7 +1,7 @@
 {
   "version": "sports-shadow-v1",
   "parser_version": "sports-odds-v1",
-  "program_parser_version": "sports-program-v2",
+  "program_parser_version": "sports-program-v3",
   "result_parser_version": "sports-result-v1",
   "interval_seconds": 120,
   "request_spacing_seconds": 5,
@@ -43,7 +43,9 @@
         "JST010",
         "JST011",
         "JSJ012"
-      ]
+      ],
+      "maximum_entrant_number": 9,
+      "maximum_frame_number": 6
     },
     "auto": {
       "origin": "https://autorace.jp",

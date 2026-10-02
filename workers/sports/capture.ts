@@ -2,7 +2,7 @@ import {boundedBody,discard,fetchPublic,retryAfter} from '../http';
 import {digest,iso,publishCapture,saveCapture,type CaptureManifest} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
 import {normalize,normalizationKind,resourceId} from './storage';
-import {validateContext,RaceContextError} from './context';
+import {validateContext,requiresContext,contextNavigation,RaceContextError} from './context';
 export {validateContext} from './context';
 import {date} from './discovery';
 import {supportsResult} from './results';
@@ -19,7 +19,7 @@ export function validateTarget(t:Target):void {
  if(t.sport==='boat'&&['odds','result'].includes(t.kind)){const race=`boat:${u.searchParams.get('hd')}:${Number(u.searchParams.get('jcd'))}:${Number(u.searchParams.get('rno'))}`;if(t.race_id!==race)throw new Error('RACE_ID');}
  if(t.kind==='result'&&!supportsResult(t))throw new Error('RESULT_RESOURCE');
  if(t.sport==='auto'&&u.pathname==='/race_info/RaceResult'&&t.kind!=='result')throw new Error('RESULT_RESOURCE');
- if(t.sport==='keirin'&&(['odds','result'].includes(t.kind)&&(!t.context_event||!u.searchParams.get('encp'))||t.kind==='odds'&&(!t.entrants||!t.market)))throw new Error('RACE_CONTEXT_REQUIRED');
+ if(t.sport==='keirin'&&(requiresContext(t)&&(!t.context_event||!contextNavigation(t))||t.kind==='odds'&&(!t.entrants||!t.market)))throw new Error('RACE_CONTEXT_REQUIRED');
  if(t.sport==='keirin'&&u.pathname==='/pc/json'&&!config.sources.keirin.read_json_types.includes(u.searchParams.get('type')??''))throw new Error('READ_API_REQUIRED');
  if(t.sport==='auto'&&['/race_info/Odds','/race_info/OtherRaceInfo','/race_info/RaceResult'].includes(u.pathname)&&t.body===undefined)throw new Error('READ_POST_REQUIRED');
  if(t.form){if(t.sport!=='keirin'||u.pathname!=='/pc/racelive'||t.kind!=='guest'||new URLSearchParams(t.body).size!==1||!new URLSearchParams(t.body).get('encp'))throw new Error('READ_FORM_REQUIRED');}

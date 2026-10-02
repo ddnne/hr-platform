@@ -3,7 +3,7 @@ import config from '../../configs/sports-collection.json';
 import {parseOdds} from './parsers';
 import {parseProgram,supportsProgram,type Program} from './discovery';
 import {parseResult,supportsResult} from './results';
-import {validateContext,RaceContextError} from './context';
+import {validateContext,requiresContext,RaceContextError} from './context';
 import type {Sport,Target} from './types';
 export function normalizationKind(t:Target):'odds'|'program'|'result'|null {
  return supportsProgram(t)?'program':supportsResult(t)?'result':t.kind==='odds'?'odds':null;
@@ -23,7 +23,7 @@ export async function normalize(env:CaptureStorage,event:string,target:Target,ve
  const raw=await env.RAW.get(`raw/${observation.raw_sha256}`);if(!raw)throw new Error('RAW_MISSING');
  let key:string|null=null,error:string|null=null,status='PARSE_ERROR';
  const text=await raw.text();let result;
- if(kind==='result'&&target.sport==='keirin'){
+ if(requiresContext(target)){
   try{await validateContext(target,env);}catch(e){if(!(e instanceof RaceContextError))throw e;error='INVALID_CONTEXT';}
  }
  try {

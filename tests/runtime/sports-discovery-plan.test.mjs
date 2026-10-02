@@ -24,7 +24,9 @@ test('keirin links first resolve a response identity then obtain that race clock
  const t={...target('keirin','47:0','https://keirin.jp/pc/racelive'),kind:'guest',form:true,body:'encp=synthetic-public-navigation',discovery_stage:'venue'};
  const p=d.parseProgram(fixture.keirinProgram,t),plan=d.discoveryTargets(p);assert.equal(plan.targets.length,3);
  assert.ok(plan.targets.every(t=>t.race_id==='keirin:20000101:47:0'));assert.deepEqual(plan.targets.map(t=>new URL(t.url).searchParams.get('encp')),['synthetic-public-navigation-1','synthetic-public-navigation-2','synthetic-public-navigation-3']);
- const resolved=d.parseProgram(fixture.keirinIdentity,plan.targets[0]);const child=d.discoveryTargets(resolved,'synthetic-identity-observation').targets[0];
+ const resolved=d.parseProgram(fixture.keirinIdentity,plan.targets[0]);const children=d.discoveryTargets(resolved,'synthetic-identity-observation').targets;assert.equal(children.length,2);const child=children[0];
+ assert.equal(new URL(children[1].url).searchParams.get('type'),'JST010');assert.equal(children[1].context_event,'synthetic-identity-observation');
+ assert.equal(d.discoveryTargets(resolved).deferred[0].reason,'RACE_CONTEXT_REQUIRED');
  assert.equal(child.race_id,'keirin:20000101:47:2');assert.equal(child.context_event,'synthetic-identity-observation');assert.equal(new URLSearchParams(child.body).get('encp'),'synthetic-public-navigation-1');
  assert.deepEqual(d.discoveryTargets(d.parseProgram(fixture.keirinProgram,child)).targets,[]);
  const duplicate=structuredClone(p);duplicate.program.navigation[1].public_navigation=duplicate.program.navigation[0].public_navigation;assert.throws(()=>d.discoveryTargets(duplicate),/NAVIGATION/);

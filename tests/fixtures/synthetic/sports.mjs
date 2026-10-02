@@ -20,3 +20,7 @@ export const keirinIdentity=JSON.stringify({resultCd:0,data:{kaisaiDate:'2000010
 export const keirinProgram='<script>jsonData["PC0201"] = '+JSON.stringify({resultCd:0,C0201data:{selKaisai:'20000101',selKjyoCd:'47',selRaceNo:'2',cntRace:0,
  C0201racedtl:{aftStartTime:'17:05',aftBetTime:'17:02',bfrStartTime:'17:00',bfrBetTime:'16:57'},
  C0201race:[1,2,3].map(i=>({encParaR:'synthetic-public-navigation-'+i,flgRaceEnd:i===1?'1':'0'}))}})+';</script>';
+
+// Fabricated runner support, separate from odds and result displays.
+export const keirinRunners=JSON.stringify({resultCd:0,data:{syaCnt:'6',wakuKbn:'synthetic category',
+ sensyuInfoList:Array.from({length:6},(_,i)=>({syaban:String(i+1),wakuBan:String(i+1),kesyaFlg:i===2?'synthetic withdrawal':'0',sensyuSei4Char:'synthetic unused name'}))}});
