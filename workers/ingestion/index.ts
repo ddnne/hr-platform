@@ -5,6 +5,7 @@ import {ensureDaily} from "./daily";
 import {registerPage, registerEvidenceBatch, type PageTarget} from "./pages";
 export {capture, retryAfter, boundedBody, sampleSlotAllowed} from "./capture";
 export {NarCollector} from "./daily";
+export {PaperClock} from "./paper-clock";
 
 /** Private startup/diagnostic binding; all collection still uses the shared gates. */
 export class CollectionControl extends WorkerEntrypoint<Env> {

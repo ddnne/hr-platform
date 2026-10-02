@@ -209,7 +209,8 @@ def test_staging_copies_only_allowlisted_sources_and_refuses_existing_directory(
     config = json.loads((root / "wrangler.jsonc").read_text())
     assert not config["workers_dev"] and not config["preview_urls"] and config["triggers"]["crons"] == []
     if with_storage:
-        assert config['durable_objects']['bindings'] == [{'name': 'PAPER_CLOCK', 'class_name': 'PaperClock'}]
+        assert config['durable_objects']['bindings'] == [{'name': 'PAPER_CLOCK', 'class_name': 'PaperClock',
+                                                         'script_name': 'hr-platform-dev-ingestion'}]
         assert config['migrations'] == [{'tag': 'paper-clock-v1', 'new_sqlite_classes': ['PaperClock']}]
         assert config['services'] == [{'binding': 'COLLECTION', 'service': 'hr-platform-dev-ingestion',
                                        'entrypoint': 'CollectionControl'}]
