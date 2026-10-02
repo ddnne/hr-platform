@@ -47,6 +47,10 @@
       {
         "name": "COLLECTOR",
         "class_name": "NarCollector"
+      },
+      {
+        "name": "PAPER_CLOCK",
+        "class_name": "PaperClock"
       }
     ]
   },
@@ -56,6 +60,10 @@
       "new_sqlite_classes": [
         "NarCollector"
       ]
+    },
+    {
+      "tag": "paper-clock-v1",
+      "new_sqlite_classes": ["PaperClock"]
     }
   ]
 }

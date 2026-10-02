@@ -12,36 +12,12 @@ def paper_engine(env):
 
 
 class PaperClock(DurableObject):
-    """One persistent timer for the next existing Paper plan; no source requests."""
-
-    def __init__(self, ctx, env):
-        super().__init__(ctx, env)
-        import asyncio
-        self.lock = asyncio.Lock()
-        self.running = False
+    """Retire alarms from the former Python timer without loading the model."""
 
     async def sync(self):
-        async with self.lock:
-            # The running handler re-reads the schedule before deciding and
-            # re-arms afterwards. Do not duplicate its short wait.
-            if self.running:
-                return
-            at = await paper_engine(self.env).next_alarm() if self.env.PAPER_ENABLED == 'true' else None
-            if at is None:
-                await self.ctx.storage.deleteAlarm()
-            elif await self.ctx.storage.getAlarm() != at:
-                await self.ctx.storage.setAlarm(at)
+        await self.ctx.storage.deleteAlarm()
 
     async def alarm(self, info=None):
-        if self.env.PAPER_ENABLED != 'true':
-            await self.sync()
-            return
-        self.running = True
-        try:
-            await paper_engine(self.env).tick(wait_for_due=True)
-        finally:
-            self.running = False
-        # On failure, leave retries to the platform and the existing Cron.
         await self.sync()
 
 
@@ -77,6 +53,15 @@ class Default(WorkerEntrypoint):
             return await task
         finally:
             await self.env.PAPER_CLOCK.getByName('paper').sync()
+
+    async def paper_next_alarm(self):
+        """Private timer RPC; the persisted Paper plan remains authoritative."""
+        return await paper_engine(self.env).next_alarm() if self.env.PAPER_ENABLED == 'true' else None
+
+    async def paper_tick(self):
+        # The timer awaits this RPC and re-arms itself. Do not call back into it.
+        if self.env.PAPER_ENABLED == 'true':
+            await paper_engine(self.env).tick(wait_for_due=True)
 
     async def _normalize_saved(self):
         import json
