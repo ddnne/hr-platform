@@ -61,6 +61,17 @@ export class NarCollector extends DurableObject<Env> {
     await this.ctx.blockConcurrencyWhile(async () => {
       if (await this.ctx.storage.getAlarm() !== null) return;
       let job = await this.ctx.storage.get<Job>("job");
+      if (job) {
+        const previous = await this.env.INDEX.prepare("SELECT status,error_code FROM captures WHERE event_id=?")
+          .bind(eventIdFor(job.kind, job.at)).first<{status: string; error_code: string | null}>();
+        // After an investigated stop is explicitly cleared, schedule a new
+        // observation. Redelivering the failed event would re-latch its stop.
+        // This path cannot clear the source control or alter the old evidence.
+        if (previous && ["FAILED", "INCOMPLETE_FETCH"].includes(previous.status)
+            && ["SOURCE_DENIED", "NON_ZIP_OR_CHALLENGE", "INCOMPLETE_FETCH"].includes(previous.error_code ?? "")) {
+          job = undefined;
+        }
+      }
       if (!job) {
         const previous = await this.ctx.storage.get<number>("lastRaceAt") ?? null;
         job = await this.next(Math.max(Date.now(), control.next_allowed_at), previous);
