@@ -44,9 +44,12 @@ def packet(race_id, start, at, policy, collection):
                            ('payout', policy['payout_after_start_seconds'])]]
 
 
-def input_window(at, policy):
+def input_window(at, policy, collection):
     end = round(instant(at).timestamp() * 1000)
-    return end - (policy['state_before_asof_seconds'] + policy['race_before_asof_seconds']) * 1000, end
+    # nextPage() reserves up to one interval ahead of a regular odds slot.
+    # A page just after the cutoff can still consume its final input slot.
+    return (end - (policy['state_before_asof_seconds'] + policy['race_before_asof_seconds']) * 1000,
+            end + collection['interval_seconds'] * 1000)
 
 
 def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, collection):
@@ -72,7 +75,7 @@ def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, colle
            and abs(r['at'] - at) < collection['interval_seconds'] * 1000 for r in captures):
         return None
     if any(r['race_id'] != race_id and r['decisions'] is None
-           and (window := input_window(r['asof_at'], policy))[0] <= at <= window[1] for r in plans):
+           and (window := input_window(r['asof_at'], policy, collection))[0] <= at <= window[1] for r in plans):
         return None
     requests = [{k: latest[kind][k] for k in ('kind', 'race_id', 'url', 'at')}
                 for kind in ('state', 'race', 'payout')]
@@ -130,7 +133,7 @@ async def schedule_day(paper, collector, base, policy, collection):
         if any(row['race_id'] != race_id and abs(seconds(at, row['asof_at'])) < policy['minimum_decision_spacing_seconds'] for row in rows):
             continue
         # Keep other evidence out of this race's state/race/regular-odds interval.
-        start, end = input_window(at, policy)
+        start, end = input_window(at, policy, collection)
         requested = {f"nar-daily-{r['kind']}:{r['at']}" for r in requests}
         if any(r['capture_status'] is None and start <= r['at'] <= end
                and r['event_id'] not in requested
