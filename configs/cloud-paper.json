@@ -3,5 +3,6 @@
   "lease_seconds": 180,
   "max_future_seconds": 86400,
   "max_pending_plans": 8,
-  "decision_lookahead_seconds": 60
+  "decision_lookahead_seconds": 60,
+  "alarm_lead_seconds": 5
 }

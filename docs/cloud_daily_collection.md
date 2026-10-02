@@ -65,3 +65,9 @@
 4. Macの有限収集は終了済み。旧計画を再開せず、夜の集計もCloudflareの保存結果を使う。移行途中の欠測は残す。
 
 新規登録・メール・問い合わせ送信は行わない。実データ・詳細出力はGit・CI・PRへ含めない。
+
+## レース時刻に合わせたPaper起動
+
+事前に保存した発走予定から判断時刻を計算し、既存D1のPaper計画を予約の正本とする。研究Workerの`PaperClock`が直近の未判断計画を読み、設定`alarm_lead_seconds`（初期5秒）だけ早い時刻のalarmを保存する。起動後は既存の`tick`で固定時刻まで短く待つ。毎分Cron、予定改版・登録の完了後、alarm処理後に同じ予約を同期する。実行直前の予定確認、利用可能時刻、期限超過の見送り、重複防止も共通処理を使う。
+
+Cron設定自体は競走ごとに書き換えない。[公式仕様](https://developers.cloudflare.com/workers/configuration/cron-triggers/)では変更反映に最大15分かかる。[alarm](https://developers.cloudflare.com/durable-objects/api/alarms/)は指定時刻を直接更新できるが、重複配送・遅延があり得るため、固定判断を後からやり直さない。Macの起動は不要。提供元が停止した場合も保存済み計画の適格性を判定し、欠測や鮮度超過では見送る。
