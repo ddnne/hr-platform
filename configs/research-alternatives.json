@@ -1,0 +1,15 @@
+{
+  "version": "quinella-estimators-and-purchases-v1",
+  "target": "quinella",
+  "exacta_power": 1.2,
+  "ensemble_weights": {"reference": 0.25, "win_pl": 0.25, "win_exacta_chain": 0.25, "exacta_power": 0.25},
+  "risk_aversion": 1.0,
+  "minimum_expected_profit_yen": 0.0,
+  "policies": ["max_ev_single", "max_hit_single", "max_profit_probability", "mean_variance"],
+  "consensus_policy": "worst_model_profit_probability",
+  "allocation_rule": "one_stake_unit_per_selection_all_subsets_up_to_existing_budget",
+  "tie_rule": "exact_score_then_fewer_tickets_then_selection_order",
+  "development_dates": ["20261001", "20261002"],
+  "validation_not_before_date": "20261003",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}
