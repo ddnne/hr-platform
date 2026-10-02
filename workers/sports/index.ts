@@ -16,7 +16,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    const resource=await resourceId(entry.target),key=`plan:${entry.at}:${resource}`;
    const recorded=await this.env.INDEX.prepare('SELECT event_id FROM captures WHERE event_id=?').bind(`sports:${entry.target.sport}:${entry.at}:${resource}`).first();
    if(recorded){const saved=await this.env.RAW.get(`manifests/sports:${entry.target.sport}:${entry.at}:${resource}.json`);if(saved){const m=await saved.json<{target:Target}>();if(JSON.stringify(m.target)!==JSON.stringify(entry.target))throw new Error('PLAN_CONFLICT');}}
-   else items[key]=entry;
+   else {if(items[key]&&JSON.stringify(items[key])!==JSON.stringify(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
   }
   // Transactional insertion cannot overwrite another concurrent registration.
   await this.ctx.storage.transaction(async store=>{
@@ -29,6 +29,9 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   await this.arm();return 'REGISTERED';
  }
  async pending():Promise<number> {return (await this.ctx.storage.list({prefix:'plan:'})).size;}
+ async planState():Promise<{pending:number;alarm_at:number|null}> {
+  return {pending:await this.pending(),alarm_at:await this.ctx.storage.getAlarm()};
+ }
  private async arm() {
   await this.ctx.storage.transaction(async store=>{
    const times=[...(await store.list<Entry>({prefix:'plan:'})).values()].map(e=>e.at);
@@ -83,6 +86,10 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  }
 }
 export class SportsControl extends WorkerEntrypoint<SportsEnv> {
+ async planState(sport:Sport):Promise<string> {
+  if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
+  return JSON.stringify(await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).planState());
+ }
  async schedule(payload:string):Promise<string> {
   try {if(payload.length>config.maximum_raw_bytes)throw new Error('INPUT_LIMIT');
    const entries:Entry[]=JSON.parse(payload);if(!Array.isArray(entries)||entries.length<1||entries.length>config.maximum_plan_entries)throw new Error('PLAN_COUNT');

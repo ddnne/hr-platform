@@ -42,9 +42,10 @@ export default {async fetch(req,env){const v=await req.json();
  const bindings=v.fault==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async()=>{throw new Error('INDEX_FAILED');}}}:v.fault==='normalized'?{...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),put:async(k,b)=>{if(k.startsWith('sports/normalized/'))throw new Error('R2_FAILED');return env.RAW.put(k,b);}}}:env;
  return Response.json(await collect(v.at,bindings,v.target));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
-async function runtime(responses=[],enabled=true){
+async function runtime(responses=[],enabled=true,doClass=null){
  const requests=[];
- const mf=new Miniflare(convertV4MiniflareOptions({name:'sports',modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
+ const mf=new Miniflare(convertV4MiniflareOptions({name:'sports',modules:true,script:(doClass?doBundle:bundle).outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
+ ...(doClass?{durableObjects:{SPORTS:{className:doClass,useSQLite:true}}}:{}),
  bindings:{SPORTS_ENABLED:String(enabled),SPORTS_PROVIDERS_JSON:'["auto","boat","keirin"]',COLLECTION_ENABLED:'true',SOURCE_APPROVED:'true'},d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),
  outboundService:async req=>{requests.push({url:req.url,method:req.method,body:await req.text(),cookie:req.headers.get('Cookie')});const matching=responses.findIndex(r=>r.route&&req.url.includes(r.route));const r=responses.splice(matching<0?0:matching,1)[0];if(r instanceof Error)throw r;if(!r)throw new Error('UNEXPECTED_FETCH');return new Response(r.body??autoBody(),{status:r.status??200,headers:r.headers});}}));
  const db=await mf.getD1Database('INDEX');for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
@@ -129,7 +130,42 @@ export class TestGuest extends SportsCollector {
  constructor(ctx,env){let failed=false;super(ctx,{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async(...args)=>{if(!failed){failed=true;throw new Error('GUEST_PUBLICATION_FAILED');}return env.INDEX.batch(...args);}}});}
  async runForTest(now){const clock=Date.now;Date.now=()=>now;try{await this.alarm();}finally{Date.now=clock;}}
 }
-export default {async fetch(req,env){const v=await req.json(),stub=env.SPORTS.get(env.SPORTS.idFromName('auto'));if(v.op==='schedule')return new Response(await stub.schedule(v.entries));if(v.op==='alarm'){await stub.runForTest(v.now);return new Response('ok');}return Response.json(await stub.pending());}};`,resolveDir:process.cwd(),sourcefile:'do-sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+export default {async fetch(req,env){const v=await req.json(),stub=env.SPORTS.get(env.SPORTS.idFromName('auto'));if(v.op==='schedule'){try{return new Response(await stub.schedule(v.entries));}catch(e){return new Response(e.message);}}if(v.op==='alarm'){await stub.runForTest(v.now);return new Response('ok');}return Response.json(v.op==='state'?await stub.planState():await stub.pending());}};`,resolveDir:process.cwd(),sourcefile:'do-sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+test('auto POST resources without a body are rejected before queue or provider access',async()=>{
+ const r=await runtime([],true,'TestSports');try{const at=Date.now()+60000,{body,...missing}=target;
+ for(const [path,kind] of [['Odds','odds'],['OtherRaceInfo','schedule']]){
+  const t={...missing,url:'https://autorace.jp/race_info/'+path,kind};
+  assert.equal(await (await r.call({op:'schedule',entries:[{at,target:t}]})).text(),'READ_POST_REQUIRED');
+ }
+ assert.equal(await (await r.call({op:'pending'})).json(),0);assert.equal(r.requests.length,0);
+ assert.deepEqual(await (await r.call({op:'state'})).json(),{pending:0,alarm_at:null});
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM captures').first()).n,0);
+ assert.equal(await (await r.call({op:'schedule',entries:[{at,target}]})).text(),'REGISTERED');
+ assert.equal(await (await r.call({op:'pending'})).json(),1);
+ assert.deepEqual(await (await r.call({op:'state'})).json(),{pending:1,alarm_at:at});
+ }finally{await r.mf.dispose();}
+});
+test('a batch with conflicting recipes is atomic; identical duplicates keep one reservation',async()=>{
+ const r=await runtime([],true,'TestSports');try{const at=Date.now()+60000;
+ const event='synthetic-keirin-context',hash='synthetic-keirin-context-hash',url='https://keirin.jp/pc/json?type=JST015&encp=synthetic-navigation';
+ await r.db.prepare("INSERT INTO captures(event_id,scheduled_capture_at,status) VALUES(?,'2000-01-01T00:00:00.000000+00:00','RAW_STORED')").bind(event).run();
+ await r.db.prepare("INSERT INTO raw_observations VALUES(?,?,'2000-01-01T00:00:00.000000+00:00','2000-01-01T00:00:00.000000+00:00','body_200','SPORT_KEIRIN_SCHEDULE',NULL,NULL)").bind(event,hash).run();
+ const bucket=await r.mf.getR2Bucket('RAW');await bucket.put('manifests/'+event+'.json',JSON.stringify({url}));
+ await bucket.put('raw/'+hash,JSON.stringify({resultCd:0,data:{kaisaiDate:'20000101',keirinJyoCd:'47',raceNo:'2'}}));
+ const t={sport:'keirin',race_id:'keirin:20000101:47:2',kind:'odds',market:'trifecta',context_event:event,entrants:[1,2,3],url:'https://keirin.jp/pc/json?type=JST011&encp=synthetic-navigation&kake=6&mode=0'};
+ await r.call({op:'schedule',entries:[{at:at+120000,target}]});
+ for(const changed of [{entrants:[1,2,3,4]},{frames:{1:1,2:2,3:3}},{market:'exacta'}]){
+  const batch=[{at:at+240000,target},{at,target:t},{at,target:{...t,...changed}}];
+  assert.equal(await (await r.call({op:'schedule',entries:batch})).text(),'PLAN_CONFLICT');
+  assert.equal(await (await r.call({op:'pending'})).json(),1);
+  assert.deepEqual(await (await r.call({op:'state'})).json(),{pending:1,alarm_at:at+120000});
+ }
+ assert.equal(await (await r.call({op:'schedule',entries:[{at,target:t},{at,target:t}]})).text(),'REGISTERED');
+ assert.equal(await (await r.call({op:'pending'})).json(),2);assert.equal(r.requests.length,0);
+ assert.deepEqual(await (await r.call({op:'state'})).json(),{pending:2,alarm_at:at});
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM captures').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
 test('DO concurrent reservations survive an in-flight capture and are drained separately',async()=>{
  let fetching,release;const fetchingPromise=new Promise(r=>fetching=r),hold=new Promise(r=>release=r);
  const mf=new Miniflare(convertV4MiniflareOptions({name:'sports-do',modules:true,script:doBundle.outputFiles[0].text,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],

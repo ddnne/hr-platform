@@ -13,6 +13,7 @@ export function validateTarget(t:Target):void {
  if(t.sport==='boat'&&['odds','result'].includes(t.kind)){const race=`boat:${u.searchParams.get('hd')}:${Number(u.searchParams.get('jcd'))}:${Number(u.searchParams.get('rno'))}`;if(t.race_id!==race)throw new Error('RACE_ID');}
  if(t.sport==='keirin'&&t.kind==='odds'&&(!t.entrants||!t.market||!t.context_event||!u.searchParams.get('encp')))throw new Error('RACE_CONTEXT_REQUIRED');
  if(t.sport==='keirin'&&u.pathname==='/pc/json'&&!config.sources.keirin.read_json_types.includes(u.searchParams.get('type')??''))throw new Error('READ_API_REQUIRED');
+ if(t.sport==='auto'&&['/race_info/Odds','/race_info/OtherRaceInfo'].includes(u.pathname)&&t.body===undefined)throw new Error('READ_POST_REQUIRED');
  if(t.form){if(t.sport!=='keirin'||u.pathname!=='/pc/racelive'||t.kind!=='guest'||new URLSearchParams(t.body).size!==1||!new URLSearchParams(t.body).get('encp'))throw new Error('READ_FORM_REQUIRED');}
  else if(t.body!==undefined){if(t.sport!=='auto'||!['/race_info/Odds','/race_info/OtherRaceInfo'].includes(u.pathname))throw new Error('READ_POST_REQUIRED');
   const b=JSON.parse(t.body);if(Object.keys(b).sort().join(',')!=='placeCode,raceDate,raceNo'||!Number.isInteger(b.placeCode)||!Number.isInteger(b.raceNo)||!/^\d{4}-\d{2}-\d{2}$/.test(b.raceDate))throw new Error('READ_POST_BODY');
