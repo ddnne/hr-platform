@@ -1,0 +1,15 @@
+{
+  "version": "quinella-expansions-v1",
+  "variants": ["conditional_reference", "conditional_robust", "dependence_half", "dependence_marginal", "trend_damped_joint", "trend_adverse_joint"],
+  "conditional_anchor": "reference_baseline",
+  "conditional_acceptance": "positive_conditional_growth_and_improved_unconditional_portfolio_growth",
+  "dependence_reference_weights": {"dependence_half": 0.5, "dependence_marginal": 0.0},
+  "trend_horizon_seconds": 60,
+  "trend_damping": 0.5,
+  "trend_max_extrapolation_multiple": 1.0,
+  "trend_factor_min": 0.5,
+  "trend_factor_max": 1.5,
+  "development_dates": ["20261001"],
+  "validation_not_before_date": "20261002",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE"
+}
