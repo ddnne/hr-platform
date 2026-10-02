@@ -1,0 +1,60 @@
+{
+  "version": "all-single-race-markets-kelly-v1",
+  "markets": [
+    "win",
+    "place",
+    "quinella",
+    "exacta",
+    "wide",
+    "bracket_quinella",
+    "bracket_exacta",
+    "trio",
+    "trifecta"
+  ],
+  "methods": [
+    "reference",
+    "same_marginals",
+    "pooled",
+    "robust"
+  ],
+  "capital_fractions": {
+    "half": 0.5,
+    "quarter": 0.25
+  },
+  "candidates_per_market": 4,
+  "enumeration_batch_size": 1024,
+  "candidate_rule": "best_single_unit_log_growth_across_models_and_capital_fractions",
+  "objective": "joint_top3_state_log_wealth_including_cash",
+  "range_price_policy": "DISPLAYED_LOWER_BOUND_FOR_PURCHASE_ACTUAL_PUBLISHED_PAYOUT_FOR_EVALUATION",
+  "reference_families": {
+    "win_exacta": [
+      "win",
+      "exacta"
+    ],
+    "trifecta": [
+      "trifecta"
+    ]
+  },
+  "trifecta_pool_weights": {
+    "reference": 0.5,
+    "marginal": 0.5
+  },
+  "reference_selection": "largest_optimization_log_growth_tie_prefers_win_exacta",
+  "place_two_paid_max_runners": 7,
+  "bracket_min_runners_without_withdrawals": 9,
+  "bracket_exacta_venues": [
+    "浦和",
+    "船橋",
+    "大井",
+    "川崎",
+    "金沢"
+  ],
+  "development_dates": [
+    "20261001",
+    "20261002"
+  ],
+  "validation_not_before_date": "20261003",
+  "purpose": "EXPLORATORY_RESEARCH_ONLY_NO_PAPER_WRITE",
+  "rule_source": "https://www.keiba.go.jp/beginner/step3.html",
+  "neutral_diagnostic_tolerance": 1e-08
+}

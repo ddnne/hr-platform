@@ -4,16 +4,17 @@ import math
 
 import numpy as np
 
-from .model import key, marginals, reference, states
+from .model import MODELED, key, marginals, states
 from .research_alternatives import _distribution
+from .research_ticket_events import MARKETS, ticket_catalog
 
 
 def joint_kelly_portfolios(estimates, markets, calibration_markets, base, successors,
-                           portfolio, kelly, config):
+                           portfolio, kelly, config, *, frames=None, place_places=3):
     """Use all prices to screen a common candidate set, then enumerate its stakes.
 
     State compression is exact. Candidate screening is an approximation; it does
-    not find the global optimum over every quoted ticket. Both purchased markets
+    not find the global optimum over every quoted ticket. All purchased markets
     must be excluded from calibration. Same-marginal Q changes rank dependence,
     which can change individual ticket probabilities as well as their covariance.
     """
@@ -26,11 +27,13 @@ def joint_kelly_portfolios(estimates, markets, calibration_markets, base, succes
     bankroll = successors['reference_bankroll_yen']
     tolerance, tie = base['probability_tolerance'], base['tie_tolerance']
     cap = config['candidates_per_market']
-    if (omega != states(horses) or config['markets'] != ['quinella', 'trio']
+    if (omega != states(horses) or not config['markets'] or len(set(config['markets'])) != len(config['markets'])
+            or not set(config['markets']) <= MARKETS
             or config['methods'] != ['reference', 'same_marginals', 'pooled', 'robust']
             or config['candidate_rule'] != 'best_single_unit_log_growth_across_models_and_capital_fractions'
             or config['objective'] != 'joint_top3_state_log_wealth_including_cash'
-            or set(calibration_markets) != {'win', 'exacta'}
+            or not calibration_markets or len(set(calibration_markets)) != len(calibration_markets)
+            or not set(calibration_markets) <= MODELED or set(calibration_markets) & set(config['markets'])
             or set(names) != set(estimates['estimators']) or not {'reference', 'marginal'} <= set(names)
             or any(type(w) not in (int, float) or not math.isfinite(w) or w < 0 for w in weights.values())
             or abs(sum(weights.values()) - 1) > tolerance
@@ -48,7 +51,8 @@ def joint_kelly_portfolios(estimates, markets, calibration_markets, base, succes
     events, prices, catalog = [], [], []
     full_counts = {}
     for market in config['markets']:
-        selections, event, _, _, odds = reference(omega, market, markets[market]['quotes'])
+        selections, event, odds, upper = ticket_catalog(omega, market, markets[market]['quotes'],
+                                                       frames=frames, place_places=place_places)
         probabilities = np.asarray(event @ q.T).T
         # Screen independently of subsequent allocation method, allowing negative
         # standalone candidates too: a joint worst-scenario hedge may still help.
@@ -61,7 +65,9 @@ def joint_kelly_portfolios(estimates, markets, calibration_markets, base, succes
         full_counts[market] = len(selections)
         events.append(event[selected].toarray().T.astype(bool))
         prices.extend(odds[selected])
-        catalog.extend({'market': market, 'selection': key(selections[i])} for i in selected)
+        catalog.extend({'market': market, 'selection': key(selections[i]),
+                        **({'displayed_odds_upper': float(upper[i])} if upper[i] != odds[i] else {})}
+                       for i in selected)
     indicators = np.concatenate(events, axis=1)
     prices = np.asarray(prices)
     patterns, inverse = np.unique(indicators, axis=0, return_inverse=True)
@@ -95,7 +101,7 @@ def joint_kelly_portfolios(estimates, markets, calibration_markets, base, succes
         amounts = unit * np.bincount(selection, minlength=len(catalog))
         chosen = np.flatnonzero(amounts)
         stake = int(amounts.sum())
-        payoff = patterns @ (amounts * prices) - stake
+        payoff = np.einsum('oi,i->o', patterns, amounts * prices) - stake
         growth = np.log1p(payoff / bankroll)
         model = models[method]
         mean = float(model @ payoff)
