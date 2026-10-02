@@ -64,7 +64,7 @@ def test_future_enrollment_registers_one_packet_without_odds_or_results(cloud, c
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('condition', ['capacity', 'stopped', 'late', 'other_packet'])
+@pytest.mark.parametrize('condition', ['capacity', 'stopped', 'late', 'other_packet', 'post_cutoff_packet'])
 def test_ineligible_slots_do_not_enroll_or_fetch(cloud, config, condition):
     async def run():
         p = engine(cloud)
@@ -74,9 +74,9 @@ def test_ineligible_slots_do_not_enroll_or_fetch(cloud, config, condition):
             await p.run("UPDATE source_control SET blocked=1 WHERE source='nar-daily-odds'")
         elif condition == 'late':
             cloud.clock[0] = f.at(0)
-        elif condition == 'other_packet':
+        elif condition in {'other_packet', 'post_cutoff_packet'}:
             await p.run('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)',
-                'another-event', int(instant(f.at(0)).timestamp()*1000),
+                'another-event', int(instant(f.at(5 if condition == 'post_cutoff_packet' else 0)).timestamp()*1000),
                 'payout', 'SYNTHETIC', '20000101:OTHER:1', stamp(f.at(-15)))
         result = await schedule_day(p, collector, config, *policies())
         assert result['status'] in {'SOURCE_STOPPED', 'NO_FUTURE_SLOT', 'COLLECTION_PLAN_PENDING'}
@@ -209,16 +209,17 @@ def test_delay_after_decision_moves_only_payout_and_never_reprices(cloud, config
     asyncio.run(run())
 
 
-def test_delayed_payout_cannot_consume_another_plans_last_odds_slot(cloud, config):
+@pytest.mark.parametrize('other_cutoff', [61, 60, 59, 58])
+def test_delayed_payout_cannot_consume_another_plans_last_odds_slot(cloud, config, other_cutoff):
     async def run():
         p = engine(cloud)
         await observed(p, cloud)
         await schedule_day(p, Collector(p), config, *policies())
         captures = await p.all('SELECT *,NULL AS capture_status FROM page_capture_plans')
         policy, collection = policies()
-        # Payout at 15:00 would be 2 minutes after the other race's metadata
-        # request, but it would consume its final odds slot before 15:01.
-        other = {'race_id': '20000101:OTHER:1', 'asof_at': f.at(61), 'decisions': None}
+        # Payout at 15:00 also preempts odds just before a 14:58/14:59 cutoff:
+        # the collector looks one interval ahead when choosing a page.
+        other = {'race_id': '20000101:OTHER:1', 'asof_at': f.at(other_cutoff), 'decisions': None}
         metadata = {'scheduled_start_at': f.at(44)}
         assert delayed_payout_packet(f.RACE, metadata, captures, [other], f.at(5), policy, collection) is None
         assert delayed_payout_packet(f.RACE, metadata, captures, [], f.at(5), policy, collection)
