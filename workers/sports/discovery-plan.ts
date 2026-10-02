@@ -38,7 +38,7 @@ export function discoveryTargets(value:Program,parentObservation?:string):{targe
    if(!parentObservation)defer(r.race_id,'RACE_CONTEXT_REQUIRED');
    else {targets.push({...live(r.venue,r.race,program.public_navigation,'race'),context_event:parentObservation});
     targets.push({...make('keirin',r.venue,r.race),discovery_stage:'race',context_event:parentObservation,
-     url:config.sources.keirin.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:'JST010',encp:program.public_navigation,mode:'0'})});}
+     url:config.sources.keirin.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:'JST010',encp:program.public_navigation,'url.media.flg':config.sources.keirin.runners_media_flag})});}
   }
  }
  if(targets.length>config.maximum_plan_entries)throw new Error('PLAN_COUNT');

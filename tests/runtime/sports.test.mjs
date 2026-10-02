@@ -157,7 +157,7 @@ test('keirin result collection verifies the same public navigation context befor
 test('keirin runners reuse identity/storage/history and recover a temporary context read without another HTTP',async()=>{
  const r=await runtime([{body:keirinIdentity},{body:keirinRunners},{body:keirinProgram}]);try{
  const ctx={sport:'keirin',race_id:'keirin:20000101:47:2',kind:'schedule',url:'https://keirin.jp/pc/json?type=JST015&encp=synthetic-public-navigation'};
- const parent=await r.tick(Date.now(),ctx);await r.reset();const t={...ctx,url:ctx.url.replace('JST015','JST010'),context_event:parent.event_id};
+ const parent=await r.tick(Date.now(),ctx);await r.reset();const t={...ctx,url:ctx.url.replace('JST015','JST010')+'&url.media.flg=1',context_event:parent.event_id};
  assert.equal((await r.tick(Date.now(),{...t,race_id:'keirin:20000101:47:3'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
  const clock={...t,kind:'guest',url:'https://keirin.jp/pc/racelive',form:true,body:'encp=synthetic-public-navigation',discovery_stage:'race'};
  assert.equal((await r.tick(Date.now(),{...clock,race_id:'keirin:20000101:47:3'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
