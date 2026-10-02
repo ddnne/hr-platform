@@ -108,7 +108,7 @@ export function keirinRunners(raw:string) {
  const v=JSON.parse(raw),d=v.data;if(v.resultCd!==0||!d||!Array.isArray(d.sensyuInfoList))throw new Error('PROGRAM_NOT_READY');
  const count=integer(d.syaCnt,config.sources.keirin.maximum_entrant_number);
  if(d.sensyuInfoList.length!==count)throw new Error('PROGRAM_INCOMPLETE');
- const entries=d.sensyuInfoList.map((p:any)=>({entrant:integer(p.syaban,config.sources.keirin.maximum_entrant_number),
+ const entries:{entrant:number;frame:number|null;frame_label:string|null;cancellation_label:string|null}[]=d.sensyuInfoList.map((p:any)=>({entrant:integer(p.syaban,config.sources.keirin.maximum_entrant_number),
   frame:p.wakuBan===null||p.wakuBan===undefined||String(p.wakuBan).trim()===''||Number(p.wakuBan)===0?null:integer(p.wakuBan,config.sources.keirin.maximum_frame_number),
   frame_label:label(p.wakuBan),cancellation_label:label(p.kesyaFlg)})).sort((a:any,b:any)=>a.entrant-b.entrant);
  if(new Set(entries.map((p:any)=>p.entrant)).size!==entries.length)throw new Error('PROGRAM_DUPLICATE');

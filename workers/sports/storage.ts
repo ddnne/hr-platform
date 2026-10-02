@@ -56,7 +56,9 @@ export async function savedProgram(env:CaptureStorage,event:string,at=Date.now()
  if(!row||row.status!=='PROGRAM_PARSED'||!row.normalized_key)throw new Error('PROGRAM_UNAVAILABLE');
  if(at-Date.parse(row.received_at)>config.discovery.maximum_program_age_seconds*1000)throw new Error('PROGRAM_STALE');
  const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
- return {value:await object.json<Program>(),available_at:row.available_at,received_at:row.received_at};
+ const manifest=await env.RAW.get(`manifests/${event}.json`);if(!manifest)throw new Error('MANIFEST_REQUIRED');
+ const {target}=await manifest.json<{target:Target}>();if(!target)throw new Error('PARSE_RECIPE_REQUIRED');
+ return {value:await object.json<Program>(),target,available_at:row.available_at,received_at:row.received_at};
 }
 export async function history(env:CaptureStorage,sport:Sport,race:string,cutoff:string,limit=config.maximum_history_rows,after='',kind:'odds'|'program'|'result'='odds') {
  if(!Number.isFinite(Date.parse(cutoff)) || !Number.isInteger(limit)||limit<1||limit>config.maximum_history_rows)throw new Error('HISTORY_QUERY');
