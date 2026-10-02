@@ -223,3 +223,45 @@ def test_delayed_payout_cannot_consume_another_plans_last_odds_slot(cloud, confi
         assert delayed_payout_packet(f.RACE, metadata, captures, [other], f.at(5), policy, collection) is None
         assert delayed_payout_packet(f.RACE, metadata, captures, [], f.at(5), policy, collection)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('condition', ['missed', 'pending', 'stored', 'failed', 'stopped', 'conflict'])
+def test_missed_payout_reserves_new_observation_without_rewriting_old_plan(cloud, config, condition):
+    async def run():
+        p = engine(cloud)
+        await observed(p, cloud)
+        collector = Collector(p)
+        result = await schedule_day(p, collector, config, *policies())
+        original = await p.plan(result['plan_id'])
+        cloud.clock[0] = f.at(4, 10)
+        decisions = await p.decide(original['id'])
+        payout = (await p.all("SELECT * FROM page_capture_plans WHERE kind='payout'"))[0]
+        status = {'pending': None, 'stored': 'RAW_STORED', 'failed': 'FAILED'}.get(condition, 'MISSED_WINDOW')
+        if status:
+            await p.run('INSERT INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,?)',
+                        payout['event_id'], stamp(f.at(30)), status)
+        cloud.clock[0] = f.at(40)
+        if condition == 'stopped':
+            await p.run("UPDATE source_control SET blocked=1 WHERE source='nar-daily-odds'")
+        if condition == 'conflict':
+            # A new payout at :46 must not consume the other race's last odds slot.
+            await p.run('''INSERT INTO cloud_paper_plans(plan_id,experiment,race_id,day,asof_at,plan_body,registered_at)
+                SELECT ?,experiment,?,day,?,json_set(plan_body,'$.revision_id','other-revision'),registered_at
+                FROM cloud_paper_plans LIMIT 1''',
+                        'other-plan', '20000101:OTHER:1', stamp(f.at(47)))
+        outcome = await schedule_day(p, collector, config, *policies())
+        if condition == 'missed':
+            assert outcome['status'] == 'PAYOUT_RESCHEDULED'
+            assert collector.calls[1][:2] == collector.calls[0][:2]
+            assert collector.calls[1][-1]['at'] == round(instant(f.at(46)).timestamp() * 1000)
+            assert (await schedule_day(p, collector, config, *policies()))['status'] == 'NO_FUTURE_SLOT'
+            assert len(collector.calls) == 2
+        else:
+            assert outcome['status'] == ('SOURCE_STOPPED' if condition == 'stopped' else 'NO_FUTURE_SLOT')
+            assert len(collector.calls) == 1
+        assert await p.first('SELECT * FROM page_capture_plans WHERE event_id=?', payout['event_id']) == payout
+        saved = await p.first('SELECT status FROM captures WHERE event_id=?', payout['event_id'])
+        assert (saved['status'] if saved else None) == status
+        assert await p.plan(original['id']) == original
+        assert await p.decide(original['id']) == decisions
+    asyncio.run(run())
