@@ -70,3 +70,21 @@ test('keirin odds recipes use the same fixed identity and published support, ret
  const venue={...t,race_id:'keirin:20000101:47:0',discovery_stage:'venue',context_event:undefined};
  assert.equal(d.oddsTargets({target:venue,value:d.parseProgram(fixture.keirinProgram,venue)},t.race_id,at,runners).deferred[0].reason,'RACE_CONTEXT_REQUIRED');
 });
+test('keirin frame availability follows the saved provider flag even when dummy frame numbers exist',()=>{
+ const t={...target('keirin','47:2','https://keirin.jp/pc/racelive'),kind:'guest',form:true,body:'encp=synthetic-public-navigation',discovery_stage:'race',context_event:'synthetic-identity'};
+ const r={...t,kind:'schedule',form:undefined,body:undefined,url:'https://keirin.jp/pc/json?type=JST010&encp=synthetic-public-navigation&url.media.flg=1'};
+ const clock={value:d.parseProgram(fixture.keirinProgram,t),target:t},at=Date.parse('2000-01-01T00:00:00Z');
+ const raw=JSON.parse(fixture.keirinRunners);raw.data.wakuKbn='0';
+ const runners={value:d.parseProgram(JSON.stringify(raw),r),target:r};
+ const absent=d.oddsTargets(clock,t.race_id,at,runners);
+ assert.deepEqual(absent.targets.map(q=>q.market),['trifecta','exacta','trio','quinella','wide']);
+ assert.deepEqual(absent.deferred,[]);
+ assert.deepEqual(absent.not_offered,[{market:'frame_exacta',source_label:'0'},{market:'frame_quinella',source_label:'0'}]);
+ assert.ok(absent.targets.every(q=>q.entrants.join(',')==='1,2,3,4,5,6'));
+ for(const label of [null,'2']){
+  const unknown=structuredClone(runners);unknown.value.program.runners.frame_category_label=label;
+  const p=d.oddsTargets(clock,t.race_id,at,unknown);
+  assert.equal(p.targets.length,5);assert.deepEqual(p.not_offered,[]);
+  assert.deepEqual(p.deferred.map(q=>q.reason),['FRAME_AVAILABILITY_UNKNOWN','FRAME_AVAILABILITY_UNKNOWN']);
+ }
+});

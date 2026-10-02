@@ -108,7 +108,7 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
   const plan=oddsTargets(source,raceId,at,runners);
   return JSON.stringify({parent_observation:event,available_at:source.available_at,received_at:source.received_at,
    runners_observation:runnersEvent??null,runners_available_at:runners?.available_at??null,runners_received_at:runners?.received_at??null,
-   entries:planEntries(plan.targets,at,now),deferred:plan.deferred});
+   entries:planEntries(plan.targets,at,now),deferred:plan.deferred,not_offered:plan.not_offered});
  }
  async planState(sport:Sport):Promise<string> {
   if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');

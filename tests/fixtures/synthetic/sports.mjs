@@ -33,5 +33,5 @@ export const keirinProgram='<script>jsonData["PC0201"] = '+JSON.stringify({resul
  C0201race:[1,2,3].map(i=>({encParaR:'synthetic-public-navigation-'+i,flgRaceEnd:i===1?'1':'0'}))}})+';</script>';
 
 // Fabricated runner support, separate from odds and result displays.
-export const keirinRunners=JSON.stringify({resultCd:0,data:{syaCnt:'6',wakuKbn:'synthetic category',
+export const keirinRunners=JSON.stringify({resultCd:0,data:{syaCnt:'6',wakuKbn:'1',
  sensyuInfoList:Array.from({length:6},(_,i)=>({syaban:String(i+1),wakuBan:String(i+1),kesyaFlg:i===2?'synthetic withdrawal':'0',sensyuSei4Char:'synthetic unused name'}))}});

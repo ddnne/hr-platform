@@ -53,6 +53,8 @@
       ],
       "maximum_entrant_number": 9,
       "maximum_frame_number": 6,
+      "frame_markets_enabled_label": "1",
+      "frame_markets_disabled_label": "0",
       "runners_media_flag": "1",
       "odds_json_type": "JST011",
       "odds_market_codes": {"trifecta": "6", "exacta": "2", "trio": "7", "quinella": "4", "frame_exacta": "3", "frame_quinella": "1", "wide": "5"}
