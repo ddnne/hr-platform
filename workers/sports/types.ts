@@ -4,6 +4,13 @@ export type Quote = {combination: number[]; display: string; lower: number | nul
 export type Market = {market: string; quotes: Quote[]; expected: number; complete: boolean; source_time_label: string | null};
 export type Snapshot = {schema: 'sports-odds-v1'; sport: Sport; race_id: string; phase: 'INTERMEDIATE' | 'CLOSE_ONLY' | 'FINAL_ONLY' | 'UNKNOWN';
  source_updated_at: null; source_published_at: string | null; time_semantics: string; markets: Market[]};
+export type ResultSnapshot = {schema:'sports-result-v1';sport:Sport;race_id:string;phase:'RESULT_ONLY';publication:'PUBLISHED'|'PENDING';
+ source_updated_at:null;source_published_at:null;source_time_label:string|null;
+ identity_status:'REQUEST_BOUND'|'CONTEXT_VERIFIED';identity_evidence:string|null;
+ payout_unit_yen:null;settlement_qualified:false;
+ placings:{entrant:number;rank_label:string;rank:number|null;state_label:string|null}[];
+ payouts:{market:string;combination:number[]|null;combination_label:string;display:string;amount_yen:number|null;status:'NUMERIC'|'DISPLAY_ONLY'}[];
+ refund_evidence:{display:string|null;source_flags:Record<string,string|boolean|null>}};
 export type Target = {sport: Sport; race_id: string; url: string; body?: string; form?: boolean;
  // Public navigation/guest headers only. Never persisted in capture manifests or logs.
  headers?: Record<string,string>; kind: 'odds' | 'schedule' | 'result' | 'guest'; market?: string; entrants?: number[]; frames?: Record<string,number>; context_event?: string;

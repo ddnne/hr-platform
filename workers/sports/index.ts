@@ -113,8 +113,11 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async programHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'program'));
  }
+ async resultHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
+  return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'result'));
+ }
  async reparse(event:string,version:string):Promise<string> {
-  if(!/^sports:[a-z]+:\d+:[0-9a-f]{64}$/.test(event)||!/^sports-(?:odds|program)-v\d+$/.test(version))throw new Error('PARSER_ID');
+  if(!/^sports:[a-z]+:\d+:[0-9a-f]{64}$/.test(event)||!/^sports-(?:odds|program|result)-v\d+$/.test(version))throw new Error('PARSER_ID');
   const object=await this.env.RAW.get(`manifests/${event}.json`);if(!object)throw new Error('MANIFEST_MISSING');
   const m=await object.json<CaptureManifest & {target:Target}>();return normalize(this.env,event,m.target,version);
  }

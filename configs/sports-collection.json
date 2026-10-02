@@ -2,6 +2,7 @@
   "version": "sports-shadow-v1",
   "parser_version": "sports-odds-v1",
   "program_parser_version": "sports-program-v2",
+  "result_parser_version": "sports-result-v1",
   "interval_seconds": 120,
   "request_spacing_seconds": 5,
   "request_timeout_seconds": 20,
@@ -50,7 +51,8 @@
       "paths": [
         "/race_info/XML/Hold/Today",
         "/race_info/Odds",
-        "/race_info/OtherRaceInfo"
+        "/race_info/OtherRaceInfo",
+        "/race_info/RaceResult"
       ],
       "guest_pages": [
         "/race_info/Live/kawaguchi",
