@@ -55,7 +55,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    await this.ctx.storage.delete('guest-pending');if(repaired.status!=='RAW_STORED'){await this.finish(key,repaired.status);return;}}
   if(Date.now()-entry.at>config.capture_window_seconds*1000){const r=await collect(entry.at,this.env,t);await this.finish(key,r.status);return;}
   const session=await this.ctx.storage.get<Session>('guest-session');
-  if(t.sport==='auto'&&t.kind==='odds'&&(!session||session.expires<Date.now())) {
+  if(t.sport==='auto'&&t.body&&(!session||session.expires<Date.now())) {
    const place=JSON.parse(t.body!).placeCode;
    const page=config.sources.auto.guest_pages.find(p=>p.endsWith(['','','kawaguchi','isesaki','hamamatsu','iizuka','sanyou'][place]));
    if(!page)throw new Error('GUEST_PLACE');
@@ -95,8 +95,11 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async history(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after));
  }
+ async programHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
+  return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'program'));
+ }
  async reparse(event:string,version:string):Promise<string> {
-  if(!/^sports:[a-z]+:\d+:[0-9a-f]{64}$/.test(event)||!/^sports-odds-v\d+$/.test(version))throw new Error('PARSER_ID');
+  if(!/^sports:[a-z]+:\d+:[0-9a-f]{64}$/.test(event)||!/^sports-(?:odds|program)-v\d+$/.test(version))throw new Error('PARSER_ID');
   const object=await this.env.RAW.get(`manifests/${event}.json`);if(!object)throw new Error('MANIFEST_MISSING');
   const m=await object.json<CaptureManifest & {target:Target}>();return normalize(this.env,event,m.target,version);
  }
