@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import importlib.util
+import subprocess
+import sys
 import pytest
 from hr_platform import fixtures as f
 from hr_platform.cloud_model import execute, MAX_INPUT_BYTES
@@ -35,6 +37,29 @@ def test_explicit_newton_selection_uses_shared_math_and_fails_closed(config):
     assert not result["paper_decision_created"]
     p["config"]["solver_max_iter"] = 1
     assert json.loads(execute(json.dumps(p)))["status"] == "MODEL_ERROR"
+
+
+def test_newton_in_fresh_process_does_not_load_other_solver_packages(config):
+    p = payload(config)
+    p["config"]["solver"] = "WIN_EXACTA_NEWTON_V1"
+    child = subprocess.run([sys.executable, "-c", """
+import builtins, json, sys
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name.split('.')[0] in {'cvxpy', 'clarabel'}:
+        raise AssertionError('unused solver imported')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+from hr_platform.cloud_model import execute
+p = json.load(sys.stdin)
+result = json.loads(execute(json.dumps(p)))
+assert result['status'] == 'ANALYZED', result['status']
+assert set(result['runtime_versions']) == {'python', 'numpy', 'scipy'}
+next(iter(p['markets']['exacta']['quotes'].values()))['display_status'] = 'UNKNOWN'
+assert json.loads(execute(json.dumps(p)))['status'] == 'DATA_MISSING'
+assert not {'cvxpy', 'clarabel'} & sys.modules.keys()
+"""], input=json.dumps(p), text=True, capture_output=True, timeout=30)
+    assert child.returncode == 0, child.stderr
 
 
 def test_nonadvancing_runtime_clock_does_not_claim_zero_computation_time(config, monkeypatch):

@@ -11,7 +11,7 @@ import time
 import warnings
 
 MAX_INPUT_BYTES = 1024 * 1024
-VERSION = "python-worker-model-v4"
+VERSION = "python-worker-model-v5"
 
 
 def clock_timings(value):
@@ -86,8 +86,6 @@ def execute(payload):
         return json.dumps({**envelope, "status": "INPUT_ERROR"})
     try:
         from .model import analyze, ModelError
-        import cvxpy
-        import clarabel
         import scipy
         import numpy
 
@@ -105,6 +103,11 @@ def execute(payload):
         status = (
             "REFERENCE_INCONSISTENT" if result["identification"]["status"] == "INCONSISTENT" else "ANALYZED"
         )
+        versions = {"python": platform.python_version(), "scipy": scipy.__version__, "numpy": numpy.__version__}
+        if data["config"]["solver"] == "CLARABEL":
+            import cvxpy
+            import clarabel
+            versions.update(cvxpy=cvxpy.__version__, clarabel=clarabel.__version__)
         return json.dumps(
             clock_timings(
                 {
@@ -112,13 +115,7 @@ def execute(payload):
                     "status": status,
                     "analysis": result,
                     "duration_ms": (time.perf_counter() - started) * 1000,
-                    "runtime_versions": {
-                        "python": platform.python_version(),
-                        "cvxpy": cvxpy.__version__,
-                        "clarabel": clarabel.__version__,
-                        "scipy": scipy.__version__,
-                        "numpy": numpy.__version__,
-                    },
+                    "runtime_versions": versions,
                 }
             ),
             allow_nan=False,

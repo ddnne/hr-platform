@@ -2,7 +2,6 @@
 
 from itertools import permutations
 import time
-import cvxpy as cp
 import numpy as np
 from scipy import sparse
 from scipy.optimize import linprog
@@ -70,6 +69,8 @@ def reference(omega, market, quotes):
 
 
 def solve(problem, q, tolerance=1e-7, max_iter=300):
+    import cvxpy as cp
+
     begin = time.perf_counter()
     try:
         problem.solve(
@@ -127,6 +128,8 @@ def fit(omega, markets, target, refs, regularization=1e-4, weights=None, max_ite
             except FloatingPointError as exc:
                 raise ModelError("NEWTON_NUMERIC") from exc
     else:
+        import cvxpy as cp
+
         # States with identical reference outcomes must share mass equally at the KL optimum.
         # Collapse these classes exactly, improving conditioning without changing the objective.
         groups = {}
