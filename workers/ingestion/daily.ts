@@ -3,7 +3,7 @@ import {DurableObject} from "cloudflare:workers";
 import {capture, eventIdFor, lastMonthlyAttempt, SOURCE, type CaptureKind} from "./capture";
 import collection from "../../configs/collection.json";
 import policy from "../../configs/cloud-collection.json";
-import {nextPage, type PageTarget} from "./pages";
+import {nextPage, type PageTarget, type PagePlan} from "./pages";
 
 type Job = {at: number; kind: CaptureKind; date: string; page?: PageTarget; planned?: boolean};
 type Control = {blocked: number; next_allowed_at: number};
@@ -11,6 +11,9 @@ const DAY = 86_400_000;
 const enabled = (env: Env) => env.DAILY_COLLECTION_ENABLED === "true"
   && env.COLLECTION_ENABLED === "true" && env.SOURCE_APPROVED === "true";
 const minute = (s: string) => {const [h, m] = s.split(":").map(Number); return h * 60 + m;};
+const pageJob = (page: PagePlan): Job => ({at: page.at, kind: page.kind,
+  date: page.race_id.split(":")[0], planned: true,
+  ...(["state", "payout"].includes(page.kind) ? {page: page as PageTarget} : {})});
 
 /** Public source windows are JST; actual receipt clocks are never shifted. */
 export function nextJob(after: number, lastRaceAt: number | null): Job {
@@ -47,8 +50,7 @@ export class NarCollector extends DurableObject<Env> {
     }
     // Previously reserved state/payout slots take precedence over the archive.
     const page = await nextPage(this.env, regular.at);
-    return page ? {at: page.at, kind: page.kind, date: page.race_id.split(":")[0], planned: true,
-      ...(["state", "payout"].includes(page.kind) ? {page: page as PageTarget} : {})} : regular;
+    return page ? pageJob(page) : regular;
   }
   private async control(): Promise<Control | null> {
     return this.env.INDEX.prepare("SELECT blocked,next_allowed_at FROM source_control WHERE source=?")
@@ -59,8 +61,24 @@ export class NarCollector extends DurableObject<Env> {
     const control = await this.control();
     if (!control || control.blocked) return;
     await this.ctx.blockConcurrencyWhile(async () => {
-      if (await this.ctx.storage.getAlarm() !== null) return;
+      const alarm = await this.ctx.storage.getAlarm();
       let job = await this.ctx.storage.get<Job>("job");
+      if (alarm !== null) {
+        // A newly reserved page may precede the existing overnight alarm.
+        // Keep due/in-flight work; any replacement obeys the provider wait/window.
+        if (job && job.at > Date.now() && alarm > Date.now()) {
+          const window = collection.capture_window_seconds * 1000;
+          const page = await nextPage(this.env, job.at, Math.max(Date.now() + 1, control.next_allowed_at) - window);
+          const executionAt = page ? Math.max(Date.now() + 1, page.at, control.next_allowed_at) : Infinity;
+          if (page && executionAt <= page.at + window
+              && (executionAt < job.at || executionAt === job.at && !job.planned && !job.page)) {
+            job = pageJob(page);
+            await this.ctx.storage.put("job", job);
+            await this.ctx.storage.setAlarm(executionAt);
+          }
+        }
+        return;
+      }
       if (job) {
         const previous = await this.env.INDEX.prepare("SELECT status,error_code FROM captures WHERE event_id=?")
           .bind(eventIdFor(job.kind, job.at)).first<{status: string; error_code: string | null}>();

@@ -99,10 +99,10 @@ export async function registerEvidenceBatch(env: Env, entries: (EvidenceTarget &
   return rows.map(e => e.event_id);
 }
 
-export async function nextPage(env: Env, nextRegularAt: number): Promise<PagePlan | null> {
+export async function nextPage(env: Env, nextRegularAt: number, earliestAt: number | null = null): Promise<PagePlan | null> {
   // A page consumes a regular provider slot. It never adds a parallel request.
   // Keep an expired plan's original time, so capture records a gap without fetching.
   return env.INDEX.prepare(`SELECT p.* FROM page_capture_plans p LEFT JOIN captures c USING(event_id)
-    WHERE c.event_id IS NULL AND p.at<=? ORDER BY p.at,p.event_id LIMIT 1`)
-    .bind(nextRegularAt + collection.interval_seconds * 1000).first<PagePlan>();
+    WHERE c.event_id IS NULL AND p.at<=? AND (? IS NULL OR p.at>=?) ORDER BY p.at,p.event_id LIMIT 1`)
+    .bind(nextRegularAt + collection.interval_seconds * 1000, earliestAt, earliestAt).first<PagePlan>();
 }
