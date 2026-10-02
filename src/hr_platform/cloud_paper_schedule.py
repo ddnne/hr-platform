@@ -52,6 +52,13 @@ def input_window(at, policy, collection):
             end + collection['interval_seconds'] * 1000)
 
 
+def overlaps_pending_input(race_id, times, plans, policy, collection):
+    """Apply the same protection to new packets and replacement payouts."""
+    return any(r['race_id'] != race_id and r['decisions'] is None
+               and any((window := input_window(r['asof_at'], policy, collection))[0] <= at <= window[1]
+                       for at in times) for r in plans)
+
+
 def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, collection):
     """Keep inputs; reserve a future payout after a delay or missed window."""
     if not metadata.get('scheduled_start_at'):
@@ -74,8 +81,7 @@ def delayed_payout_packet(race_id, metadata, captures, plans, now, policy, colle
     if any(r['race_id'] != race_id and r['capture_status'] is None
            and abs(r['at'] - at) < collection['interval_seconds'] * 1000 for r in captures):
         return None
-    if any(r['race_id'] != race_id and r['decisions'] is None
-           and (window := input_window(r['asof_at'], policy, collection))[0] <= at <= window[1] for r in plans):
+    if overlaps_pending_input(race_id, [at], plans, policy, collection):
         return None
     requests = [{k: latest[kind][k] for k in ('kind', 'race_id', 'url', 'at')}
                 for kind in ('state', 'race', 'payout')]
@@ -131,6 +137,9 @@ async def schedule_day(paper, collector, base, policy, collection):
         if not minimum_lead < lead <= policy['enrollment_horizon_seconds']:
             continue
         if any(row['race_id'] != race_id and abs(seconds(at, row['asof_at'])) < policy['minimum_decision_spacing_seconds'] for row in rows):
+            continue
+        # New evidence must also preserve earlier enrolled races' final odds.
+        if overlaps_pending_input(race_id, [r['at'] for r in requests], rows, policy, collection):
             continue
         # Keep other evidence out of this race's state/race/regular-odds interval.
         start, end = input_window(at, policy, collection)
