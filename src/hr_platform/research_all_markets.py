@@ -19,11 +19,17 @@ def offered_markets(runners, venue, config):
             or frames_sold and (m != 'bracket_exacta' or venue in config['bracket_exacta_venues'])]
 
 
-def all_market_portfolios(estimates, markets, venue, frames, base, successors, portfolio, kelly, config):
+def all_market_portfolios(estimates, markets, venue, frames, base, successors, portfolio, kelly, config,
+                          *, actual_offered=None, calibration_refs=None, place_places=None):
     omega = [tuple(s) for s in estimates['omega']]
     runners = sorted({h for s in omega for h in s})
-    offered = offered_markets(runners, venue, config)
-    places = 2 if len(runners) <= config['place_two_paid_max_runners'] else 3
+    inferred = offered_markets(runners, venue, config)
+    offered = inferred if actual_offered is None else list(actual_offered)
+    if not offered or len(set(offered)) != len(offered) or not set(offered) <= MARKETS:
+        raise ModelError('OFFERED_MARKETS')
+    places = (2 if len(runners) <= config['place_two_paid_max_runners'] else 3) if place_places is None else place_places
+    if places not in {2, 3}:
+        raise ModelError('PLACE_PAID_POSITIONS')
     if set(markets) != set(offered):
         raise ModelError('ALL_MARKETS_REQUIRED')
     for market in offered:
@@ -32,13 +38,16 @@ def all_market_portfolios(estimates, markets, venue, frames, base, successors, p
     if selections != omega:
         raise ModelError('TRIFECTA_STATE_ORDER')
     qmarg, diagnostics = same_marginals(omega, probabilities, base['solver_max_iter'])
-    families = {'win_exacta': estimates, 'trifecta': {'omega': omega, 'estimators': {
+    primary = 'win_exacta' if calibration_refs is None else 'primary'
+    refs_by_family = config['reference_families'] if calibration_refs is None else {
+        primary: list(calibration_refs), 'trifecta': ['trifecta']}
+    families = {primary: estimates, 'trifecta': {'omega': omega, 'estimators': {
         'reference': {'q': probabilities.tolist()}, 'marginal': {'q': qmarg.tolist()}}}}
     proposals = {}
-    for family, refs in config['reference_families'].items():
+    for family, refs in refs_by_family.items():
         options = {**config, 'markets': [m for m in offered if m not in refs]}
         allocation = {**portfolio, 'enumeration_batch_size': config['enumeration_batch_size']}
-        weights = kelly if family == 'win_exacta' else {**kelly, 'pool_weights': config['trifecta_pool_weights']}
+        weights = kelly if family == primary else {**kelly, 'pool_weights': config['trifecta_pool_weights']}
         rows = joint_kelly_portfolios(families[family], markets, refs, base, successors, allocation, weights,
                                      options, frames=frames, place_places=places)
         for label, choice in rows.items():
