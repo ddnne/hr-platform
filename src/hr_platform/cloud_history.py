@@ -211,22 +211,38 @@ class CloudHistory:
                 'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
 
     async def asof(self, race_id, markets, at, max_age=300):
+        cutoff = self.cutoff(at)
+        if type(max_age) not in {int, float} or not math.isfinite(max_age) or max_age < 0:
+            raise ValueError('MAX_AGE')
+        records = await self._market_records(race_id, markets, cutoff, final_only=False)
+        return {**asof_view({m: [r] for m, r in records.items()}, markets, at, max_age),
+                'gap_coverage': 'UNQUALIFIED_CAPTURE_PLAN', 'paper_eligible': False,
+                'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
+
+    async def final_prices(self, race_id, markets, at):
+        """Post-race prices only; never an eligible pre-race input view."""
+        cutoff = self.cutoff(at)
+        records = await self._market_records(race_id, markets, cutoff, final_only=True)
+        return {'race_id': race_id, 'asof_at': cutoff, 'markets': records,
+                'missing_markets': [m for m in markets if m not in records],
+                'purpose': 'POST_RACE_FINAL_PRICE_EVALUATION', 'paper_eligible': False,
+                'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
+
+    async def _market_records(self, race_id, markets, cutoff, *, final_only):
+        """Resolve both price uses through one query and body reader."""
         from .parser import MARKETS
 
-        cutoff = self.cutoff(at)
         if (not isinstance(markets, list) or not markets or any(h not in MARKETS.values() for h in markets)
                 or len(set(markets)) != len(markets)):
             raise ValueError('MARKETS')
-        if type(max_age) not in {int, float} or not math.isfinite(max_age) or max_age < 0:
-            raise ValueError('MAX_AGE')
-        histories, bodies = {h: [] for h in markets}, {}
+        records, bodies = {}, {}
         for market in markets:
             # Resolve the latest successful parse of each observation BEFORE
             # filtering by race/market. A removed market/race cannot resurrect.
-            row = await self.first("""SELECT p.*,o.raw_sha256,o.received_at,o.raw_saved_at,o.dataset_kind
+            row = await self.first(f"""SELECT p.*,o.raw_sha256,o.received_at,o.raw_saved_at,o.dataset_kind
                 FROM odds_parses p JOIN raw_observations o USING(observation_id)
                 JOIN odds_races r USING(parse_id)
-                WHERE p.status='OK' AND p.available_at<=? AND o.dataset_kind!='FINAL_ONLY'
+                WHERE p.status='OK' AND p.available_at<=? AND o.dataset_kind{'=' if final_only else '!='}'FINAL_ONLY'
                 AND NOT EXISTS (SELECT 1 FROM odds_parses newer
                   WHERE newer.observation_id=p.observation_id AND newer.status='OK' AND newer.available_at<=?
                   AND (newer.available_at,newer.parse_id)>(p.available_at,p.parse_id))
@@ -238,13 +254,10 @@ class CloudHistory:
             if row['body_hash'] not in bodies:
                 bodies[row['body_hash']] = await self.race_body(row, race_id)
             race = bodies[row['body_hash']]
-            histories[market].append({
+            records[market] = {
                 **{k: row[k] for k in ('parse_id', 'observation_id', 'available_at', 'received_at', 'raw_saved_at')},
                 'raw_hash': row['raw_sha256'], 'body_hash': row['body_hash'],
                 'state_hash': identity(race['state']), 'event': {'dataset_kind': row['dataset_kind']},
                 'content': {'state': race['state'], 'market': market, **race['markets'][market]},
-            })
-        # Raw observation rows do not establish coverage of unexecuted plans.
-        return {**asof_view(histories, markets, at, max_age),
-                'gap_coverage': 'UNQUALIFIED_CAPTURE_PLAN', 'paper_eligible': False,
-                'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
+            }
+        return records
