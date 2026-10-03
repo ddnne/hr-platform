@@ -2,7 +2,7 @@
 import config from '../../configs/sports-collection.json';
 import {validateTarget} from './capture';
 import {contextNavigation} from './context';
-import type {Program} from './discovery';
+import {programRaces,type Program} from './discovery';
 import type {Target} from './types';
 type Source={value:Program;target:Target};
 export function oddsTargets(source:Source,raceId:string,at:number,runners?:Source) {
@@ -10,7 +10,7 @@ export function oddsTargets(source:Source,raceId:string,at:number,runners?:Sourc
  validateTarget(target);if(runners)validateTarget(runners.target);
  const defer=(reason:string,market?:string)=>deferred.push({race_id:raceId,reason,...(market?{market}:{})});
  if(target.sport!==value.sport||target.race_id!==value.requested_race_id)throw new Error('PROGRAM_IDENTITY');
- const races='races' in program&&program.races?program.races:'selected' in program&&program.selected?[program.selected]:[];
+ const races=programRaces(program);
  const race=races.find(r=>r.race_id===raceId);if(!race){defer('RACE_NOT_IN_PROGRAM');return {targets,deferred,not_offered};}
  if(!race.close_at){defer('CLOSE_TIME_UNKNOWN');return {targets,deferred,not_offered};}
  const [,day,venue,no]=raceId.split(':'),base:Target={sport:value.sport,race_id:raceId,kind:'odds',url:''};

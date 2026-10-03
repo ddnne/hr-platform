@@ -18,5 +18,6 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
  discovery_stage?: 'venue' | 'race'};
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
+ SPORTS_DAILY_ENABLED?: string;
  SPORTS: DurableObjectNamespace<import('./index').SportsCollector>;
 }

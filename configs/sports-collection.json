@@ -14,7 +14,9 @@
   "sources": {
     "boat": {
       "origin": "https://www.boatrace.jp",
+      "catalog_path": "/owpc/pc/race/index",
       "program_path": "/owpc/pc/race/raceindex",
+      "result_path": "/owpc/pc/race/raceresult",
       "odds_pages": [
         {"path": "/owpc/pc/race/odds3t", "market": "trifecta"},
         {"path": "/owpc/pc/race/odds3f", "market": "trio"},
@@ -35,8 +37,11 @@
     },
     "keirin": {
       "origin": "https://keirin.jp",
+      "guest_path": "/pc/top",
       "live_path": "/pc/racelive",
       "json_path": "/pc/json",
+      "catalog_json_type": "JSJ048",
+      "result_json_type": "JSJ012",
       "identity_json_type": "JST015",
       "paths": [
         "/pc/top",
@@ -61,8 +66,10 @@
     },
     "auto": {
       "origin": "https://autorace.jp",
+      "catalog_path": "/race_info/XML/Hold/Today",
       "program_path": "/race_info/OtherRaceInfo",
       "odds_path": "/race_info/Odds",
+      "result_path": "/race_info/RaceResult",
       "paths": [
         "/race_info/XML/Hold/Today",
         "/race_info/Odds",
@@ -80,6 +87,22 @@
   },
   "plan_horizon_seconds": 86400,
   "guest_session_seconds": 1800,
+  "daily": {
+    "start_hour": 7,
+    "end_hour": 30,
+    "rollover_hour": 6,
+    "catalog_interval_seconds": 600,
+    "program_interval_seconds": 300,
+    "guest_interval_seconds": 900,
+    "odds_lead_seconds": 3600,
+    "result_delay_seconds": 120,
+    "result_interval_seconds": 300,
+    "result_window_seconds": 3600,
+    "deferred_interval_seconds": 120,
+    "blocked_interval_seconds": 600,
+    "planning_offset_seconds": 1,
+    "maximum_tasks": 1024
+  },
   "discovery": {
     "maximum_program_age_seconds": 600,
     "clock_timezone_offset_minutes": 540,
