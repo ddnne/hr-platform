@@ -4,7 +4,8 @@ import jra from '../../configs/jra-source.json';
 import {jraMetadata,jraFrame,type JraSnapshot} from '../jra';
 import {jraLinks,jraNavigationIdentity} from '../jra-program';
 import type {ResultSnapshot,CaptureTarget,JraResultTarget} from './types';
-export type JraResultSnapshot=ResultSnapshot & {sport:'jra';metadata:JraSnapshot['metadata'];result_navigation:Record<string,string>};
+export type JraResultSnapshot=ResultSnapshot & {sport:'jra';metadata:JraSnapshot['metadata'];result_navigation:Record<string,string>;
+ payout_unit_evidence:{basis:'PROVIDER_DOCUMENTATION';source_url:string;verified_at:string}};
 const specs:Record<string,[number,boolean]>={win:[1,false],place:[1,false],exacta:[2,true],quinella:[2,false],wide:[2,false],
  trifecta:[3,true],trio:[3,false],frame_exacta:[2,true],frame_quinella:[2,false]};
 const keirin={frame_quinella:'WH2',frame_exacta:'WT2',quinella:'SH2',exacta:'ST2',trio:'RH3',trifecta:'RT3',wide:'W'};
@@ -91,7 +92,9 @@ function jraResult(raw:string,t:JraResultTarget,result:ResultSnapshot):JraResult
   const race=`jra:${id.day}:${id.venue}:${id.race}`;
   if(result_navigation[race]&&result_navigation[race]!==link.name)throw new Error('RESULT_DUPLICATE');result_navigation[race]=link.name;
  }
- return {...result,sport:'jra',metadata,result_navigation};
+ // The general payout guide documents the unit; this does not verify this race's refunds.
+ return {...result,sport:'jra',metadata,result_navigation,payout_unit_yen:jra.result_payout_unit.amount_yen,
+  payout_unit_evidence:{basis:'PROVIDER_DOCUMENTATION',source_url:jra.result_payout_unit.source_url,verified_at:jra.result_payout_unit.verified_at}};
 }
 export function parseResult(raw:string,t:CaptureTarget):ResultSnapshot|JraResultSnapshot {
  if(!supportsResult(t))throw new Error('RESULT_RESOURCE');const result=base(t);

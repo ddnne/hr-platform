@@ -2,7 +2,12 @@
   "version": "jra-source-preview-v1",
   "parser_version": "sports-odds-v3",
   "program_parser_version": "sports-program-v5",
-  "result_parser_version": "sports-result-v3",
+  "result_parser_version": "sports-result-v4",
+  "result_payout_unit": {
+    "amount_yen": 100,
+    "source_url": "https://www.jra.go.jp/keiba/rules/kakutei.html",
+    "verified_at": "2026-10-03T20:31:39Z"
+  },
   "frame_labels": {
     "1": ["枠1", "枠1白"],
     "2": ["枠2", "枠2黒"],

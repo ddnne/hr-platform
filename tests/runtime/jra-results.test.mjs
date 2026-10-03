@@ -12,7 +12,8 @@ test('official result structure preserves eight payout markets, placings and pub
  assert.deepEqual(v.placings.map(x=>x.frame),[1,2,3,3]);
  assert.equal(v.payouts.length,12);assert.ok(markets.every(m=>v.payouts.some(x=>x.market===m&&x.amount_yen===1230)));
  assert.equal(v.metadata.flat,true);assert.equal(v.source_updated_at,null);assert.equal(v.source_published_at,null);
- assert.equal(v.settlement_qualified,false);assert.equal(v.payout_unit_yen,null);assert.equal(v.refund_evidence.source_flags.refund_coverage_verified,false);
+ assert.equal(v.settlement_qualified,false);assert.equal(v.payout_unit_yen,100);assert.equal(v.refund_evidence.source_flags.refund_coverage_verified,false);
+ assert.deepEqual(v.payout_unit_evidence,{basis:'PROVIDER_DOCUMENTATION',source_url:'https://www.jra.go.jp/keiba/rules/kakutei.html',verified_at:'2026-10-03T20:31:39Z'});
  assert.equal(v.refund_evidence.display,null);assert.equal(p.completePayoutMarkets(v,markets),true);
  assert.deepEqual(Object.keys(v.result_navigation),['jra:20000101:5:1','jra:20000101:5:2']);
 });

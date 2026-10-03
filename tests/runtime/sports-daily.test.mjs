@@ -133,7 +133,7 @@ test('closing round yields to preclose odds due during the configured request bu
 const doScript=(await build({stdin:{contents:`import {SportsCollector} from './workers/sports/index';
 export class DailyTest extends SportsCollector {
  constructor(ctx,env){let failed=false;super(ctx,env.TEST_FAULT==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async(...a)=>{if(!failed){failed=true;throw new Error('SYNTHETIC_PUBLISH_FAULT');}return env.INDEX.batch(...a);}}}:env);}
- async seed(s,entries){await this.ctx.storage.put({'daily-state':s,'daily-sport':s.sport});if(entries)await this.schedule(entries);}
+ async seed(s,entries){const clock=Date.now;Date.now=()=>s.report.at;try{await this.ctx.storage.put({'daily-state':s,'daily-sport':s.sport});if(entries)await this.schedule(entries);}finally{Date.now=clock;}}
  async inspect(){return {state:await this.ctx.storage.get('daily-state'),plan:await this.planState(),guest_received_at:await this.ctx.storage.get('keirin-guest-received-at')};}
  async step(now,enabled,session,advance){const clock=Date.now,start=performance.now();Date.now=()=>now+(advance?Math.floor(performance.now()-start):0);try{if(enabled!==undefined)this.env.SPORTS_DAILY_ENABLED=String(enabled);if(session)await this.ctx.storage.put('guest-session',typeof session==='object'?session:{cookie:'SYNTHETIC',token:'SYNTHETIC',expires:now+3600000});await this.alarm();return this.inspect();}finally{Date.now=clock;}}
 }
@@ -147,9 +147,9 @@ async function runtime({enabled=true,fault='',body=autoCatalog}={}){
  const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});const result=await r.json();assert.equal(r.status,200,JSON.stringify(result));return result;};
  return {mf,db,call,requests};
 }
-async function fixture(at=Date.now()+60000){
+async function fixture(at=Date.now()+60000,remaining=900000){
  const window=p.businessDay(at);at=Math.max(at,window.start);
- if(at+900000>=window.end)at=p.businessDay(window.end).start;
+ if(at+remaining>=window.end)at=p.businessDay(window.end).start;
  const s=await p.initialDaily('auto',at),e=p.nextDaily(s,at);return {s,e,at:e[0].at};
 }
 for(const phase of ['FINAL_ONLY','INTERMEDIATE','PARSE_ERROR'])test('DO completes closing task only for a complete provider closed phase: '+phase,async()=>{
@@ -182,7 +182,8 @@ for(const expired of [false,true])test('anonymous Keirin guest without Set-Cooki
  }finally{await r.mf.dispose();}
 });
 for(const delay of [6000,120000])test('Keirin saved guest recovery retains original receipt and old redelivery cannot renew readiness; delay='+delay,async()=>{
- const sample=await fixture(),s=await p.initialDaily('keirin',sample.at-1000),e=p.nextDaily(s,sample.at-1000,false),at=e[0].at;
+ const sample=await fixture(undefined,(config.guest_session_seconds+config.daily.guest_interval_seconds+1)*1000),
+  s=await p.initialDaily('keirin',sample.at-1000),e=p.nextDaily(s,sample.at-1000,false),at=e[0].at;
  const r=await runtime({fault:'publish',body:'<html>synthetic public top</html>'});
  try{await r.call({op:'seed',sport:'keirin',state:s,entries:e});
  const failed=await r.call({op:'step',sport:'keirin',now:at});assert.equal(failed.guest_received_at,undefined);assert.equal(r.requests.length,1);
