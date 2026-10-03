@@ -12,6 +12,16 @@ export function oddsTargets(source:Source,raceId:string,at:number,runners?:Sourc
  validateTarget(target);if(runners)validateTarget(runners.target);
  const defer=(reason:string,market?:string)=>deferred.push({race_id:raceId,reason,...(market?{market}:{})});
  if(target.sport!==value.sport||target.race_id!==value.requested_race_id)throw new Error('PROGRAM_IDENTITY');
+ if(value.sport==='jra'&&purpose==='CLOSED'){
+  const page=selection?.page;
+  const navigation=page==='win_place'&&'final_odds_navigation' in program?program.final_odds_navigation[raceId]:
+   page&&'odds_navigation' in program?program.odds_navigation[raceId]?.[page]:undefined;
+  if(!Number.isSafeInteger(at)||!page||!navigation){defer('ODDS_NAVIGATION_UNKNOWN');return {targets,deferred,not_offered};}
+  if(page!=='win_place'&&!selection?.context_event){defer('RACE_CONTEXT_REQUIRED');return {targets,deferred,not_offered};}
+  const recipe:CaptureTarget={sport:'jra',race_id:raceId,kind:'odds',page,form:true,url:jra.origin+jra.odds_path,
+   body:new URLSearchParams({cname:navigation}).toString(),...(page!=='win_place'?{context_event:selection!.context_event,context_phase:'FINAL_ONLY' as const}:{})};
+  validateTarget(recipe);targets.push(recipe);return {targets,deferred,not_offered};
+ }
  const races=programRaces(program);
  const race=races.find(r=>r.race_id===raceId);if(!race){defer('RACE_NOT_IN_PROGRAM');return {targets,deferred,not_offered};}
  if(value.sport==='jra'){

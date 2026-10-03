@@ -11,7 +11,7 @@ export function requiresContext(t:CaptureTarget):boolean {
  return t.kind==='guest'&&t.discovery_stage==='race'||['odds','result'].includes(t.kind)||t.kind==='schedule'&&u.pathname==='/pc/json'&&u.searchParams.get('type')==='JST010';
 }
 export const contextNavigation=(t:CaptureTarget)=>t.form?new URLSearchParams(t.body).get('encp'):new URL(t.url).searchParams.get('encp');
-export function qualifiedJraWin(snapshot:JraSnapshot,phase?:'INTERMEDIATE'):boolean {
+export function qualifiedJraWin(snapshot:JraSnapshot,phase?:'INTERMEDIATE'|'FINAL_ONLY'):boolean {
  return snapshot.sport==='jra'&&snapshot.metadata?.flat===true&&!!snapshot.runners&&snapshot.markets.length===2&&
   snapshot.markets.every(m=>['win','place'].includes(m.market)&&m.complete)&&(!phase||snapshot.phase===phase);
 }

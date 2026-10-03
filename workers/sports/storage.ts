@@ -65,10 +65,10 @@ export async function publishedResultSaved(env:CaptureStorage,event:string,marke
  return completePayoutMarkets(value??null,markets);
 }
 export type JraWinContext={event:string;race_id:string;received_at:string;available_at:string};
-export async function savedJraWin(env:CaptureStorage,event:string):Promise<JraWinContext|null> {
+export async function savedJraWin(env:CaptureStorage,event:string,phase:'INTERMEDIATE'|'FINAL_ONLY'='INTERMEDIATE'):Promise<JraWinContext|null> {
  const result=await completedObservation<JraSnapshot>(env,event,'odds','COMPLETE');
  if(!result)return null;const v=result.value;
- if(!qualifiedJraWin(v,'INTERMEDIATE'))return null;
+ if(!qualifiedJraWin(v,phase))return null;
  return {event,race_id:v.race_id,received_at:result.received_at,available_at:result.available_at};
 }
 export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]):boolean {

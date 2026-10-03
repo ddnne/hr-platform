@@ -13,11 +13,11 @@ import type {JraPage} from '../jra';
 import type {CaptureSport,CaptureTarget,Target} from './types';
 
 type Source=Awaited<ReturnType<typeof savedProgram>> & {event:string};
-type Task={kind:'request'|'odds'|'result'|'final_odds';target?:CaptureTarget;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number;start_at?:number;expires_at?:number;page?:JraPage};
+type Task={kind:'request'|'odds'|'result'|'final_odds';target?:CaptureTarget;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number;start_at?:number;expires_at?:number;page?:JraPage;navigation?:string};
 type Action={task:string;entries:DailyEntry[];closed_odds?:boolean;close_at?:number;start_at?:number};
 export type DailyEntry={at:number;target:CaptureTarget;daily_task?:string;daily_day?:string};
 export type DailyState={sport:CaptureSport;day:string;wake_at:number;tasks:Record<string,Task>;
- races:Record<string,{clock?:Source;runners?:Source;results?:Source;win_context?:JraWinContext}>;
+ races:Record<string,{clock?:Source;runners?:Source;results?:Source;win_context?:JraWinContext;final_context?:JraWinContext}>;
  action:Action|null;actions?:Record<string,Action>;
  report:{at:number;status:string;planned:number;deferred:number;reason?:string}};
 
@@ -73,6 +73,31 @@ function raceTask(state:DailyState,key:string,task:Task) {
  if(!state.tasks[key]&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  state.tasks[key]??=task;
 }
+function jraFinalTasks(state:DailyState,race_id:string,now:number) {
+ const facts=state.races[race_id],result=facts?.results?.value.program,program=facts?.clock?.value.program;
+ const win=result&&'final_odds_navigation' in result?result.final_odds_navigation[race_id]:undefined;if(!win)return;
+ for(const [i,page] of (Object.keys(jra.tables) as JraPage[]).entries()){
+  const navigation=page==='win_place'?win:program&&'odds_navigation' in program?program.odds_navigation[race_id]?.[page]:undefined;
+  if(!navigation)continue;
+  const key=`final_odds:${race_id}:${page}`;
+  raceTask(state,key,{kind:'final_odds',race_id,page,navigation,next_at:now+i*spacingFor('jra',true)*1000,
+   interval:settings.final_odds_interval_seconds,expires_at:now+settings.final_odds_window_seconds*1000});
+  const task=state.tasks[key];if(task.navigation!==navigation){task.navigation=navigation;task.done=false;task.next_at=now;
+   task.expires_at=now+settings.final_odds_window_seconds*1000;if(page==='win_place')facts.final_context=undefined;}
+ }
+ refreshJraFinalContext(state,race_id,now);
+}
+function refreshJraFinalContext(state:DailyState,race_id:string,now:number) {
+ const facts=state.races[race_id],first=state.tasks[`final_odds:${race_id}:win_place`],context=facts?.final_context;
+ if(first?.done&&now<first.expires_at!&&Object.values(state.tasks).some(t=>t.kind==='final_odds'&&t.race_id===race_id&&t.page!=='win_place'&&!t.done)&&
+  (!context||now-Date.parse(context.received_at)>jra.maximum_context_age_seconds*1000)){
+  first.done=false;first.next_at=now;facts.final_context=undefined;
+ }
+}
+function jraContextRetry(state:DailyState,kind:'odds'|'final_odds',race:string,now:number):number {
+ const key=`${kind}:${race}:win_place`,first=state.tasks[key];
+ return state.actions?.[key]||first&&!first.done&&first.next_at<=now?spacingFor('jra',true):settings.deferred_interval_seconds;
+}
 // Recover the old advertised close BEFORE replacing its saved program evidence.
 export function migrateDailyCloses(state:DailyState):boolean {
  let changed=false;
@@ -105,6 +130,7 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
    const task=state.tasks[key];if(recipeJson(task.target)!==recipeJson(target)){
     task.target=target;task.done=false;task.next_at=now;task.expires_at=now+settings.result_window_seconds*1000;
    }
+   jraFinalTasks(state,race_id,now);
   }
   return;
  }
@@ -121,10 +147,11 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
    for(const [i,page] of (Object.keys(jra.tables) as JraPage[]).entries()){
     const key=`odds:${race.race_id}:${page}`;
     if(start===undefined){const task=state.tasks[key];if(task){task.start_at=undefined;task.done=true;}continue;}
-    const due=start-jra.daily_odds_lead_seconds*1000+i*spacingFor('jra')*1000;
+    const due=start-jra.daily_odds_lead_seconds*1000+i*spacingFor('jra',true)*1000;
     raceTask(state,key,{kind:'odds',race_id:race.race_id,page,start_at:start,next_at:due,interval:config.interval_seconds});
     const task=state.tasks[key];if(task.start_at!==start){task.done=false;task.start_at=start;task.next_at=Math.max(now,due,(task.last_at??0)+task.interval*1000);}
    }
+   jraFinalTasks(state,race.race_id,now);
    continue;
   }
   if(!race.close_at)continue;
@@ -177,6 +204,7 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
  for(const [key,task] of tasks){
   // Expire finite closing tasks even if their clock/roster resource disappeared.
   if(task.kind==='final_odds'&&task.close_at!==undefined&&now>task.close_at+settings.final_odds_window_seconds*1000){task.done=true;continue;}
+  if(task.kind==='final_odds'&&task.expires_at!==undefined&&now>task.expires_at){task.done=true;continue;}
   if(task.kind==='result'&&task.expires_at!==undefined&&now>task.expires_at){task.done=true;continue;}
   if(task.next_at>now)continue;
   if(state.sport==='jra'&&task.kind==='odds'&&task.start_at!==undefined&&now>=task.start_at){task.done=true;continue;}
@@ -197,6 +225,19 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
     task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;
    }
    targets=[task.target];
+  }else if(state.sport==='jra'&&task.kind==='final_odds'){
+   refreshJraFinalContext(state,task.race_id!,now);
+   const facts=state.races[task.race_id!],result=facts?.results,source=task.page==='win_place'?result:facts?.clock,context=facts?.final_context;
+   if(!result||!source||!task.page||now-Date.parse(result.received_at)>config.discovery.maximum_program_age_seconds*1000||
+    now-Date.parse(source.received_at)>config.discovery.maximum_program_age_seconds*1000||task.page!=='win_place'&&
+    (!context||context.race_id!==task.race_id||Date.parse(context.available_at)>now||Date.parse(context.received_at)>now||now-Date.parse(context.received_at)>jra.maximum_context_age_seconds*1000)){
+    task.next_at=now+jraContextRetry(state,'final_odds',task.race_id!,now)*1000;deferred++;continue;
+   }
+   const plan=oddsTargets(source,task.race_id!,at,undefined,'CLOSED',{page:task.page,context_event:context?.event});
+   if(plan.deferred.length||new URLSearchParams(plan.targets[0].body).get('cname')!==task.navigation){
+    task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;
+   }
+   targets=plan.targets;
   }else {
    const facts=state.races[task.race_id!],source=facts?.clock;
    const races=source?programRaces(source.value.program):[];
@@ -205,7 +246,7 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
     const context=facts?.win_context;
     if(!source||!race?.start_at||!task.page||now-Date.parse(source.received_at)>config.discovery.maximum_program_age_seconds*1000||
      task.page!=='win_place'&&(!context||context.race_id!==task.race_id||Date.parse(context.available_at)>now||Date.parse(context.received_at)>now||now-Date.parse(context.received_at)>jra.maximum_context_age_seconds*1000)){
-     task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;
+     task.next_at=now+jraContextRetry(state,'odds',task.race_id!,now)*1000;deferred++;continue;
     }
     const plan=oddsTargets(source,task.race_id!,at,undefined,'INTERMEDIATE',{page:task.page,context_event:context?.event});
     if(plan.deferred.length){task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;}targets=plan.targets;
@@ -231,7 +272,7 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
    const earlier=tasks.filter(([,t])=>t.kind==='odds'&&!t.done&&t.next_at<=finish);
    if(earlier.length){task.next_at=Math.max(now+1,Math.min(...earlier.map(([,t])=>t.next_at)));deferred++;continue;}
   }
-  const entries=targets.map((target,i)=>({at:at+i*spacingFor(target.sport)*1000,target,daily_task:key,daily_day:state.day}));
+  const entries=targets.map((target,i)=>({at:at+i*spacingFor(target.sport,true)*1000,target,daily_task:key,daily_day:state.day}));
   if(entries.length>config.maximum_plan_entries)throw new Error('DAILY_PLAN_CAPACITY');
   state.action={task:key,entries,close_at:task.close_at,start_at:task.start_at,...(task.kind==='final_odds'?{closed_odds:true}:{})};state.wake_at=at;
   state.report={at:now,status:'PLANNED',planned:entries.length,deferred};return entries;
@@ -247,8 +288,10 @@ export function nextDailyParallel(state:DailyState,now:number,guestReady=true,ca
  if(state.sport==='keirin'&&!guestReady&&Object.keys(actions).length)return Object.values(actions).flatMap(a=>a.entries);
  const working:DailyState={...state,tasks:Object.fromEntries(Object.entries(state.tasks).filter(([key])=>!actions[key])),action:null};
  let added=0;
- while(Object.keys(actions).length<(state.sport==='keirin'&&!guestReady?1:concurrencyFor(state.sport))){
-  const entries=nextDaily(working,now,guestReady);if(!entries.length)break;
+ while(Object.keys(actions).length<(state.sport==='keirin'&&!guestReady?1:concurrencyFor(state.sport,true))){
+  // Separate JRA action start times so a slow request can retain a slot while
+  // later pages become due, without every same-tick claim losing the source gate.
+  const entries=nextDaily(working,now+(state.sport==='jra'?added*spacingFor('jra',true)*1000:0),guestReady);if(!entries.length)break;
   if(entries.length>capacity-added){working.action=null;working.report={at:now,status:'CAPACITY_WAIT',planned:added,deferred:1};break;}
   const action=working.action!;actions[action.task]=action;working.action=null;delete working.tasks[action.task];added+=entries.length;
  }
@@ -264,18 +307,23 @@ export async function completeDaily(state:DailyState,entry:DailyEntry,status:str
  const task=state.tasks[action.task];
  if(entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&action.start_at===task.start_at){
   if(winContext&&(winContext.race_id!==entry.target.race_id||Date.parse(winContext.available_at)>now||Date.parse(winContext.received_at)>now))throw new Error('JRA_CONTEXT_IDENTITY');
-  const facts=state.races[entry.target.race_id];if(facts)facts.win_context=winContext??undefined;
+  const facts=state.races[entry.target.race_id];if(facts){
+   if(task.kind==='final_odds'&&new URLSearchParams(entry.target.body).get('cname')===task.navigation)facts.final_context=winContext??undefined;
+   else if(task.kind==='odds')facts.win_context=winContext??undefined;
+  }
  }
- if(task.kind==='final_odds')action.closed_odds=action.closed_odds===true&&closedOdds;
+ if(task.kind==='final_odds')action.closed_odds=action.closed_odds===true&&closedOdds&&
+  (entry.target.sport!=='jra'||entry.target.kind!=='odds'||entry.target.page!=='win_place'||!!winContext);
  action.entries=matched.filter(r=>!r.match).map(r=>r.e);
  if(!action.entries.length){
   // A response from an earlier advertised close cannot finish the revised task.
-  if(action.close_at===task.close_at&&action.start_at===task.start_at&&(!task.target||resource===await resourceId(task.target))){
+  if(action.close_at===task.close_at&&action.start_at===task.start_at&&(!task.target||resource===await resourceId(task.target))&&
+   (!task.navigation||new URLSearchParams(entry.target.body).get('cname')===task.navigation)){
   if(task.kind==='final_odds'&&action.closed_odds||task.kind==='result'&&resultPublished)task.done=true;
   if(task.kind==='request'&&status==='RAW_STORED'&&task.target?.sport==='keirin'&&new URL(task.target.url).searchParams.get('type')===config.sources.keirin.identity_json_type)task.done=true;
   task.last_at=now;task.next_at=now+task.interval*1000;
   }
   if(state.action===action)state.action=null;else delete state.actions![action.task];
-  state.wake_at=now+config.request_spacing_seconds*1000;}
+  state.wake_at=now+spacingFor(state.sport,true)*1000;}
  state.report={at:now,status,planned:action.entries.length,deferred:0};
 }

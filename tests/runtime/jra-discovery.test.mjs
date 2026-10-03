@@ -73,21 +73,22 @@ test('changed venue navigation replaces only the periodic task and cannot restor
  await p.acceptProgram(state,source(jraCatalog,catalogTarget),now+3);
  assert.equal(Object.values(state.tasks).filter(t=>t.kind==='request'&&!t.done).length,1);assert.equal(state.tasks[old.daily_task].done,false);
 });
-test('each JRA page yields the sole action slot and pins a previously available intermediate roster',async()=>{
+test('JRA pages use bounded parallel actions with spaced starts and an available intermediate roster',async()=>{
  let at=now-10*60000;const state=await p.initialDaily('jra',at);state.tasks={};
  await p.acceptProgram(state,source(jraProgram(),venue,at),at);
  const pages=[],first=p.nextDailyParallel(state,at)[0];assert.equal(first.target.page,'win_place');
  const context={event:'synthetic-win',race_id:first.target.race_id,received_at:new Date(first.at).toISOString(),available_at:new Date(first.at).toISOString()};
- for(let i=0;i<7;i++){
-  const e=i===0?first:p.nextDailyParallel(state,at)[0];assert.ok(e);assert.equal(Object.keys(state.actions).length,1);
-  assert.equal(state.actions[e.daily_task].entries.length,1);pages.push(e.target.page);
+ const finish=async e=>{assert.equal(state.actions[e.daily_task].entries.length,1);pages.push(e.target.page);
   assert.equal(e.target.deadline_at,Date.parse('2000-01-01T01:05:00Z'));assert.equal(state.tasks[e.daily_task].close_at,undefined);
-  if(i){assert.equal(e.target.context_event,context.event);assert.equal(e.target.context_phase,'INTERMEDIATE');}
-  await p.completeDaily(state,e,'RAW_STORED',e.at,false,false,i===0?context:null);
-  await p.completeDaily(state,first,'RAW_STORED',e.at,false,false,null);assert.deepEqual(state.races[first.target.race_id].win_context,context);
-  assert.equal(Object.keys(state.actions).length,0);at+=config.finite_request_spacing_seconds*1000;
- }
- assert.deepEqual(pages,Object.keys(config.tables));
+  if(e!==first){assert.equal(e.target.context_event,context.event);assert.equal(e.target.context_phase,'INTERMEDIATE');}
+  await p.completeDaily(state,e,'RAW_STORED',e.at,false,false,e===first?context:null);};
+ await finish(first);at=first.at+config.daily_request_spacing_seconds*1000;
+ for(let attempts=0;pages.length<7&&attempts<20;attempts++){const entries=p.nextDailyParallel(state,at);if(!entries.length){at=state.wake_at;continue;}assert.ok(Object.keys(state.actions).length<=config.daily_maximum_parallel_requests);
+  assert.ok(entries.slice(1).every((e,i)=>e.at-entries[i].at>=config.daily_request_spacing_seconds*1000));
+  for(const e of entries)await finish(e);at=entries.at(-1).at+config.daily_request_spacing_seconds*1000;}
+ await p.completeDaily(state,first,'RAW_STORED',at,false,false,null);assert.deepEqual(state.races[first.target.race_id].win_context,context);
+ assert.equal(Object.keys(state.actions).length,0);
+ assert.deepEqual(pages.sort(),Object.keys(config.tables).sort());
 });
 test('JRA missing, stale, future or failed roster prevents other pages but not a fresh win request',async()=>{
  for(const mode of ['missing','stale','future','wrong-race']){
@@ -139,7 +140,7 @@ test('result tasks need published fresh navigation, retry incomplete payouts and
  const key='result:jra:20000101:5:1',first=p.nextDailyParallel(state,now)[0];assert.equal(first.target.kind,'result');
  assert.equal(state.tasks[key].close_at,undefined);assert.equal(state.tasks[key].start_at,undefined);assert.equal(state.races[first.target.race_id].clock,undefined);
  await p.completeDaily(state,first,'RAW_STORED',first.at,false,false);assert.equal(state.tasks[key].done,undefined);
- const at=first.at+state.tasks[key].interval*1000,next=p.nextDailyParallel(state,at)[0];assert.ok(next);
+ const at=first.at+state.tasks[key].interval*1000,next=p.nextDailyParallel(state,at).find(e=>e.daily_task===key);assert.ok(next);
  await p.completeDaily(state,next,'RAW_STORED',next.at,false,true);assert.equal(state.tasks[key].done,true);
  await p.completeDaily(state,first,'RAW_STORED',next.at,false,false);assert.equal(state.tasks[key].done,true);
 });
@@ -148,13 +149,47 @@ test('a replaced result recipe cannot be completed by the old action and stale/m
  const key='result:jra:20000101:5:1',old=p.nextDailyParallel(state,now)[0];
  await p.acceptProgram(state,source(jraResultProgram({name:'pw01sde1005200001010120000101/AB'}),resultVenue),now+1);
  await p.completeDaily(state,old,'RAW_STORED',now+2,false,true);assert.equal(state.tasks[key].done,false);
- const current=p.nextDailyParallel(state,now+2)[0];assert.ok(current.target.body.includes('AB'));
+ const current=p.nextDailyParallel(state,now+2).find(e=>e.daily_task===key);assert.ok(current.target.body.includes('AB'));
  await p.completeDaily(state,current,'RAW_STORED',now+3,false,false);p.rejectProgram(state,resultVenue);
- assert.deepEqual(p.nextDailyParallel(state,state.tasks[key].next_at),[]);
- assert.deepEqual(p.nextDailyParallel(state,state.tasks[key].expires_at+1),[]);assert.equal(state.tasks[key].done,true);
+ assert.ok(p.nextDailyParallel(state,state.tasks[key].next_at).every(e=>e.daily_task!==key));
+ assert.ok(p.nextDailyParallel(state,state.tasks[key].expires_at+1).every(e=>e.daily_task!==key));assert.equal(state.tasks[key].done,true);
 });
 test('saved daily migration adds the result catalog once and leaves queued action state unchanged',async()=>{
  const state=await p.initialDaily('jra',now);state.tasks={};state.actions={'synthetic-in-flight':{task:'synthetic-in-flight',entries:[]}};
  assert.equal(await p.ensureDailyCatalogs(state,now),true);assert.equal(Object.keys(state.tasks).length,2);
  const before=structuredClone(state);assert.equal(await p.ensureDailyCatalogs(state,now+1),false);assert.deepEqual(state,before);
+});
+test('published final navigation runs all pages without an inferred cutoff and keeps intermediate context separate',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};const id='jra:20000101:5:1';
+ await p.acceptProgram(state,source(jraProgram({clock:'発走済',navigationMode:'final'}),venue),now);
+ const intermediate={event:'synthetic-intermediate',race_id:id,received_at:new Date(now).toISOString(),available_at:new Date(now).toISOString()};
+ state.races[id].win_context=intermediate;
+ await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);state.tasks['result:'+id].done=true;
+ const first=p.nextDailyParallel(state,now).find(e=>e.daily_task===`final_odds:${id}:win_place`);assert.ok(first);assert.equal(first.target.deadline_at,undefined);
+ const final={...intermediate,event:'synthetic-final',received_at:new Date(first.at).toISOString(),available_at:new Date(first.at).toISOString()};
+ await p.completeDaily(state,first,'RAW_STORED',first.at,true,false,final);
+ const pages=['win_place'];let at=state.wake_at;
+ for(let i=0;i<20&&pages.length<7;i++){
+  const entries=p.nextDailyParallel(state,at);for(const e of entries){assert.equal(e.target.context_event,final.event);assert.equal(e.target.context_phase,'FINAL_ONLY');assert.equal(e.target.deadline_at,undefined);
+   pages.push(e.target.page);await p.completeDaily(state,e,'RAW_STORED',e.at,true);}
+  at=Math.max(at+config.daily_request_spacing_seconds*1000,state.wake_at);
+ }
+ assert.deepEqual(pages.sort(),Object.keys(config.tables).sort());assert.deepEqual(state.races[id].win_context,intermediate);
+ assert.deepEqual(state.races[id].final_context,final);assert.ok(Object.values(state.tasks).filter(t=>t.kind==='final_odds').every(t=>t.done));
+});
+test('unfinished final pages refresh an expired final roster without extending the original window',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};const id='jra:20000101:5:1';
+ await p.acceptProgram(state,source(jraProgram({clock:'発走済',navigationMode:'final'}),venue),now);
+ await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);state.tasks['result:'+id].done=true;
+ const key=`final_odds:${id}:win_place`,first=p.nextDailyParallel(state,now).find(e=>e.daily_task===key);
+ await p.completeDaily(state,first,'RAW_STORED',first.at,true,false,{event:'synthetic-old-final',race_id:id,received_at:new Date(first.at).toISOString(),available_at:new Date(first.at).toISOString()});
+ const expiry=state.tasks[key].expires_at,later=first.at+(config.maximum_context_age_seconds+1)*1000;
+ await p.acceptProgram(state,source(jraProgram({clock:'発走済',navigationMode:'final'}),venue,later),later);
+ await p.acceptProgram(state,source(jraResultProgram(),resultVenue,later),later);
+ assert.equal(state.tasks[key].done,false);assert.equal(state.tasks[key].expires_at,expiry);assert.equal(state.races[id].final_context,undefined);
+ const fresh=p.nextDailyParallel(state,later).find(e=>e.daily_task===key);assert.ok(fresh);
+ const context={event:'synthetic-new-final',race_id:id,received_at:new Date(fresh.at).toISOString(),available_at:new Date(fresh.at).toISOString()};
+ await p.completeDaily(state,fresh,'RAW_STORED',fresh.at,true,false,context);
+ let entries=[];for(let i=0;i<8&&!entries.length;i++)entries=p.nextDailyParallel(state,state.wake_at);
+ assert.ok(entries.some(e=>e.target.page!=='win_place'&&e.target.context_event===context.event));
 });

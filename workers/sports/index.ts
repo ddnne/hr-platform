@@ -106,7 +106,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   await this.ctx.storage.transaction(async store=>{
    const queue=[...(await store.list<Entry>({prefix:'plan:'})).values()],times=queue.map(e=>e.at);
    const current=daily?await store.get<DailyState>('daily-state'):null;
-   if(current&&Object.keys(current.actions??{}).length<concurrencyFor(current.sport))times.push(current.wake_at);
+   if(current&&Object.keys(current.actions??{}).length<concurrencyFor(current.sport,true))times.push(current.wake_at);
    if(!times.length){await store.deleteAlarm();return;}
    await store.setAlarm(Math.max(Date.now()+1,gate?.next_allowed_at??0,Math.min(...times)));
   });
@@ -123,7 +123,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    catch(e){if(!(e instanceof Error)||!['PROGRAM_UNAVAILABLE','PROGRAM_STALE'].includes(e.message))throw e;status=e.message;}
   }
   const closing=!!entry.daily_task?.startsWith('final_odds:')&&status==='RAW_STORED'&&await closedOddsSaved(this.env,event);
-  const winContext=entry.daily_task&&entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&status==='RAW_STORED'?await savedJraWin(this.env,event):null;
+  const winContext=entry.daily_task&&entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&status==='RAW_STORED'?await savedJraWin(this.env,event,entry.daily_task.startsWith('final_odds:')?'FINAL_ONLY':'INTERMEDIATE'):null;
   let published=false;
   if(entry.daily_task?.startsWith('result:')&&status==='RAW_STORED'){
    if(entry.target.sport==='jra')published=await publishedResultSaved(this.env,event,['win','place','frame_quinella','quinella','wide','trifecta','trio','exacta']);
@@ -159,7 +159,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    const allowed=gate?.blocked||!gate||gate.next_allowed_at<=Date.now();
    const due=allowed?ordered.filter(([,e])=>e.at<=Date.now()):[];
    if(due.length&&(pending||exclusive(due[0][1]))){if(!running.size){attempted.add(due[0][0]);await this.runEntry(...due[0]);}break;}
-   for(const [key,entry] of due){if(running.size>=concurrencyFor(sport)||exclusive(entry))break;
+   for(const [key,entry] of due){if(running.size>=concurrencyFor(sport,!!entry.daily_task)||exclusive(entry))break;
     attempted.add(key);const job=this.runEntry(key,entry,true).catch(e=>{errors.push(e);}).finally(()=>{running.delete(key);});running.set(key,job);
    }
    if(!running.size)break;
@@ -178,7 +178,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   const t=entry.target;let deadline=t.deadline_at;
   if(entry.daily_task){const state=await this.ctx.storage.transaction(async store=>{const value=await store.get<DailyState>('daily-state');if(value&&migrateDailyCloses(value))await store.put('daily-state',value);return value;}),action=state?.actions?.[entry.daily_task]??(state?.action?.task===entry.daily_task?state.action:null),task=state?.tasks[entry.daily_task];
    if(task?.kind==='odds')deadline=task.close_at??task.start_at??deadline;
-   if(action&&task&&(action.close_at!==task.close_at||action.start_at!==task.start_at)){
+   if(action&&task&&(action.close_at!==task.close_at||action.start_at!==task.start_at||task.navigation&&new URLSearchParams(t.body).get('cname')!==task.navigation)){
     const event=`sports:${t.sport}:${entry.at}:${await resourceId(t)}`,prior=await this.env.INDEX.prepare('SELECT event_id FROM captures WHERE event_id=?').bind(event).first();
     await this.finish(key,prior?(await collect(entry.at,this.env,t)).status:'CLOSE_CHANGED');return;}
   }
@@ -226,7 +226,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   if(t.sport==='auto'&&t.body){if(!session)throw new Error('GUEST_SESSION_REQUIRED');Object.assign(headers,{'Cookie':session.cookie,'X-CSRF-TOKEN':session.token!,'X-Requested-With':'XMLHttpRequest'});}
   if(t.sport==='keirin'&&session&&session.expires>Date.now()&&session.cookie)headers.Cookie=session.cookie;
   if(t.form)headers['Content-Type']='application/x-www-form-urlencoded';
-  const result=await collect(entry.at,this.env,{...t,headers},undefined,parallel,deadline);
+  const result=await collect(entry.at,this.env,{...t,headers},undefined,parallel,deadline,!!entry.daily_task);
   // Successful anonymous initialization does not require a Set-Cookie header.
   // Redelivery retains the original receipt time, so it cannot refresh readiness.
   await this.rememberKeirinGuest(t,result);

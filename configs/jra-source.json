@@ -9,6 +9,8 @@
   "result_venue_navigation_prefix": "pw01srl",
   "finite_request_spacing_seconds": 60,
   "finite_maximum_parallel_requests": 1,
+  "daily_request_spacing_seconds": 2,
+  "daily_maximum_parallel_requests": 4,
   "maximum_context_age_seconds": 600,
   "daily_odds_lead_seconds": 1800,
   "maximum_race_number": 12,

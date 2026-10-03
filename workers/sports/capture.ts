@@ -10,8 +10,19 @@ import {jraNavigationIdentity} from '../jra-program';
 import {supportsResult} from './results';
 import type {SportsEnv,CaptureTarget,CaptureSport} from './types';
 export const sourceFor=(sport:CaptureSport)=>`sports-${sport}`;
-export const concurrencyFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_maximum_parallel_requests:config.maximum_parallel_requests;
-export const spacingFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_request_spacing_seconds:config.request_spacing_seconds;
+export const concurrencyFor=(sport?:CaptureSport,daily=false)=>sport==='jra'?(daily?jra.daily_maximum_parallel_requests:jra.finite_maximum_parallel_requests):config.maximum_parallel_requests;
+export const spacingFor=(sport?:CaptureSport,daily=false)=>sport==='jra'?(daily?jra.daily_request_spacing_seconds:jra.finite_request_spacing_seconds):config.request_spacing_seconds;
+// The JRA actor owns its starts. D1 also limits claims durably, but a slow D1
+// response must not turn an old granted timestamp into a burst of HTTP starts.
+let jraStartTail=Promise.resolve(),jraNextStart=0;
+async function waitJraStart(spacing:number,check:()=>Promise<void>):Promise<void> {
+ const prior=jraStartTail;let release!:()=>void;jraStartTail=new Promise(resolve=>release=resolve);
+ await prior;
+ try{const delay=jraNextStart-performance.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));
+  await check();
+  jraNextStart=performance.now()+spacing;
+ }finally{release();}
+}
 export function validateTarget(t:CaptureTarget):void {
  if(t.sport==='jra'){
   const u=new URL(t.url),id=t.race_id.match(/^jra:(\d{8}):(\d+):(\d+)$/),body=new URLSearchParams(t.body),name=body.get('cname');
@@ -41,7 +52,7 @@ export function validateTarget(t:CaptureTarget):void {
   if(!id||!Object.hasOwn(jra.venues,id[2])||Number(id[3])<1||Number(id[3])>jra.maximum_race_number)throw new Error('RACE_ID');
   date(id[1]);
   if(t.page==='win_place'?t.context_event!==undefined:!t.context_event)throw new Error('RACE_CONTEXT_REQUIRED');
-  if(t.context_phase!==undefined&&(t.page==='win_place'||t.context_phase!=='INTERMEDIATE'))throw new Error('RACE_CONTEXT_PHASE');
+  if(t.context_phase!==undefined&&(t.page==='win_place'||!['INTERMEDIATE','FINAL_ONLY'].includes(t.context_phase)))throw new Error('RACE_CONTEXT_PHASE');
   if(t.deadline_at!==undefined&&!Number.isSafeInteger(t.deadline_at))throw new Error('CAPTURE_DEADLINE');
   return;
  }
@@ -65,10 +76,11 @@ export function validateTarget(t:CaptureTarget):void {
   const b=JSON.parse(t.body);if(Object.keys(b).sort().join(',')!=='placeCode,raceDate,raceNo'||!Number.isInteger(b.placeCode)||!Number.isInteger(b.raceNo)||!/^\d{4}-\d{2}-\d{2}$/.test(b.raceDate))throw new Error('READ_POST_BODY');
   if(t.race_id!==`auto:${b.raceDate.replaceAll('-','')}:${b.placeCode}:${b.raceNo}`)throw new Error('RACE_ID');}
 }
-export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>,parallel=false,deadline=t.deadline_at):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
+export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>,parallel=false,deadline=t.deadline_at,daily=false):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
  validateTarget(t);
- const spacing=spacingFor(t.sport)*1000;
- const concurrency=concurrencyFor(t.sport);
+ const spacing=spacingFor(t.sport,daily)*1000;
+ const concurrency=concurrencyFor(t.sport,daily);
+ const exclusive=!parallel||t.sport==='jra'&&!daily;
  const resource=await resourceId(t),event=`sports:${t.sport}:${at}:${resource}`,source=sourceFor(t.sport),started=Date.now();
  const active=env.SPORTS_ENABLED==='true'&&JSON.parse(env.SPORTS_PROVIDERS_JSON).includes(t.sport);
  if(!active)return {status:'DISABLED',event_id:event};
@@ -92,14 +104,19 @@ export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse
  if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline){
   await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'MISSED_WINDOW')").bind(event,iso(at)).run();return {status:'MISSED_WINDOW',event_id:event};}
  await env.INDEX.prepare('INSERT OR IGNORE INTO source_control(source) VALUES(?)').bind(source).run();
- let insertion;
- if(parallel){
+ let insertion,grantedUntil=0;
+ if(!exclusive){
   // The single atomic insert shares the provider stop/wait and concurrency cap.
   // FETCHING remains claimed through raw publication, including crash recovery.
-  insertion=await env.INDEX.prepare(`INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,fetch_started_at,status)
+  const insert=env.INDEX.prepare(`INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,fetch_started_at,status)
    SELECT ?,?,?,'FETCHING' WHERE EXISTS(SELECT 1 FROM source_control WHERE source=? AND blocked=0 AND next_allowed_at<=?)
+   AND (?=0 OR NOT EXISTS(SELECT 1 FROM captures c JOIN source_control s ON c.event_id=s.owner_event_id WHERE s.source=? AND c.status='FETCHING'))
    AND (SELECT count(*) FROM captures WHERE status='FETCHING' AND event_id GLOB ?)<?`)
-   .bind(event,iso(at),iso(Date.now()),source,Date.now(),`sports:${t.sport}:*`,concurrency).run();
+   .bind(event,iso(at),iso(Date.now()),source,Date.now(),Number(t.sport==='jra'),source,`sports:${t.sport}:*`,concurrency);
+  // Serialize the start gate with the insert, including alarms whose slots are overdue.
+  grantedUntil=Date.now()+spacing;
+  insertion=t.sport==='jra'?(await env.INDEX.batch([insert,env.INDEX.prepare(`UPDATE source_control SET next_allowed_at=max(next_allowed_at,?)
+   WHERE source=? AND EXISTS(SELECT 1 FROM captures WHERE event_id=? AND status='FETCHING')`).bind(grantedUntil,source,event)]))[0]:await insert.run();
   if(!insertion.meta.changes)return {status:'WAIT_OR_BLOCKED',event_id:event};
  }else {
   const claim=await env.INDEX.prepare(`UPDATE source_control SET owner_event_id=?,next_allowed_at=? WHERE source=? AND blocked=0 AND next_allowed_at<=?
@@ -114,7 +131,13 @@ export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse
  const abortCode=remaining<=timeout?'DEADLINE_REACHED':'FETCH_TIMEOUT';
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(timeout,remaining)));
  try {
+  if(t.sport==='jra'&&daily)await waitJraStart(spacing,async()=>{
+   const gate=await env.INDEX.prepare('SELECT blocked,next_allowed_at FROM source_control WHERE source=?').bind(source).first<{blocked:number;next_allowed_at:number}>();
+   if(!gate||gate.blocked)throw new Error('SOURCE_DENIED');
+   if(gate.next_allowed_at>grantedUntil&&gate.next_allowed_at>Date.now())throw new Error('SOURCE_WAIT');
+  });
   if(Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline)throw new Error('MISSED_WINDOW');
+  if(controller.signal.aborted)throw new Error(abortCode);
   const requestHeaders=t.sport==='jra'?{'Content-Type':'application/x-www-form-urlencoded'}:t.headers;
   const response=await fetchPublic(t.url,t.sport==='jra'||t.sport==='boat'||t.kind==='guest'?'text/html':'application/json',controller.signal,requestHeaders,t.body);
   http=response.status;headersAt=iso(Date.now());
@@ -124,7 +147,7 @@ export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse
   const body=await boundedBody(response,config.maximum_raw_bytes);received=iso(Date.now());
   if(/captcha|cf-chl-|<title>[^<]*challenge/i.test(new TextDecoder().decode(body))){stop=true;throw new Error('CHALLENGE');}
   // Publish the finite JRA wait before raw publication releases the FETCHING slot.
-  if(t.sport==='jra')await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=max(next_allowed_at,?) WHERE source=?')
+  if(t.sport==='jra'&&!daily)await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=max(next_allowed_at,?) WHERE source=?')
    .bind(Date.parse(received)+spacing,source).run();
   stage='STORAGE';if(onResponse)await onResponse(body,response.headers);const hash=await digest(body),present=await env.RAW.head(`raw/${hash}`);
   const {headers,...safeTarget}=t;
@@ -137,13 +160,13 @@ export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse
   return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers,received_at:received};
  }catch(e){const reason=e instanceof Error?e.message:'';
   if(reason==='GUEST_FORMAT')stop=true;
-  const code=['GUEST_FORMAT','SOURCE_DENIED','RATE_LIMITED','HTTP_ERROR','MISSED_WINDOW','CHALLENGE','BODY_LIMIT','BODY_EMPTY'].includes(reason)?reason:stage==='STORAGE'?'STORAGE_ERROR':controller.signal.aborted?abortCode:'NETWORK_ERROR';
+  const code=['GUEST_FORMAT','SOURCE_DENIED','SOURCE_WAIT','RATE_LIMITED','HTTP_ERROR','MISSED_WINDOW','CHALLENGE','BODY_LIMIT','BODY_EMPTY'].includes(reason)?reason:stage==='STORAGE'?'STORAGE_ERROR':controller.signal.aborted?abortCode:'NETWORK_ERROR';
   await env.INDEX.prepare('UPDATE captures SET status=?,error_code=?,http_status=?,headers_received_at=?,collector_received_at=?,duration_ms=? WHERE event_id=?')
    .bind(code==='STORAGE_ERROR'?'STORAGE_ERROR':'FAILED',code,http,headersAt,received,Date.now()-started,event).run();
   return {status:code,event_id:event};
  }finally{clearTimeout(timer);await env.INDEX.prepare('UPDATE source_control SET blocked=max(blocked,?),next_allowed_at=max(next_allowed_at,?) WHERE source=?')
    .bind(Number(stop),Date.now()+spacing,source).run();
   // Release only this request's lease. A 429 keeps the durable Retry-After floor.
-  if(!parallel&&http!==429)await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=? WHERE source=? AND owner_event_id=?')
+  if(exclusive&&http!==429)await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=? WHERE source=? AND owner_event_id=?')
    .bind(Date.now()+spacing,source,event).run();}
 }
