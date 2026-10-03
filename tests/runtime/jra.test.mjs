@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {jraBody,race,roster} from '../fixtures/synthetic/jra.mjs';
 const b=await build({entryPoints:['workers/jra.ts'],bundle:true,write:false,format:'esm',platform:'node'});
-const {parseJra,decodeJra}=await import(`data:text/javascript;base64,${Buffer.from(b.outputFiles[0].text).toString('base64')}`);
+const {parseJra,decodeJra,jraFrame}=await import(`data:text/javascript;base64,${Buffer.from(b.outputFiles[0].text).toString('base64')}`);
 test('eight JRA markets retain complete support, frame self-pairs and ranged prices',()=>{
  const single=parseJra(jraBody('win_place'),race,'win_place');
  assert.deepEqual(single.runners,roster);assert.equal(single.metadata.flat,true);assert.equal(single.metadata.scheduled_start_at,'2000-01-01T01:05:00.000Z');
@@ -21,6 +21,10 @@ test('place payout positions come from the official header and frame attributes 
  assert.equal(parseJra(duplicate,race,'win_place').place_paid_positions,null);
  for(const tag of ['<img data-alt="枠1" />',`<img data-note="note alt='枠1'" />`,'<img alt="枠1" alt="枠2" />'])
   assert.throws(()=>parseJra(jraBody('win_place').replace('<img alt="枠1" />',tag),race,'win_place'),/RUNNERS/);
+ const colored=jraBody('win_place',{frameColors:true});
+ for(const [i,color] of ['白','黒','赤','青','黄','緑','橙','桃'].entries())assert.equal(jraFrame(`<img alt="枠${i+1}${color}" />`),i+1);
+ assert.deepEqual(parseJra(colored,race,'win_place').runners,roster);
+ assert.throws(()=>parseJra(colored.replace('枠1白','枠1黒'),race,'win_place'),/RUNNERS/);
 });
 test('missing combination is incomplete; an explicit no-vote cell stays unavailable',()=>{
  const absent=parseJra(jraBody('trifecta',{omit:'1-2-10'}),race,'trifecta',roster);assert.equal(absent.markets[0].complete,false);
