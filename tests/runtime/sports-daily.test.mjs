@@ -133,7 +133,7 @@ test('closing round yields to preclose odds due during the configured request bu
 const doScript=(await build({stdin:{contents:`import {SportsCollector} from './workers/sports/index';
 export class DailyTest extends SportsCollector {
  constructor(ctx,env){let failed=false;super(ctx,env.TEST_FAULT==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async(...a)=>{if(!failed){failed=true;throw new Error('SYNTHETIC_PUBLISH_FAULT');}return env.INDEX.batch(...a);}}}:env);}
- async seed(s,entries){await this.ctx.storage.put({'daily-state':s,'daily-sport':s.sport});if(entries)await this.schedule(entries);}
+ async seed(s,entries){const clock=Date.now;Date.now=()=>s.report.at;try{await this.ctx.storage.put({'daily-state':s,'daily-sport':s.sport});if(entries)await this.schedule(entries);}finally{Date.now=clock;}}
  async inspect(){return {state:await this.ctx.storage.get('daily-state'),plan:await this.planState(),guest_received_at:await this.ctx.storage.get('keirin-guest-received-at')};}
  async step(now,enabled,session,advance){const clock=Date.now,start=performance.now();Date.now=()=>now+(advance?Math.floor(performance.now()-start):0);try{if(enabled!==undefined)this.env.SPORTS_DAILY_ENABLED=String(enabled);if(session)await this.ctx.storage.put('guest-session',typeof session==='object'?session:{cookie:'SYNTHETIC',token:'SYNTHETIC',expires:now+3600000});await this.alarm();return this.inspect();}finally{Date.now=clock;}}
 }
