@@ -96,10 +96,10 @@ test('JRA results share immutable originals, as-of history, redelivery and saved
   assert.equal(plan.entries.length,1);assert.equal(plan.entries[0].target.kind,'result');
   assert.equal(new URLSearchParams(plan.entries[0].target.body).get('cname'),'pw01sde1005200001010220000101/BB');
   assert.equal((await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:3',at:Date.now()+60000})).deferred[0].reason,'RESULT_NAVIGATION_MISSING');
-  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v2'}),'RESULT_PARSED');
+  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v3'}),'RESULT_PARSED');
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);assert.equal(r.requests.length,2);
   const later=new Date().toISOString().replace('Z','000+00:00');
-  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v4',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
    .bind(later,later,first.event_id,config.result_parser_version).run();
   assert.deepEqual(await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:2',at:Date.now()+60000}),{error:'RESULT_UNAVAILABLE'});
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);
@@ -111,9 +111,9 @@ test('context is fixed to original fetch start, latest failure blocks new fetche
  const second=await r.tick(t,at);assert.equal(second.status,'RAW_STORED');
  await new Promise(resolve=>setTimeout(resolve,3));
  const future=new Date().toISOString().replace('Z','000+00:00');
- await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v2',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_PARSER_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+ await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_PARSER_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
   .bind(future,future,first.event_id,config.parser_version).run();
- assert.equal(await r.call({op:'reparse',event:second.event_id,target:t,version:'sports-odds-v2'}),'COMPLETE');
+ assert.equal(await r.call({op:'reparse',event:second.event_id,target:t,version:'sports-odds-v3'}),'COMPLETE');
  await r.reset();assert.equal((await r.tick(t)).status,'INVALID_CONTEXT');assert.equal(r.requests.length,2);
  await r.db.prepare('DELETE FROM sports_parses WHERE observation_id=?').bind(second.event_id).run();
  await r.db.prepare('DELETE FROM raw_observations WHERE observation_id=?').bind(second.event_id).run();
@@ -128,7 +128,7 @@ for(const change of ['phase','flat'])test('daily context rechecks latest interme
   if(change==='phase')value.phase='FINAL_ONLY';else value.metadata.flat=false;
   const key='synthetic/reparsed-'+change+'.json';await r.raw.put(key,JSON.stringify(value));
   await new Promise(resolve=>setTimeout(resolve,3));const later=new Date().toISOString().replace('Z','000+00:00');
-  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v2',sport,race_id,resource_id,?,?,'COMPLETE',?,NULL FROM sports_parses WHERE observation_id=? AND parser_version=?")
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'COMPLETE',?,NULL FROM sports_parses WHERE observation_id=? AND parser_version=?")
    .bind(later,later,key,first.event_id,config.parser_version).run();
   await r.reset();assert.equal((await r.tick({...target('quinella',first.event_id),context_phase:'INTERMEDIATE'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
   await r.reset();const finite=await r.tick(target('quinella',first.event_id));
@@ -279,19 +279,27 @@ for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster 
   }
  }finally{await r.mf.dispose();}
 });
-for(const missingWide of [false,true])test(`JRA daily results retain odds clocks${missingWide?' and retry a whole missing payout row':''}`,async()=>{
+for(const [missingWide,paidPlaces,invalidate] of [[false,3],[true,3],[false,2],[false,2,true]])test(`JRA daily results retain odds clocks${missingWide?' and retry a whole missing payout row':''}${paidPlaces===2?' and require published two-place evidence':''}${invalidate?' after invalidating a cached parse':''}`,async()=>{
  const responses=[],r=await runtime(responses,true);try{
   const window=await r.call({op:'day'}),day=window.day,year=day.slice(0,4),month=Number(day.slice(4,6)),date=Number(day.slice(6,8));
   const rename=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
-  let resultRequests=0,retried=false;
+  let resultRequests=0,retried=false,invalidated=false,oldEvidenceRejected=false;
   const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
-   const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:missingWide&&++resultRequests===1}):
-    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])));
+   const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:++resultRequests===1&&missingWide,paidPlaces:oldEvidenceRejected?3:paidPlaces}):
+    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])),{paidPlaces});
    return new Response(encoded(rename(body)));};
   responses.push(...Array(32).fill(respond));let at=window.start+3600000;
-  for(let i=0;i<32;i++){
+  for(let i=0;i<40;i++){
    await r.call({op:'alarm',now:at});const state=await r.call({op:'dailyState'});
-   if(missingWide&&resultRequests===1&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
+   const context=state.races[`jra:${day}:5:1`]?.final_context;
+   if(invalidate&&!invalidated&&context&&Object.values(state.tasks).filter(t=>t.kind==='final_odds').every(t=>t.done)){
+    const later=new Date().toISOString().replace('Z','000+00:00');
+    await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?").bind(later,later,context.event,config.parser_version).run();invalidated=true;
+   }
+   if(invalidate&&invalidated&&resultRequests===2&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
+    assert.notEqual(state.tasks[`result:jra:${day}:5:1`].done,true);oldEvidenceRejected=true;
+   }
+   if((missingWide||paidPlaces===2)&&resultRequests===1&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
     assert.notEqual(state.tasks[`result:jra:${day}:5:1`].done,true);retried=true;
    }
    if(state.races[`jra:${day}:5:1`]?.clock&&state.tasks[`result:jra:${day}:5:1`]?.done&&Object.values(state.tasks).filter(t=>t.kind==='final_odds').every(t=>t.done)&&Object.keys(state.actions??{}).length===0)break;
@@ -301,13 +309,13 @@ for(const missingWide of [false,true])test(`JRA daily results retain odds clocks
   assert.ok(facts.clock&&facts.results);assert.equal(facts.clock.target.program_kind,undefined);assert.equal(facts.results.target.program_kind,'results');
   assert.equal(facts.clock.value.program.races[0].close_at,null);assert.equal(state.tasks['result:'+id].done,true);
   assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);
-  assert.equal(r.requests.filter(q=>new URLSearchParams(q.body).get('cname').startsWith('pw01sde')).length,missingWide?2:1);
-  const rows=await r.call({op:'resultHistory',race:id,at:new Date(at).toISOString()});assert.equal(rows.length,missingWide?2:1);assert.ok(rows.every(x=>x.status==='RESULT_PARSED'));
+  assert.equal(r.requests.filter(q=>new URLSearchParams(q.body).get('cname').startsWith('pw01sde')).length,invalidate?3:missingWide||paidPlaces===2?2:1);
+  const rows=await r.call({op:'resultHistory',race:id,at:new Date(at).toISOString()});assert.equal(rows.length,invalidate?3:missingWide||paidPlaces===2?2:1);assert.ok(rows.every(x=>x.status==='RESULT_PARSED'));
   if(missingWide){assert.ok(retried);assert.equal((await r.parsed(rows[0].observation_id)).value.payouts.length,11);}
-  const v=(await r.parsed(rows.at(-1).observation_id)).value;assert.equal(v.phase,'RESULT_ONLY');assert.equal(v.payouts.length,12);assert.equal(v.settlement_qualified,false);
-  const odds=await r.call({op:'history',race:id,at:new Date(at).toISOString()});assert.equal(odds.length,7);assert.ok(odds.every(x=>x.status==='COMPLETE'));
-  const values=await Promise.all(odds.map(async x=>(await r.parsed(x.observation_id)).value));assert.ok(values.every(v=>v.phase==='FINAL_ONLY'));
-  assert.equal(new Set(values.flatMap(v=>v.markets.map(m=>m.market))).size,8);assert.equal(facts.win_context,undefined);assert.ok(facts.final_context);
+  const v=(await r.parsed(rows.at(-1).observation_id)).value;assert.equal(v.phase,'RESULT_ONLY');assert.equal(v.payouts.length,paidPlaces===2&&!invalidate?11:12);assert.equal(v.settlement_qualified,false);
+  const odds=await r.call({op:'history',race:id,at:new Date(at).toISOString()});assert.equal(odds.length,invalidate?8:7);assert.equal(odds.filter(x=>x.status==='PARSE_ERROR').length,invalidate?1:0);assert.ok(odds.every(x=>x.status==='COMPLETE'||invalidate&&x.status==='PARSE_ERROR'));
+  const values=await Promise.all(odds.filter(x=>x.status==='COMPLETE').map(async x=>(await r.raw.get(x.normalized_key)).json()));assert.ok(values.every(v=>v.phase==='FINAL_ONLY'));
+  assert.equal(new Set(values.flatMap(v=>v.markets.map(m=>m.market))).size,8);assert.equal(facts.win_context,undefined);assert.ok(facts.final_context);assert.equal(facts.final_context.place_paid_positions,paidPlaces);if(paidPlaces===2)assert.ok(retried);if(invalidate)assert.ok(oldEvidenceRejected);
  }finally{await r.mf.dispose();}
 });
 test('overdue JRA daily claims share an atomic start gate and a held request allows a later daily slot',async()=>{

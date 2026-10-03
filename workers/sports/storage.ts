@@ -60,36 +60,39 @@ export async function closedOddsSaved(env:CaptureStorage,event:string):Promise<b
  const value=(await completedObservation<Snapshot>(env,event,'odds','COMPLETE'))?.value;
  return !!value&&value.schema==='sports-odds-v1'&&['FINAL_ONLY','CLOSE_ONLY'].includes(value.phase)&&value.markets.length>0&&value.markets.every(m=>m.complete);
 }
-export async function publishedResultSaved(env:CaptureStorage,event:string,markets:string[]):Promise<boolean> {
+export async function publishedResultSaved(env:CaptureStorage,event:string,markets:string[],placePaidPositions?:number|null):Promise<boolean> {
  const value=(await completedObservation<ResultSnapshot>(env,event,'result','RESULT_PARSED'))?.value;
- return completePayoutMarkets(value??null,markets);
+ return completePayoutMarkets(value??null,markets,placePaidPositions);
 }
-export type JraWinContext={event:string;race_id:string;received_at:string;available_at:string};
+export type JraWinContext={event:string;race_id:string;received_at:string;available_at:string;place_paid_positions?:number|null};
 export async function savedJraWin(env:CaptureStorage,event:string,phase:'INTERMEDIATE'|'FINAL_ONLY'='INTERMEDIATE'):Promise<JraWinContext|null> {
  const result=await completedObservation<JraSnapshot>(env,event,'odds','COMPLETE');
  if(!result)return null;const v=result.value;
  if(!qualifiedJraWin(v,phase))return null;
- return {event,race_id:v.race_id,received_at:result.received_at,available_at:result.available_at};
+ return {event,race_id:v.race_id,received_at:result.received_at,available_at:result.available_at,place_paid_positions:v.place_paid_positions??null};
 }
-export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]):boolean {
+export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[],placePaidPositions?:number|null):boolean {
  if(!value||value.schema!=='sports-result-v1'||value.publication!=='PUBLISHED')return false;
  return markets.length>0&&[1,2,3].every(rank=>value.placings.some(p=>p.rank===rank))&&markets.every(m=>{
   const rows=value.payouts.filter(p=>p.market===m);return rows.length>0&&rows.every(p=>p.status==='NUMERIC'&&p.amount_yen!==null&&p.amount_yen>0);
- })&&(value.sport!=='jra'||normalJraPayouts(value));
+ })&&(value.sport!=='jra'||normalJraPayouts(value,placePaidPositions));
 }
-function normalJraPayouts(value:ResultSnapshot):boolean {
+function normalJraPayouts(value:ResultSnapshot,placePaidPositions?:number|null):boolean {
  // A numeric row per market cannot prove that a whole winning row was retained.
  // Upper ties remain unsupported; do not infer place coverage or frames from field size.
  const top=[1,2,3].map(rank=>value.placings.filter(p=>p.rank===rank));if(top.some(rows=>rows.length!==1))return false;
  const [a,b,c]=top.map(rows=>rows[0].entrant),sort=(ids:number[])=>[...ids].sort((x,y)=>x-y).join('-');
+ const frames=top.slice(0,2).map(rows=>rows[0].frame);
+ if(frames.some(f=>f===undefined||f===null||!Number.isInteger(f)||f<1||f>jraConfig.maximum_frames))return false;
  const expected:Record<string,string[]>={win:[String(a)],exacta:[`${a}-${b}`],quinella:[sort([a,b])],
-  trio:[sort([a,b,c])],trifecta:[`${a}-${b}-${c}`],wide:[sort([a,b]),sort([a,c]),sort([b,c])]};
+  trio:[sort([a,b,c])],trifecta:[`${a}-${b}-${c}`],wide:[sort([a,b]),sort([a,c]),sort([b,c])],frame_quinella:[sort(frames as number[])]};
  for(const [market,keys] of Object.entries(expected)){
   const actual=value.payouts.filter(p=>p.market===market).map(p=>p.combination?.join('-'));
   if(actual.length!==keys.length||keys.some(key=>!actual.includes(key)))return false;
  }
  const places=value.payouts.filter(p=>p.market==='place').map(p=>p.combination?.join('-'));
- return places.includes(String(a))&&places.includes(String(b))&&places.length<=3&&places.every(key=>[a,b,c].some(h=>String(h)===key));
+ const count=placePaidPositions??3;
+ return [2,3].includes(count)&&places.length===count&&[a,b,c].slice(0,count).every(h=>places.includes(String(h)));
 }
 export async function savedJraResult(env:CaptureStorage,event:string,at:number):Promise<{value:JraResultSnapshot;available_at:string;received_at:string}> {
  const result=await completedObservation<JraResultSnapshot>(env,event,'result','RESULT_PARSED',at);

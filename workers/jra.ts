@@ -5,8 +5,11 @@ import {date,programClock} from './sports/program-clock';
 import type {Market,Quote,Snapshot} from './sports/types';
 export type JraPage = keyof typeof config.tables;
 export type JraRunners={entrants:number[];frames:Record<string,number>};
-export type JraSnapshot=Omit<Snapshot,'sport'> & {sport:'jra';metadata:{race_date:string;venue:number;scheduled_start_at:string|null;course_label:string|null;race_type_label:string|null;flat:boolean|null};runners:JraRunners|null};
-const attribute=(raw:string,name:string)=>raw.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`,'i'))?.slice(1).find(x=>x!==undefined)??null;
+export type JraSnapshot=Omit<Snapshot,'sport'> & {sport:'jra';metadata:{race_date:string;venue:number;scheduled_start_at:string|null;course_label:string|null;race_type_label:string|null;flat:boolean|null};runners:JraRunners|null;place_paid_positions:number|null};
+const attribute=(raw:string,name:string)=>{
+ const values=[...raw.matchAll(/([^\s=\/"'<>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)].filter(m=>m[1].toLowerCase()===name.toLowerCase());
+ return values.length===1?values[0].slice(2).find(x=>x!==undefined)??null:null;
+};
 const classes=(raw:string)=>(attribute(raw,'class')??'').split(/\s+/);
 function tables(raw:string,name:string){return [...raw.matchAll(/<table\b([^>]*)>([\s\S]*?)<\/table>/gi)].filter(m=>classes(m[1]).includes(name));}
 function frameSupport(r:JraRunners){return [...new Set(combinations(r.entrants,2).map(c=>c.map(h=>r.frames[h]).sort((a,b)=>a-b).join('-')))].map(k=>k.split('-').map(Number));}
@@ -16,6 +19,11 @@ function support(r:JraRunners){
  return [...r.entrants].sort((a,b)=>a-b);
 }
 export function decodeJra(body:Uint8Array):string {return new TextDecoder(config.charset,{fatal:true,ignoreBOM:false}).decode(body);}
+export function jraFrame(raw:string|undefined):number|null {
+ const labels=[...(raw??'').matchAll(/<img\b([^>]*)>/gi)].map(m=>attribute(m[1],'alt')?.match(/^枠(\d+)$/)).filter(m=>m);
+ if(labels.length!==1)return null;
+ const frame=Number(labels[0]![1]);return Number.isInteger(frame)&&frame>=1&&frame<=config.maximum_frames?frame:null;
+}
 export function jraMetadata(raw:string,raceId:string):JraSnapshot['metadata'] {
  const ids=[...raw.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map(m=>text(m[1]).match(/(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]*\d+回([^\d]+)\d+日\s*(\d+)レース/)).filter(m=>m!==null);
  if(ids.length!==1)throw new Error('JRA_IDENTITY');const id=ids[0];
@@ -36,15 +44,17 @@ export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners
  const metadata=jraMetadata(raw,raceId);
  const time=raw.match(/<div\b[^>]*class=["']refresh_line["'][^>]*>[\s\S]*?<div\b[^>]*class=["']cell time["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
  const label=time?text(time):null,phase:Snapshot['phase']=label==='最終オッズ'?'FINAL_ONLY':label&&/\d+時\d+分.*現在/.test(label)?'INTERMEDIATE':'UNKNOWN';
- let runners: JraRunners|null=known??null;const markets:Market[]=[];
+ let runners: JraRunners|null=known??null,place_paid_positions:number|null=null;const markets:Market[]=[];
  if(page==='win_place'){
   const ts=tables(raw,config.tables.win_place);if(ts.length!==1)throw new Error('JRA_TABLE');
+  const paid=[...ts[0][2].matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map(m=>text(m[1]).match(/^複勝\s*[（(]\s*([23])着払い\s*[）)]$/)).filter(m=>m);
+  if(paid.length===1)place_paid_positions=Number(paid[0]![1]);
   const entrants:number[]=[],frames:Record<string,number>={},win:Quote[]=[],place:Quote[]=[];let frame:number|null=null,remaining=0;
   for(const row of ts[0][2].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
    const tags=[...row[1].matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)],cells=new Map(tags.map(c=>[attribute(c[1],'class'),c[2]]));
    if(!cells.has('num'))continue;const horse=Number(text(cells.get('num')!));
    if(cells.has('waku')){
-    if(remaining)throw new Error('JRA_FRAME_SPAN');frame=Number(cells.get('waku')!.match(/alt=["']枠(\d+)/)?.[1]);
+    if(remaining)throw new Error('JRA_FRAME_SPAN');frame=jraFrame(cells.get('waku'));
     remaining=Number(attribute(tags.find(c=>attribute(c[1],'class')==='waku')![1],'rowspan')??1);
    }
    if(!frame||!Number.isInteger(remaining)||remaining<1||remaining>config.maximum_entrants||!cells.has('odds_tan')||!cells.has('odds_fuku'))throw new Error('JRA_RUNNERS');
@@ -77,5 +87,5 @@ export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners
  }
  return {schema:'sports-odds-v1',sport:'jra',race_id:raceId,phase,source_updated_at:null,source_published_at:null,
   time_semantics:'JRA display time label; update/publish semantics unverified',markets,runners,
-  metadata};
+  metadata,place_paid_positions};
 }
