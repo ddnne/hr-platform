@@ -12,6 +12,20 @@ from hr_platform.realdata import RealData, completeness, validate_manifest, file
 from hr_platform.store import Store
 
 
+def test_monthly_inspection_is_final_only_and_never_creates_observations(tmp_path):
+    from test_parser import monthly_archive
+    from hr_platform.parser import MONTHLY_VERSION
+    store = Store(tmp_path / 'private-monthly', clock=lambda: f.at(5))
+    try:
+        report = RealData(store).inspect(monthly_archive(), '200001_0946680000_odds.zip', 'FINAL_ONLY', 'utf-8-sig')
+        assert report['status'] == 'PARSED_UNQUALIFIED' and report['recipe']['odds_version'] == MONTHLY_VERSION
+        assert set(report['content']) == {f.RACE, f.RACE.replace('20000101', '20000102')}
+        assert not report['paper_eligible'] and not report['live_qualified']
+        assert store.db.execute('SELECT count(*) FROM observations').fetchone()[0] == 0
+    finally:
+        store.close()
+
+
 def race_archive(*, finished=False, payout_rows=None, encoding="utf-8-sig", horse_count=4, popularity=False, start="1414"):
     key = {"競馬場": "SYNTHETIC", "競走年月日": "20000101", "レース番号": "1"}
     race = {**key, "発走時刻": start, "芝ダート区分": "ダート", "頭数": "4"}

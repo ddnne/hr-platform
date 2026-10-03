@@ -642,3 +642,91 @@ def test_normalizer_prioritizes_fresh_receipts_over_old_race_and_odds_imports(cl
             assert actual - completed == {expected}
             completed = actual
     asyncio.run(scenario())
+
+
+def seed_monthly(cloud, number, minute, raw=None, kind='FINAL_ONLY', filename='200001_0946680000_odds.zip'):
+    from test_parser import monthly_archive
+    event = cloud.seed(number, minute, monthly_archive() if raw is None else raw, kind, 'nar-daily-monthly')
+    cloud.db.conn.execute('UPDATE captures SET file_name=? WHERE event_id=?', (filename, event))
+    cloud.db.conn.commit()
+    return event
+
+
+def test_saved_monthly_reparse_is_final_only_and_never_backdated(cloud, monkeypatch):
+    async def scenario():
+        daily = cloud.seed(70, 0, kind='DAILY_SNAPSHOT')
+        await cloud.h.normalize(daily)
+        before = await cloud.h.asof(f.RACE, ['quinella'], f.at(5))
+        final_event = seed_monthly(cloud, 71, 1)
+        cloud.clock[0] = f.at(7)
+        parsed = await cloud.h.normalize(final_event)
+        assert parsed['version'] == module.FINAL_VERSION and parsed['status'] == 'OK'
+        assert parsed['available_at'] == stamp(f.at(7))
+        assert await cloud.h.normalize(final_event) == parsed
+        assert await cloud.h.asof(f.RACE, ['quinella'], f.at(5)) == before
+        assert (await cloud.h.asof(f.RACE, ['quinella'], f.at(7)))['markets']['quinella']['observation_id'] == daily
+        assert (await cloud.h.final_prices(f.RACE, ['quinella'], f.at(6)))['missing_markets'] == ['quinella']
+        current = await cloud.h.final_prices(f.RACE, ['quinella'], f.at(7))
+        assert current['markets']['quinella']['observation_id'] == final_event
+        assert not current['paper_eligible']
+        assert current['markets']['quinella']['content']['source_updated_at'] is None
+        monkeypatch.setattr(module, 'FINAL_VERSION', module.FINAL_VERSION + ':repair')
+        cloud.clock[0] = f.at(9)
+        repaired = await cloud.h.normalize(final_event)
+        assert repaired['parse_id'] != parsed['parse_id'] and repaired['available_at'] == stamp(f.at(9))
+        assert await cloud.h.final_prices(f.RACE, ['quinella'], f.at(7)) == current
+        assert cloud.db.conn.execute('SELECT count(*) FROM raw_observations').fetchone()[0] == 2
+    asyncio.run(scenario())
+
+
+def test_monthly_normalization_does_not_delay_live_receipts_and_is_idempotent(cloud):
+    from hr_platform.cloud_normalization import normalize_next
+    async def scenario():
+        final_event = seed_monthly(cloud, 73, 2)
+        daily = cloud.seed(72, 0, kind='DAILY_SNAPSHOT')
+        def run():
+            return normalize_next(cloud.bucket, cloud.db, None, 60, clock=lambda: cloud.clock[0])
+        assert (await run())['status'] == 'PARSED'
+        rows = cloud.db.conn.execute('SELECT observation_id FROM normalization_jobs').fetchall()
+        assert [r[0] for r in rows] == [daily]
+        assert (await run())['status'] == 'PARSED'
+        assert (await run())['status'] == 'IDLE'
+        assert cloud.db.conn.execute('SELECT count(*) FROM odds_races WHERE parse_id IN (SELECT parse_id FROM odds_parses WHERE observation_id=?)', (final_event,)).fetchone()[0] == 2
+    asyncio.run(scenario())
+
+
+def test_invalid_late_monthly_member_publishes_no_partial_races(cloud):
+    from test_parser import monthly_archive
+    from hr_platform.parser import unzip
+    body = next(iter(unzip(f.archive()).values()))
+    raw = monthly_archive({'200001_01_odds.csv': body, '200001_02_odds.csv': b'SYNTHETIC changed header\n'})
+    event = seed_monthly(cloud, 74, 0, raw)
+    parsed = asyncio.run(cloud.h.normalize(event))
+    assert parsed['status'] == 'ERROR' and parsed['available_at'] is None
+    assert not cloud.db.conn.execute('SELECT * FROM odds_races').fetchall()
+    assert (asyncio.run(cloud.h.final_prices(f.RACE, ['quinella'], f.at(5))))['missing_markets'] == ['quinella']
+
+
+def test_monthly_observation_requires_final_only_kind(cloud):
+    event = seed_monthly(cloud, 75, 0, kind='DAILY_SNAPSHOT')
+    with pytest.raises(ValueError, match='MONTHLY_IS_FINAL_ONLY'):
+        asyncio.run(cloud.h.normalize(event))
+
+
+def test_monthly_aggregate_can_exceed_daily_limit_but_each_object_stays_bounded(cloud, monkeypatch):
+    from test_parser import monthly_archive
+    from hr_platform.common import canonical
+    from hr_platform.parser import iter_monthly_odds_races, unzip
+    races = dict(iter_monthly_odds_races(monthly_archive(), {}, '200001'))
+    limit = max(len(canonical(v)) for v in races.values()) + 100
+    monkeypatch.setattr(module, 'MAX_EXPANDED', limit)
+    assert sum(len(canonical(v)) for v in races.values()) > limit
+    event = seed_monthly(cloud, 76, 0)
+    assert asyncio.run(cloud.h.normalize(event))['status'] == 'OK'
+    assert all(len(body) <= limit for key, body in cloud.bucket.objects.items() if key.startswith('odds-normalized/'))
+    # The same daily two-race archive retains its aggregate bound.
+    body = next(iter(unzip(f.archive()).values()))
+    combined = body + b''.join(body.splitlines(keepends=True)[1:]).replace(b'20000101', b'20000102')
+    raw = monthly_archive({'20000101_odds.csv': combined})
+    daily = cloud.seed(77, 0, raw, 'DAILY_SNAPSHOT')
+    assert asyncio.run(cloud.h.normalize(daily))['status'] == 'ERROR'

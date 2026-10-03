@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import time
 from .common import canonical, identity, instant, sha, stamp
-from .parser import parse_odds, unzip, VERSION, MAX_COMPRESSED
+from .parser import parse_odds, iter_monthly_odds_races, unzip, VERSION, MONTHLY_VERSION, MAX_COMPRESSED
 from .race_files import parse_race_bundle, VERSION as RACE_VERSION
 
 SCHEMA = """
@@ -135,7 +135,7 @@ class RealData:
             "filename": filename,
             "dataset_kind": dataset_kind,
             "encoding": encoding,
-            "odds_version": VERSION,
+            "odds_version": MONTHLY_VERSION if meta['filename_kind'] == 'FINAL_ONLY' else VERSION,
             "race_version": RACE_VERSION,
         }
         inspection_id = identity([digest, recipe])
@@ -162,9 +162,12 @@ class RealData:
             files = unzip(raw)
             report["members"] = [{"name": k, "bytes": len(v), "sha256": sha(v)} for k, v in files.items()]
             if any(name.endswith("_odds.csv") for name in files):
-                if len(files) != 1:
-                    raise ValueError("UNEXPECTED_ZIP_MEMBER")
-                odds = parse_odds(raw, {}, encoding)
+                if meta['filename_kind'] == 'FINAL_ONLY':
+                    odds = dict(iter_monthly_odds_races(raw, {}, filename[:6], encoding))
+                else:
+                    if len(files) != 1:
+                        raise ValueError("UNEXPECTED_ZIP_MEMBER")
+                    odds = parse_odds(raw, {}, encoding)
                 report.update(content_type="odds", content=odds, coverage=completeness(odds))
             else:
                 report.update(content_type="race", content=parse_race_bundle(raw, encoding))

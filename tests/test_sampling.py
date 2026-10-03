@@ -88,11 +88,13 @@ def monthly_plan(minute=4):
 
 
 def test_monthly_inspection_is_separate_replayable_and_shares_limits(store):
+    from test_parser import monthly_archive
     calls = []
     def opener(item):
         calls.append(item)
         filename = "200001_0946706400_odds.zip" if item["kind"] == "monthly_odds" else "20000101_0946706400_odds.zip"
-        return Response(headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        return Response(monthly_archive() if item['kind'] == 'monthly_odds' else None,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
     samples = Samples(store, opener)
     monthly = monthly_plan()
     samples.register(monthly)

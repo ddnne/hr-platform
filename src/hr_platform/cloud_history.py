@@ -11,9 +11,11 @@ import math
 import re
 from .common import canonical, identity, sha, stamp, utcnow
 from .history import asof_view
-from .parser import iter_odds_races, VERSION as PARSER_VERSION, MAX_COMPRESSED, MAX_EXPANDED
+from .parser import (iter_odds_races, iter_monthly_odds_races, VERSION as PARSER_VERSION,
+                     MONTHLY_VERSION, MAX_COMPRESSED, MAX_EXPANDED)
 
 VERSION = f"cloud-odds-v3:{PARSER_VERSION}"
+FINAL_VERSION = f"cloud-monthly-v1:{MONTHLY_VERSION}"
 HISTORY_PAGE_BYTES = 1024 * 1024
 PUBLICATION_CLOCK = "strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')"
 
@@ -69,18 +71,22 @@ class CloudHistory:
 
     async def normalize(self, observation_id, encoding="utf-8-sig"):
         if not isinstance(observation_id, str) or not re.fullmatch(
-            r"nar-(?:daily-odds:\d+|mac-import:[0-9a-f]{64})", observation_id,
+            r"nar-(?:daily-(?:odds|monthly):\d+|mac-import:[0-9a-f]{64})", observation_id,
         ):
             raise ValueError("OBSERVATION_ID")
         if encoding not in {"utf-8-sig", "cp932"}:
             raise ValueError("ENCODING_UNQUALIFIED")
-        parse_id = identity([observation_id, VERSION, encoding])
-        old = await self.first("SELECT * FROM odds_parses WHERE parse_id=?", parse_id)
-        if old and (old["available_at"] or old["status"] == "ERROR"):
-            return old
         observation = await self.first("SELECT * FROM raw_observations WHERE observation_id=?", observation_id)
         if not observation or observation["dataset_kind"] not in {"DAILY_SNAPSHOT", "FINAL_ONLY", "SYNTHETIC"}:
             raise ValueError("OBSERVATION_MISSING_OR_KIND")
+        monthly = observation_id.startswith('nar-daily-monthly:')
+        if monthly and observation['dataset_kind'] != 'FINAL_ONLY':
+            raise ValueError('MONTHLY_IS_FINAL_ONLY')
+        version = FINAL_VERSION if monthly else VERSION
+        parse_id = identity([observation_id, version, encoding])
+        old = await self.first("SELECT * FROM odds_parses WHERE parse_id=?", parse_id)
+        if old and (old["available_at"] or old["status"] == "ERROR"):
+            return old
         if stamp(observation["raw_saved_at"]) > stamp(self.clock()):
             raise ValueError("CLOCK_ORDER")
         digest = observation["raw_sha256"]
@@ -91,10 +97,22 @@ class CloudHistory:
             raise ValueError("BODY_CORRUPT")
         races, total, pending, pending_bytes = {}, 0, [], 0
         try:
-            for race_id, race in iter_odds_races(raw, {}, encoding):
+            if monthly:
+                capture = await self.first('SELECT file_name FROM captures WHERE event_id=?', observation_id)
+                filename = capture['file_name'] if capture else None
+                match = re.fullmatch(r'(\d{6})_\d{10}_odds\.zip', filename or '')
+                if not match:
+                    raise ValueError('MONTHLY_FILENAME')
+                iterator = iter_monthly_odds_races(raw, {}, match[1], encoding)
+            else:
+                iterator = iter_odds_races(raw, {}, encoding)
+            for race_id, race in iterator:
                 data = canonical(race)
                 total += len(data)
-                if total > MAX_EXPANDED:
+                # Monthly parts are stored by race, so their aggregate JSON
+                # need not fit a daily archive's bound. Every readable object,
+                # the source ZIP and each in-flight batch remain bounded.
+                if len(data) > MAX_EXPANDED or (not monthly and total > MAX_EXPANDED):
                     raise ValueError("NORMALIZED_LIMIT")
                 if pending and pending_bytes + len(data) > self.batch_bytes:
                     races.update(await self.save_race_batch(pending))
@@ -107,10 +125,13 @@ class CloudHistory:
                     pending, pending_bytes = [], 0
             if pending:
                 races.update(await self.save_race_batch(pending))
-            digest = await self.save_body(canonical({'format': 'odds-races-v2', 'races': races}))
+            index = canonical({'format': 'odds-races-v2', 'races': races})
+            if len(index) > MAX_EXPANDED:
+                raise ValueError('NORMALIZED_LIMIT')
+            digest = await self.save_body(index)
         except (ValueError, UnicodeError, KeyError, csv.Error) as exc:
             await self.run("INSERT OR IGNORE INTO odds_parses VALUES(?,?,?,?,'ERROR',?,NULL,NULL,?)",
-                           parse_id, observation_id, VERSION, encoding, stamp(self.clock()), type(exc).__name__)
+                           parse_id, observation_id, version, encoding, stamp(self.clock()), type(exc).__name__)
             return await self.first("SELECT * FROM odds_parses WHERE parse_id=?", parse_id)
         if old and old["body_hash"] != digest:
             raise ValueError("PARSE_VERSION_CONFLICT")
@@ -118,7 +139,7 @@ class CloudHistory:
         # the completion of parsing. No duration here claims billed CPU time.
         parsed_at = stamp(self.clock())
         await self.run("INSERT OR IGNORE INTO odds_parses VALUES(?,?,?,?,'WRITING',?,NULL,?,NULL)",
-                       parse_id, observation_id, VERSION, encoding, parsed_at, digest)
+                       parse_id, observation_id, version, encoding, parsed_at, digest)
         stored = await self.first("SELECT * FROM odds_parses WHERE parse_id=?", parse_id)
         if stored["body_hash"] != digest:
             raise ValueError("PARSE_VERSION_CONFLICT")

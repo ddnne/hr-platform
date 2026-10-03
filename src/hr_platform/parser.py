@@ -5,13 +5,16 @@ No ZIP entry is written to disk. CSV maximum odds/status are retained, not imput
 """
 
 import csv
+from datetime import datetime
 import io
 import math
 from pathlib import PurePosixPath
+import re
 import unicodedata
 import zipfile
 
 VERSION = "nar-odds-columns-20260916-v1"
+MONTHLY_VERSION = f"nar-monthly-v1:{VERSION}"
 HEADERS = [
     "競馬場",
     "競走年月日",
@@ -109,7 +112,14 @@ def odds_rows(raw, race_states, encoding="utf-8-sig"):
     odds_files = [v for k, v in files.items() if k.endswith("_odds.csv")]
     if len(odds_files) != 1 or len(files) != 1:
         raise ValueError("ODDS_FILE_COUNT")
-    reader = csv.reader(io.TextIOWrapper(io.BytesIO(odds_files[0]), encoding=encoding, errors="strict", newline=""))
+    yield from csv_odds_rows(odds_files[0], race_states, encoding)
+
+
+def csv_odds_rows(body, race_states, encoding, *, allow_empty=False):
+    """The daily and monthly adapters share the same strict row semantics."""
+    if encoding not in {"utf-8-sig", "cp932"}:
+        raise ValueError("ENCODING_UNQUALIFIED")
+    reader = csv.reader(io.TextIOWrapper(io.BytesIO(body), encoding=encoding, errors="strict", newline=""))
     if next(reader, None) != HEADERS:
         raise ValueError("SCHEMA_CHANGED")
     any_rows = False
@@ -154,7 +164,7 @@ def odds_rows(raw, race_states, encoding="utf-8-sig"):
             "popularity": rest[5] or None,
         }
         yield race_id, state, market, key, quote
-    if not any_rows:
+    if not any_rows and not allow_empty:
         raise ValueError("EMPTY_ODDS")
 
 
@@ -179,10 +189,14 @@ def iter_odds_races(raw, race_states, encoding="utf-8-sig"):
     Cloud publication happens only after this iterator is fully consumed, so
     malformed later rows never expose an incomplete archive as available.
     """
+    yield from grouped_races(odds_rows(raw, race_states, encoding))
+
+
+def grouped_races(rows):
     from itertools import groupby
 
     seen = set()
-    for race_id, rows in groupby(odds_rows(raw, race_states, encoding), key=lambda row: row[0]):
+    for race_id, rows in groupby(rows, key=lambda row: row[0]):
         if race_id in seen:
             raise ValueError("NONCONTIGUOUS_RACE")
         seen.add(race_id)
@@ -192,3 +206,26 @@ def iter_odds_races(raw, race_states, encoding="utf-8-sig"):
                 race = {"state": state, "markets": {}}
             add_quote(race, market, key, quote)
         yield race_id, race
+
+
+def iter_monthly_odds_races(raw, race_states, month, encoding="utf-8-sig"):
+    """Final-only archive parts, with one shared CSV parser and no inferred history."""
+    if not isinstance(month, str) or len(month) != 6 or not month.isascii() or not month.isdigit():
+        raise ValueError('MONTH')
+    datetime.strptime(month, '%Y%m')
+    files = unzip(raw)
+    if any(not re.fullmatch(month + r'_[0-9]{2}_odds\.csv', name) for name in files):
+        raise ValueError('MONTHLY_MEMBER')
+    seen = set()
+    for body in files.values():
+        for race_id, race in grouped_races(csv_odds_rows(body, race_states, encoding, allow_empty=True)):
+            date = race_id.split(':', 1)[0]
+            if not date.startswith(month) or len(date) != 8:
+                raise ValueError('MONTHLY_RACE_DATE')
+            datetime.strptime(date, '%Y%m%d')
+            if race_id in seen:
+                raise ValueError('MONTHLY_DUPLICATE_RACE')
+            seen.add(race_id)
+            yield race_id, race
+    if not seen:
+        raise ValueError('EMPTY_ODDS')
