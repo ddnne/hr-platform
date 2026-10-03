@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-import {catalogTarget,jraCatalog,jraProgram} from '../fixtures/synthetic/jra.mjs';
+import {catalogTarget,jraCatalog,jraProgram,resultCatalogTarget,jraResultCatalog,jraResultProgram} from '../fixtures/synthetic/jra.mjs';
 import {readFile} from 'node:fs/promises';
 const config=JSON.parse(await readFile('configs/jra-source.json','utf8'));
 const b=await build({stdin:{contents:`export {parseProgram} from './workers/sports/discovery';export {validateTarget} from './workers/sports/capture';
@@ -108,4 +108,53 @@ test('changed or removed JRA start invalidates the old action, preserves cutoff 
  assert.equal(state.races[old.target.race_id].clock.value.program.races[0].close_at,null);
  await p.acceptProgram(state,source(jraProgram({clock:'中止'}),venue,now+3),now+3);
  assert.ok(Object.values(state.tasks).every(t=>t.done));assert.deepEqual(p.nextDailyParallel(state,now+3),[]);
+});
+const resultCatalog=p.parseProgram(jraResultCatalog,resultCatalogTarget),resultVenue=p.discoveryTargets(resultCatalog).targets[0];
+test('result discovery uses only published official identities and retains final-price links without clocks',()=>{
+ p.validateTarget(resultCatalogTarget);p.validateTarget(resultVenue);assert.equal(resultVenue.program_kind,'results');
+ const v=p.parseProgram(jraResultProgram(),resultVenue).program;
+ assert.deepEqual(Object.keys(v.result_navigation),['jra:20000101:5:1']);assert.ok(v.final_odds_navigation['jra:20000101:5:1']);
+ assert.equal(v.races,undefined);assert.equal(p.parseProgram(jraResultProgram({empty:true}),resultVenue).program.result_navigation['jra:20000101:5:1'],undefined);
+ assert.equal(p.parseProgram(jraResultCatalog,resultCatalogTarget).program.venues[0].venue,5);
+ assert.deepEqual(p.parseProgram(jraResultCatalog.replaceAll('20000101','20000102'),resultCatalogTarget).program.venues,[]);
+ assert.throws(()=>p.parseProgram(jraResultProgram().replace('class="race_num"','class="changed"'),resultVenue),/NOT_READY/);
+ assert.throws(()=>p.parseProgram(jraResultProgram().replace('pw01sde1005','pw01sde1008'),resultVenue),/IDENTITY/);
+ assert.throws(()=>p.parseProgram(jraResultProgram().replace('pw151ou1005','pw151ou1008'),resultVenue),/IDENTITY/);
+ assert.throws(()=>p.validateTarget({...resultCatalogTarget,program_kind:undefined}),/ORIGIN/);
+});
+test('result programs and navigation replacement preserve odds clocks, actions and input roster',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraCatalog,catalogTarget),now);
+ await p.acceptProgram(state,source(jraProgram(),venue),now);const clock=structuredClone(state.races['jra:20000101:5:1'].clock);
+ await p.acceptProgram(state,source(jraResultCatalog,resultCatalogTarget),now);
+ assert.equal(Object.values(state.tasks).filter(t=>t.target?.discovery_stage==='venue'&&!t.done).length,2);
+ await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);
+ assert.deepEqual(state.races['jra:20000101:5:1'].clock,clock);assert.ok(state.races['jra:20000101:5:1'].results);
+ await p.acceptProgram(state,source(jraResultCatalog.replace('/AA','/AB'),resultCatalogTarget),now+1);
+ assert.deepEqual(state.races['jra:20000101:5:1'].clock,clock);assert.equal(state.races['jra:20000101:5:1'].results,undefined);
+ assert.equal(Object.values(state.tasks).filter(t=>t.target?.discovery_stage==='venue'&&!t.done).length,2);
+ assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);
+});
+test('result tasks need published fresh navigation, retry incomplete payouts and finish independently of a cutoff',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);
+ const key='result:jra:20000101:5:1',first=p.nextDailyParallel(state,now)[0];assert.equal(first.target.kind,'result');
+ assert.equal(state.tasks[key].close_at,undefined);assert.equal(state.tasks[key].start_at,undefined);assert.equal(state.races[first.target.race_id].clock,undefined);
+ await p.completeDaily(state,first,'RAW_STORED',first.at,false,false);assert.equal(state.tasks[key].done,undefined);
+ const at=first.at+state.tasks[key].interval*1000,next=p.nextDailyParallel(state,at)[0];assert.ok(next);
+ await p.completeDaily(state,next,'RAW_STORED',next.at,false,true);assert.equal(state.tasks[key].done,true);
+ await p.completeDaily(state,first,'RAW_STORED',next.at,false,false);assert.equal(state.tasks[key].done,true);
+});
+test('a replaced result recipe cannot be completed by the old action and stale/missing sources expire',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);
+ const key='result:jra:20000101:5:1',old=p.nextDailyParallel(state,now)[0];
+ await p.acceptProgram(state,source(jraResultProgram({name:'pw01sde1005200001010120000101/AB'}),resultVenue),now+1);
+ await p.completeDaily(state,old,'RAW_STORED',now+2,false,true);assert.equal(state.tasks[key].done,false);
+ const current=p.nextDailyParallel(state,now+2)[0];assert.ok(current.target.body.includes('AB'));
+ await p.completeDaily(state,current,'RAW_STORED',now+3,false,false);p.rejectProgram(state,resultVenue);
+ assert.deepEqual(p.nextDailyParallel(state,state.tasks[key].next_at),[]);
+ assert.deepEqual(p.nextDailyParallel(state,state.tasks[key].expires_at+1),[]);assert.equal(state.tasks[key].done,true);
+});
+test('saved daily migration adds the result catalog once and leaves queued action state unchanged',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};state.actions={'synthetic-in-flight':{task:'synthetic-in-flight',entries:[]}};
+ assert.equal(await p.ensureDailyCatalogs(state,now),true);assert.equal(Object.keys(state.tasks).length,2);
+ const before=structuredClone(state);assert.equal(await p.ensureDailyCatalogs(state,now+1),false);assert.deepEqual(state,before);
 });

@@ -6,7 +6,7 @@ import {collect,validateTarget,validateContext,sourceFor,concurrencyFor,spacingF
 import {history,resourceId,normalize,savedProgram,savedJraWin,savedJraResult,closedOddsSaved,publishedResultSaved} from './storage';
 import {discoveryTargets} from './discovery-plan';
 import {oddsTargets} from './odds-plan';
-import {businessDay,initialDaily,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
+import {businessDay,initialDaily,ensureDailyCatalogs,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
 import {supportsProgram} from './discovery';
 import type {CaptureSport,SportsEnv,Target,CaptureTarget,JraResultTarget} from './types';
 import {recipeJson,type CaptureManifest} from '../capture-storage';
@@ -33,6 +33,10 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   const sport=await this.ctx.storage.get<CaptureSport>('daily-sport');if(!sport||!this.dailyEnabled(sport))return null;
   let state=await this.ctx.storage.get<DailyState>('daily-state');
   if(!state||state.day!==businessDay(Date.now()).day&&!state.action&&!Object.keys(state.actions??{}).length){state=await initialDaily(sport,Date.now());await this.ctx.storage.put('daily-state',state);}
+  else if(sport==='jra')state=await this.ctx.storage.transaction(async store=>{
+   const current=await store.get<DailyState>('daily-state');if(!current)throw new Error('DAILY_STATE');
+   if(await ensureDailyCatalogs(current,Date.now()))await store.put('daily-state',current);return current;
+  });
   return state;
  }
  async dailyState():Promise<DailyState|null> {return this.env.SPORTS_DAILY_ENABLED==='true'?await this.ctx.storage.get<DailyState>('daily-state')??null:null;}
@@ -122,10 +126,13 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   const winContext=entry.daily_task&&entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&status==='RAW_STORED'?await savedJraWin(this.env,event):null;
   let published=false;
   if(entry.daily_task?.startsWith('result:')&&status==='RAW_STORED'){
+   if(entry.target.sport==='jra')published=await publishedResultSaved(this.env,event,['win','place','frame_quinella','quinella','wide','trifecta','trio','exacta']);
+   else {
    const state=await this.ctx.storage.get<DailyState>('daily-state'),facts=state?.races[entry.target.race_id];
    if(facts?.clock){const plan=oddsTargets(facts.clock,entry.target.race_id,(state!.tasks[entry.daily_task]?.close_at??Date.now())+config.daily.final_odds_delay_seconds*1000,facts.runners,'CLOSED');
     const markets=entry.target.sport==='keirin'?plan.targets.map(t=>t.sport==='keirin'?t.market!:''):['win','place','exacta','quinella','wide','trifecta','trio'];
     if(entry.target.sport!=='keirin'||!plan.deferred.length)published=await publishedResultSaved(this.env,event,markets);}
+   }
   }
   // Concurrent HTTP completion must merge into the current state atomically.
   await this.ctx.storage.transaction(async store=>{
