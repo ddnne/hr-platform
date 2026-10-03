@@ -149,3 +149,22 @@ def test_sport_place_rules_and_frame_support_use_same_joint_payoffs(config, n, p
     for market in offered:
         _, event, odds, _ = ticket_catalog(omega, market, markets[market]['quotes'], frames=frames, place_places=places)
         np.testing.assert_allclose((event @ np.full(len(omega), 1 / len(omega))) * odds, 0.8)
+
+
+@pytest.mark.parametrize('missing', ['quinella', 'trio'])
+def test_missing_target_excludes_its_family_and_retains_independent_choices(config, missing):
+    from hr_platform.research_suite import analyze_suite
+    markets = fixtures.markets('uniform')
+    del markets[missing]
+    result = analyze_suite([1, 2, 3, 4], markets, config, configs())
+    assert len(result['candidates']) == 91
+    if missing == 'quinella':
+        assert result['primary_error'] == 'INCOMPLETE_MARKET'
+        assert result['candidates']['reference_baseline']['status'] == 'INPUT_EXCLUDED'
+        assert result['trio_analysis'] is not None
+    else:
+        assert result['primary_error'] is None
+        assert result['family_exclusions']['trio'] == 'INCOMPLETE_MARKET'
+        assert result['family_exclusions']['joint_kelly'] == 'INCOMPLETE_MARKET'
+        assert result['candidates']['trio_reference']['status'] == 'INPUT_EXCLUDED'
+        assert result['candidates']['reference_baseline']['status'] != 'INPUT_EXCLUDED'

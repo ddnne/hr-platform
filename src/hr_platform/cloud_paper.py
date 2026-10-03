@@ -45,15 +45,7 @@ class CloudPaper(CloudHistory):
         return max(stamp(self.clock()), self.database_time)
 
     async def metadata(self, race_id, at):
-        saved = await self.races.day(race_id.split(':')[0], at, race_id)
-        row = saved['snapshot']
-        evidence = None if not row else {
-            'id': row['parse_id'], 'observation_id': row['observation_id'], 'raw_hash': row['raw_sha256'],
-            'received_at': row['received_at'], 'available_at': row['available_at'],
-            'status': 'OBSERVED_UNQUALIFIED', 'metadata': saved['races'].get(race_id),
-        }
-        return {'race_id': race_id, 'asof_at': stamp(at), 'evidence': evidence,
-                'age_seconds': seconds(at, row['received_at']) if row else None}
+        return await self.races.metadata(race_id, at)
 
     async def enroll(self, race_id, base_config):
         config = configuration(base_config)
