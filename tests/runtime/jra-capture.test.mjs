@@ -25,6 +25,7 @@ export default {async fetch(req,env){const v=await req.json();
  if(v.op==='reparse'){try{return Response.json(await normalize(storageEnv,v.event,v.target,v.version));}catch(e){return Response.json({error:e.message});}}
  if(v.op==='validate'){try{validateTarget(v.target);return Response.json(true);}catch(e){return Response.json(e.message);}}
  if(v.op==='schedule')return Response.json(await env.CONTROL.schedule(JSON.stringify(v.entries)));
+ if(v.op==='planState')return Response.json(JSON.parse(await env.CONTROL.planState('jra')));
  if(v.op==='daily'){try{return Response.json(await env.CONTROL.ensureDaily('jra'));}catch(e){return Response.json(e.message);}}
  if(v.op==='cron'){const called=[];await sports.scheduled({}, {...env,SPORTS_DAILY_ENABLED:'true',SPORTS:{idFromName:s=>s,get:s=>({ensureDaily:async()=>called.push(s)})}});return Response.json(called);}
  return Response.json(await collect(v.at,storageEnv,v.target,undefined,!!v.parallel));}};`,resolveDir:process.cwd()},
@@ -145,4 +146,17 @@ test('JRA wait is durable after raw publication while normalization is still rea
  assert.equal((await r.tick({...target(),race_id:'jra:20000101:5:2'},at,true)).status,'WAIT_OR_BLOCKED');assert.equal(r.requests.length,1);
  await r.call({op:'releaseRead'});assert.equal((await first).status,'RAW_STORED');
  }finally{await r.call({op:'releaseRead'});await first;await r.mf.dispose();}
+});
+test('object key order does not create a conflicting reservation or a second observation',async()=>{
+ const reverse=v=>Array.isArray(v)?v.map(reverse):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).reverse().map(([k,x])=>[k,reverse(x)])):v;
+ const r=await runtime([{}]);try{
+ const pending={at:Date.now()+60000,target:target()};
+ assert.equal(await r.call({op:'schedule',entries:[pending,reverse(pending)]}),'REGISTERED');
+ assert.equal(await r.call({op:'schedule',entries:[reverse(pending)]}),'REGISTERED');assert.equal((await r.call({op:'planState'})).pending,1);
+ assert.equal(await r.call({op:'schedule',entries:[{...pending,target:{...pending.target,deadline_at:pending.at+60000}}]}),'INPUT_OR_CAPACITY_ERROR');
+ const at=Date.now(),observed=await r.tick(target(),at);assert.equal(observed.status,'RAW_STORED');
+ assert.equal(await r.call({op:'schedule',entries:[reverse({at,target:target()})]}),'REGISTERED');
+ assert.equal((await r.call({op:'planState'})).pending,1);assert.equal(r.requests.length,1);
+ assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
 });
