@@ -185,6 +185,55 @@ def test_final_only_is_readable_history_but_not_asof_input(cloud):
     asyncio.run(scenario())
 
 
+def test_final_prices_keep_availability_and_do_not_fall_back_to_intermediate(cloud):
+    async def scenario():
+        await cloud.h.normalize(cloud.seed(61, 0, kind='DAILY_SNAPSHOT'))
+        old_input = await cloud.h.asof(f.RACE, ['win', 'quinella'], f.at(5))
+        missing = await cloud.h.final_prices(f.RACE, ['win', 'quinella'], f.at(5))
+        assert missing['markets'] == {} and missing['missing_markets'] == ['win', 'quinella']
+        final_event = cloud.seed(62, 2, f.archive(distorted=False), 'FINAL_ONLY')
+        cloud.clock[0] = f.at(8)
+        parsed = await cloud.h.normalize(final_event)
+        prices = await cloud.h.final_prices(f.RACE, ['win', 'quinella'], f.at(8))
+        assert not prices['paper_eligible'] and prices['purpose'] == 'POST_RACE_FINAL_PRICE_EVALUATION'
+        assert not prices['missing_markets']
+        with pytest.raises(ValueError, match='ASOF_IN_FUTURE'):
+            await cloud.h.final_prices(f.RACE, ['win'], f.at(9))
+        with pytest.raises(ValueError, match='MARKETS'):
+            await cloud.h.final_prices(f.RACE, ['win', 'win'], f.at(8))
+        for row in prices['markets'].values():
+            assert row['event']['dataset_kind'] == 'FINAL_ONLY'
+            assert row['observation_id'] == final_event and row['parse_id'] == parsed['parse_id']
+            assert row['available_at'] == parsed['available_at']
+            assert row['content']['source_updated_at'] is None
+        assert await cloud.h.final_prices(f.RACE, ['win', 'quinella'], f.at(5)) == missing
+        assert await cloud.h.asof(f.RACE, ['win', 'quinella'], f.at(5)) == old_input
+        assert (await cloud.h.asof(f.RACE, ['quinella'], f.at(8)))['markets']['quinella']['event']['dataset_kind'] == 'DAILY_SNAPSHOT'
+        cloud.clock[0] = f.at(9)
+        await cloud.h.normalize(cloud.seed(63, 8, kind='DAILY_SNAPSHOT'))
+        assert await cloud.h.final_prices(f.RACE, ['win', 'quinella'], f.at(9)) == {**prices, 'asof_at': stamp(f.at(9))}
+    asyncio.run(scenario())
+
+
+def test_final_price_reparse_cannot_restore_removed_market(cloud, monkeypatch):
+    async def scenario():
+        event = cloud.seed(64, 0, kind='FINAL_ONLY')
+        await cloud.h.normalize(event)
+        past = await cloud.h.final_prices(f.RACE, ['quinella'], f.at(5))
+        original = module.iter_odds_races
+        def removed(*args, **kwargs):
+            for race, body in original(*args, **kwargs):
+                del body['markets']['quinella']
+                yield race, body
+        monkeypatch.setattr(module, 'iter_odds_races', removed)
+        monkeypatch.setattr(module, 'VERSION', 'synthetic-final-price-reparse')
+        cloud.clock[0] = f.at(8)
+        await cloud.h.normalize(event)
+        assert (await cloud.h.final_prices(f.RACE, ['quinella'], f.at(8)))['missing_markets'] == ['quinella']
+        assert await cloud.h.final_prices(f.RACE, ['quinella'], f.at(5)) == past
+    asyncio.run(scenario())
+
+
 def test_later_value_never_leaks_into_old_view_and_stale_stays_stale(cloud):
     async def scenario():
         await cloud.h.normalize(cloud.seed(1, 0))

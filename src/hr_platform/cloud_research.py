@@ -77,6 +77,9 @@ class CloudResearch(CloudHistory):
         return await self.all('''SELECT * FROM cloud_research_jobs WHERE bundle_id=? AND job_id>?
             ORDER BY job_id LIMIT ?''', bundle_id, after or '', self.policy['list_limit'])
 
+    async def final_prices(self, race_id, markets, at):
+        return await self.odds.final_prices(race_id, markets, at)
+
     async def result(self, job_id, at):
         cutoff = self.cutoff(at)
         row = await self.first('SELECT * FROM cloud_research_jobs WHERE job_id=?', job_id)

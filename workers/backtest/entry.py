@@ -28,7 +28,7 @@ class Default(WorkerEntrypoint):
                 raise ValueError('INPUT_LIMIT')
             request = json.loads(payload)
             operation = request.pop('operation')
-            if operation not in {'register', 'enqueue', 'jobs', 'result'}:
+            if operation not in {'register', 'enqueue', 'jobs', 'result', 'final_prices'}:
                 raise ValueError('OPERATION')
             result = await getattr(engine, operation)(**request)
             return json.dumps({'status': 'OK', 'result': result}, allow_nan=False)
