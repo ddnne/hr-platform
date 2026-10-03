@@ -321,7 +321,7 @@ export async function completeDaily(state:DailyState,entry:DailyEntry,status:str
    (!task.navigation||new URLSearchParams(entry.target.body).get('cname')===task.navigation)){
   if(task.kind==='final_odds'&&action.closed_odds||task.kind==='result'&&resultPublished)task.done=true;
   if(task.kind==='request'&&status==='RAW_STORED'&&task.target?.sport==='keirin'&&new URL(task.target.url).searchParams.get('type')===config.sources.keirin.identity_json_type)task.done=true;
-  task.last_at=now;task.next_at=now+task.interval*1000;
+  task.last_at=now;task.next_at=now+(status==='SOURCE_WAIT'?spacingFor(state.sport,true):task.interval)*1000;
   }
   if(state.action===action)state.action=null;else delete state.actions![action.task];
   state.wake_at=now+spacingFor(state.sport,true)*1000;}

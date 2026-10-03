@@ -358,3 +358,24 @@ for(const status of [403,429])test(`a delayed granted JRA request respects a lat
   assert.equal((await r.db.prepare("SELECT count(*) n FROM captures WHERE status='FETCHING'").first()).n,0);
  }finally{await r.mf.dispose();}
 });
+
+test('a fast completion keeps a delayed granted request waiting rather than dropping its odds snapshot',async()=>{
+ const r=await runtime([{},{}]);try{
+  const at=Date.now()-1000,spacing=config.daily_request_spacing_seconds*1000;
+  const delayed=r.call({target:target(),at,parallel:true,daily:true,batchLag:spacing+1000});
+  await new Promise(resolve=>setTimeout(resolve,spacing+200));
+  assert.equal((await r.tick(target(),at-1,true,true)).status,'RAW_STORED');
+  assert.equal((await delayed).status,'RAW_STORED');assert.equal(r.requests.length,2);
+  assert.ok(r.requests[1].started-r.requests[0].started>=spacing-20);
+ }finally{await r.mf.dispose();}
+});
+test('a delayed grant and start-tail wait cannot extend the advertised capture deadline',async()=>{
+ const r=await runtime([{}]);try{
+  const at=Date.now()-1000,spacing=config.daily_request_spacing_seconds*1000,deadline=Date.now()+spacing+800;
+  const delayed=r.call({target:{...target(),deadline_at:deadline},at,parallel:true,daily:true,batchLag:spacing+1000});
+  await new Promise(resolve=>setTimeout(resolve,spacing+200));
+  assert.equal((await r.tick(target(),at-1,true,true)).status,'RAW_STORED');
+  assert.ok(['SOURCE_WAIT','MISSED_WINDOW','DEADLINE_REACHED'].includes((await delayed).status));assert.equal(r.requests.length,1);
+  assert.equal((await r.db.prepare("SELECT count(*) n FROM captures WHERE status='FETCHING'").first()).n,0);
+ }finally{await r.mf.dispose();}
+});
