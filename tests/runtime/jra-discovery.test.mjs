@@ -30,6 +30,12 @@ test('ended/cancelled/unknown labels never become a scheduled start or observed 
  }
  assert.throws(()=>p.parseProgram(jraProgram({clock:'99:05'}),venue),/CLOCK/);
 });
+test('Japanese advertised start uses the shared clock while preserving its original label',()=>{
+ const r=p.parseProgram(jraProgram({clock:'10時05分'}),venue).program.races[0];
+ assert.equal(r.start_at,'2000-01-01T01:05:00.000Z');assert.equal(r.start_label,'10時05分');assert.equal(r.close_at,null);
+ assert.throws(()=>p.parseProgram(jraProgram({clock:'99時05分'}),venue),/CLOCK/);
+ assert.equal(p.parseProgram(jraProgram({clock:'未定'}),venue).program.races[0].start_at,null);
+});
 test('shared daily discovery permits one JRA action and no odds/result task or legacy fallback',async()=>{
  const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraCatalog,catalogTarget),now);
  let entries=p.nextDailyParallel(state,now);assert.equal(entries.length,1);assert.equal(entries[0].target.kind,'schedule');

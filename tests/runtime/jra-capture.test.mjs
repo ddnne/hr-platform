@@ -174,7 +174,9 @@ test('JRA programs use shared immutable capture, parser versions and as-of histo
  const cutoff=new Date().toISOString(),read=at=>r.call({op:'programHistory',race:catalogTarget.race_id,at});
  const past=await read(cutoff);assert.equal(past.length,1);await r.reset();await new Promise(resolve=>setTimeout(resolve,3));
  const second=await r.tick(catalogTarget);assert.notEqual(second.event_id,first.event_id);assert.equal((await read(new Date().toISOString())).length,2);
- assert.deepEqual(await read(cutoff),past);assert.equal(await r.call({op:'reparse',event:first.event_id,target:catalogTarget,version:'sports-program-v2'}),'PROGRAM_PARSED');
+ const newer='sports-program-v'+(Number(config.program_parser_version.match(/\d+$/)[0])+1);
+ assert.deepEqual(await read(cutoff),past);assert.equal(await r.call({op:'reparse',event:first.event_id,target:catalogTarget,version:newer}),'PROGRAM_PARSED');
+ assert.equal((await read(new Date().toISOString())).length,3);
  assert.deepEqual(await read(cutoff),past);assert.equal(r.requests.length,2);
  assert.equal((await r.db.prepare("SELECT count(DISTINCT raw_sha256) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,1);
  assert.equal((await r.call({op:'history',race:catalogTarget.race_id,at:new Date().toISOString()})).length,0);
