@@ -52,3 +52,14 @@ test('shared daily discovery permits one JRA action and no odds/result task or l
  assert.throws(()=>p.resultTarget(s,'jra:20000101:5:1'),/JRA_RESULT_UNSUPPORTED/);
  p.rejectProgram(state,venue);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
 });
+test('changed venue navigation replaces only the periodic task and cannot restore old clocks',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraCatalog,catalogTarget),now);
+ const old=p.nextDailyParallel(state,now)[0];await p.acceptProgram(state,source(jraProgram(),venue),now);
+ await p.acceptProgram(state,source(jraCatalog.replace('pw15orl0005','pw15orl1005'),catalogTarget),now+1);
+ assert.equal(state.tasks[old.daily_task].done,true);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
+ await p.acceptProgram(state,source(jraProgram(),venue),now+2);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
+ await p.completeDaily(state,old,'RAW_STORED',now+2);const next=p.nextDailyParallel(state,now+2)[0];
+ assert.ok(next.target.body.includes('pw15orl1005'));assert.equal(Object.values(state.tasks).filter(t=>!t.done).length,1);
+ await p.acceptProgram(state,source(jraCatalog,catalogTarget),now+3);
+ assert.equal(Object.values(state.tasks).filter(t=>!t.done).length,1);assert.equal(state.tasks[old.daily_task].done,false);
+});
