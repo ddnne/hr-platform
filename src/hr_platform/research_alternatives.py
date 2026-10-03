@@ -15,7 +15,7 @@ def _distribution(q, size, tolerance):
     return q
 
 
-def estimate(runners, markets, saved_analysis, base, config):
+def estimate(runners, markets, saved_analysis, base, config, *, win_probability_source='market'):
     """Target prices never enter estimation. PL is a comparison, not the main model."""
     if base['target'] != 'quinella' or config['target'] != base['target']:
         raise ValueError('ALTERNATIVE_TARGET')
@@ -26,10 +26,17 @@ def estimate(runners, markets, saved_analysis, base, config):
     if [list(s) for s in omega] != [list(s) for s in saved_analysis['omega']]:
         raise ValueError('ALTERNATIVE_STATE_ORDER')
     tolerance = base['probability_tolerance']
-    win_s, _, win_p, _, _ = reference(omega, 'win', markets['win']['quotes'])
     pair_s, _, pair_p, _, _ = reference(omega, 'exacta', markets['exacta']['quotes'])
-    win, pair = dict(zip(win_s, win_p)), dict(zip(pair_s, pair_p))
+    pair = dict(zip(pair_s, pair_p))
     row_sum = {i: sum(p for (a, _), p in pair.items() if a == i) for i in runners}
+    if win_probability_source == 'market':
+        win_s, _, win_p, _, _ = reference(omega, 'win', markets['win']['quotes'])
+        win = dict(zip(win_s, win_p))
+    elif win_probability_source == 'exacta_first_marginal':
+        # A marginal of observed pair probabilities, not a fabricated win market.
+        win = {(i,): row_sum[i] for i in runners}
+    else:
+        raise ValueError('WIN_PROBABILITY_SOURCE')
     powered = pair_p ** power
     powered /= powered.sum()
     powered = dict(zip(pair_s, powered))
@@ -60,6 +67,7 @@ def estimate(runners, markets, saved_analysis, base, config):
                for s, p in zip(selections, result[name]['probabilities'])):
             raise ValueError('ALTERNATIVE_SAVED_FIT_MISMATCH')
     return {'omega': omega, 'selections': [key(s) for s in selections], 'estimators': result,
+            'win_probability_source': win_probability_source,
             'basis': 'MARKET_IMPLIED_DISTRIBUTIONS_NOT_VERIFIED_WIN_PROBABILITIES'}
 
 
