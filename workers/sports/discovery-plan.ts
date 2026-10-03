@@ -1,11 +1,12 @@
 /** Pure follow-up requests. This builds a plan, never performs or enables collection. */
 import config from '../../configs/sports-collection.json';
+import jra from '../../configs/jra-source.json';
 import {validateTarget} from './capture';
 import {date,type Program} from './discovery';
-import type {Sport,Target} from './types';
+import type {Sport,Target,CaptureTarget} from './types';
 type Deferred={race_id:string;reason:string};
-export function discoveryTargets(value:Program,parentObservation?:string):{targets:Target[];deferred:Deferred[]} {
- const targets:Target[]=[],deferred:Deferred[]=[],[,day]=value.requested_race_id.split(':');date(day);
+export function discoveryTargets(value:Program,parentObservation?:string):{targets:CaptureTarget[];deferred:Deferred[]} {
+ const targets:CaptureTarget[]=[],deferred:Deferred[]=[],[,day]=value.requested_race_id.split(':');date(day);
  const defer=(race_id:string,reason:string)=>deferred.push({race_id,reason});
  const program=value.program;
  const make=(sport:Sport,venue:number,no:number):Target=>({sport,race_id:`${sport}:${day}:${venue}:${no}`,kind:'schedule',url:''});
@@ -16,7 +17,13 @@ export function discoveryTargets(value:Program,parentObservation?:string):{targe
   url:config.sources.keirin.origin+config.sources.keirin.live_path,form:true,body:new URLSearchParams({encp:navigation}).toString()});
  const identity=(venue:number,navigation:string):Target=>({...make('keirin',venue,0),discovery_stage:'race',
   url:config.sources.keirin.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:config.sources.keirin.identity_json_type,encp:navigation,mode:'0'})});
- if('venues' in program&&program.venues)for(const v of program.venues){
+ if(value.sport==='jra'){
+  if('venues' in program&&program.venues)for(const v of program.venues){
+   if(v.sport!=='jra'||v.race_date!==day||!v.public_navigation){defer(`jra:${day}:${v.venue}:0`,'BUSINESS_DAY_MISMATCH');continue;}
+   targets.push({sport:'jra',race_id:`jra:${day}:${v.venue}:0`,kind:'schedule',discovery_stage:'venue',form:true,
+    url:jra.origin+jra.odds_path,body:new URLSearchParams({cname:v.public_navigation}).toString()});
+  }
+ }else if('venues' in program&&program.venues)for(const v of program.venues){
   const scope=`${value.sport}:${day}:${v.venue}:0`;
   if(v.sport!==value.sport||v.race_date!==day){defer(scope,'BUSINESS_DAY_MISMATCH');continue;}
   if(v.sport==='auto'){

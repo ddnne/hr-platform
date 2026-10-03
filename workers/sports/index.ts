@@ -1,7 +1,7 @@
 /** Separate private Worker. No horse, research, Paper or wagering bindings. */
 import {DurableObject,WorkerEntrypoint} from 'cloudflare:workers';
 import config from '../../configs/sports-collection.json';
-import {collect,validateTarget,validateContext,sourceFor} from './capture';
+import {collect,validateTarget,validateContext,sourceFor,concurrencyFor,spacingFor} from './capture';
 import {history,resourceId,normalize,savedProgram,closedOddsSaved,publishedResultSaved} from './storage';
 import {discoveryTargets} from './discovery-plan';
 import {oddsTargets} from './odds-plan';
@@ -12,25 +12,24 @@ import {recipeJson,type CaptureManifest} from '../capture-storage';
 type Entry=Omit<DailyEntry,'target'> & {target:CaptureTarget};
 type Session={cookie:string;token?:string;expires:number};
 function planTime(event:string,at:number):number {
- const now=Date.now();if(!/^sports:(?:auto|boat|keirin):\d+:[0-9a-f]{64}$/.test(event)||!Number.isSafeInteger(at)||at<now||at>now+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');return now;
+ const now=Date.now();if(!/^sports:(?:auto|boat|keirin|jra):\d+:[0-9a-f]{64}$/.test(event)||!Number.isSafeInteger(at)||at<now||at>now+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');return now;
 }
-function planEntries(targets:Target[],at:number,now:number):Entry[] {
- const entries=targets.map((target,i)=>({at:at+i*config.request_spacing_seconds*1000,target}));
+function planEntries(targets:CaptureTarget[],at:number,now:number):Entry[] {
+ const entries=targets.map((target,i)=>({at:at+i*spacingFor(target.sport)*1000,target}));
  if(entries.length>config.maximum_plan_entries||entries.some(e=>e.at>now+config.plan_horizon_seconds*1000))throw new Error('PLAN_WINDOW');return entries;
 }
 export class SportsCollector extends DurableObject<SportsEnv> {
  private dailyEnabled(sport:CaptureSport):boolean {
-  return sport!=='jra'&&this.env.SPORTS_DAILY_ENABLED==='true'&&this.env.SPORTS_ENABLED==='true'&&JSON.parse(this.env.SPORTS_PROVIDERS_JSON).includes(sport);
+  return this.env.SPORTS_DAILY_ENABLED==='true'&&this.env.SPORTS_ENABLED==='true'&&JSON.parse(this.env.SPORTS_PROVIDERS_JSON).includes(sport);
  }
  async ensureDaily(sport:CaptureSport):Promise<string> {
-  if(sport==='jra')throw new Error('DAILY_UNSUPPORTED');
-  if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
+  if(sport!=='jra'&&!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
   if(!this.dailyEnabled(sport))return 'DISABLED';
-  const saved=await this.ctx.storage.get<Sport>('daily-sport');if(saved&&saved!==sport)throw new Error('ONE_SOURCE');
+  const saved=await this.ctx.storage.get<CaptureSport>('daily-sport');if(saved&&saved!==sport)throw new Error('ONE_SOURCE');
   await this.ctx.storage.put('daily-sport',sport);await this.daily();await this.arm();return 'ARMED';
  }
  private async daily():Promise<DailyState|null> {
-  const sport=await this.ctx.storage.get<Sport>('daily-sport');if(!sport||!this.dailyEnabled(sport))return null;
+  const sport=await this.ctx.storage.get<CaptureSport>('daily-sport');if(!sport||!this.dailyEnabled(sport))return null;
   let state=await this.ctx.storage.get<DailyState>('daily-state');
   if(!state||state.day!==businessDay(Date.now()).day&&!state.action&&!Object.keys(state.actions??{}).length){state=await initialDaily(sport,Date.now());await this.ctx.storage.put('daily-state',state);}
   return state;
@@ -67,7 +66,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   if(this.env.SPORTS_ENABLED!=='true')return 'DISABLED';
   const items:Record<string,Entry>={};
   for(const entry of entries){validateTarget(entry.target);
-   if(entry.target.sport==='jra'&&(entry.daily_task!==undefined||entry.daily_day!==undefined))throw new Error('DAILY_UNSUPPORTED');
+   if(entry.target.sport==='jra'&&(entry.daily_task!==undefined||entry.daily_day!==undefined))throw new Error('DAILY_METADATA');
    if(!recovery)await validateContext(entry.target,this.env);
    if(entry.target.headers||!Number.isSafeInteger(entry.at)||!recovery&&entry.at<Date.now()-config.capture_window_seconds*1000||entry.at>Date.now()+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');
    const resource=await resourceId(entry.target),key=`plan:${entry.at}:${resource}`;
@@ -97,12 +96,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  }
  private async arm() {
   const daily=await this.daily();
-  const sport=await this.ctx.storage.get<Sport>('daily-sport')??[...(await this.ctx.storage.list<Entry>({prefix:'plan:'})).values()][0]?.target.sport,
+  const sport=await this.ctx.storage.get<CaptureSport>('daily-sport')??[...(await this.ctx.storage.list<Entry>({prefix:'plan:'})).values()][0]?.target.sport,
    gate=sport?await this.env.INDEX.prepare('SELECT next_allowed_at FROM source_control WHERE source=?').bind(sourceFor(sport)).first<{next_allowed_at:number}>():null;
   await this.ctx.storage.transaction(async store=>{
    const queue=[...(await store.list<Entry>({prefix:'plan:'})).values()],times=queue.map(e=>e.at);
    const current=daily?await store.get<DailyState>('daily-state'):null;
-   if(current&&Object.keys(current.actions??{}).length<config.maximum_parallel_requests)times.push(current.wake_at);
+   if(current&&Object.keys(current.actions??{}).length<concurrencyFor(current.sport))times.push(current.wake_at);
    if(!times.length){await store.deleteAlarm();return;}
    await store.setAlarm(Math.max(Date.now()+1,gate?.next_allowed_at??0,Math.min(...times)));
   });
@@ -110,7 +109,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  private async finish(key:string,status:string):Promise<void> {
   if(['WAIT_OR_BLOCKED','STORAGE_ERROR','FETCHING'].includes(status)){await this.ctx.storage.setAlarm(Date.now()+config.request_spacing_seconds*1000);return;}
   const entry=await this.ctx.storage.get<Entry>(key);if(!entry)return;
-  if(entry.target.sport==='jra'){await this.ctx.storage.delete(key);await this.arm();return;}
+  if(entry.target.sport==='jra'&&!entry.daily_task){await this.ctx.storage.delete(key);await this.arm();return;}
   const dailyEntry:DailyEntry={...entry,target:entry.target};
   const event=`sports:${entry.target.sport}:${entry.at}:${await resourceId(entry.target)}`;
   let source:Awaited<ReturnType<typeof savedProgram>>|null=null;
@@ -151,7 +150,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    const allowed=gate?.blocked||!gate||gate.next_allowed_at<=Date.now();
    const due=allowed?ordered.filter(([,e])=>e.at<=Date.now()):[];
    if(due.length&&(pending||exclusive(due[0][1]))){if(!running.size){attempted.add(due[0][0]);await this.runEntry(...due[0]);}break;}
-   for(const [key,entry] of due){if(running.size>=config.maximum_parallel_requests||exclusive(entry))break;
+   for(const [key,entry] of due){if(running.size>=concurrencyFor(sport)||exclusive(entry))break;
     attempted.add(key);const job=this.runEntry(key,entry,true).catch(e=>{errors.push(e);}).finally(()=>{running.delete(key);});running.set(key,job);
    }
    if(!running.size)break;
@@ -262,7 +261,7 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async history(sport:CaptureSport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after));
  }
- async programHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
+ async programHistory(sport:CaptureSport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'program'));
  }
  async resultHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
@@ -279,8 +278,7 @@ export default {
  async scheduled(_controller:ScheduledController,env:SportsEnv):Promise<void> {
   if(env.SPORTS_DAILY_ENABLED!=='true'||env.SPORTS_ENABLED!=='true')return;
   for(const sport of JSON.parse(env.SPORTS_PROVIDERS_JSON) as CaptureSport[]){
-   if(sport==='jra')continue;
-   if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
+   if(sport!=='jra'&&!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
    await env.SPORTS.get(env.SPORTS.idFromName(sport)).ensureDaily(sport);
   }
  }

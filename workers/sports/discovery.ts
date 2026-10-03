@@ -1,29 +1,18 @@
 /** Pure discovery adapters. A program clock is an advertised time, not an observed deadline. */
 import config from '../../configs/sports-collection.json';
 import {text} from './parsers';
-import type {Sport,Target} from './types';
+import type {Sport,CaptureSport,CaptureTarget} from './types';
+import {date,programClock} from './program-clock';
+export {date,programClock} from './program-clock';
+import {parseJraProgram} from '../jra-program';
 
-export type Venue = {sport:Sport;race_date:string;venue:number;current_race:number|null;
+export type Venue = {sport:CaptureSport;race_date:string;venue:number;current_race:number|null;
  public_navigation:string|null;cancel_label:string|null};
 export type Race = {race_id:string;race_date:string;venue:number;race:number;
  start_at:string|null;close_at:string|null;start_label:string|null;close_label:string|null;
  time_semantics:'PROVIDER_ADVERTISED_PROGRAM';final_race_number:number|null};
 const integer=(v:unknown,max:number)=>{const n=Number(v);if(!Number.isInteger(n)||n<1||n>max)throw new Error('PROGRAM_ID');return n;};
 const raceNumber=(v:unknown)=>integer(String(v).replace(/^(\d+)R$/,'$1'),config.discovery.maximum_race_number);
-export function date(value:unknown):string {
- const s=String(value).replaceAll('-','');if(!/^\d{8}$/.test(s))throw new Error('PROGRAM_DATE');
- const iso=`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
- const milliseconds=Date.parse(iso+'T00:00:00Z');
- if(!Number.isFinite(milliseconds)||new Date(milliseconds).toISOString().slice(0,10)!==iso)throw new Error('PROGRAM_DATE');
- return s;
-}
-export function programClock(day:string,label:unknown):string|null {
- const d=date(day);if(label===null||label===undefined||label==='')return null;
- const m=String(label).match(/^(\d{1,2}):(\d{2})$/);if(!m)throw new Error('PROGRAM_CLOCK');
- const hour=Number(m[1]),minute=Number(m[2]);if(hour>config.discovery.maximum_clock_hour||minute>=60)throw new Error('PROGRAM_CLOCK');
- const start=Date.parse(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T00:00:00Z`)-config.discovery.clock_timezone_offset_minutes*60_000;
- return new Date(start+(hour*60+minute)*60_000).toISOString();
-}
 const label=(value:unknown)=>value===undefined||value===null||value===''?null:String(value);
 function race(sport:Sport,day:string,venue:number,no:number,start:unknown,close:unknown,last:unknown=null):Race {
  const start_label=label(start),close_label=label(close);
@@ -115,17 +104,19 @@ export function keirinRunners(raw:string) {
  return {declared_count:count,frame_category_label:label(d.wakuKbn),entries};
 }
 
-export function supportsProgram(t:Target):boolean {
+export function supportsProgram(t:CaptureTarget):boolean {
  const u=new URL(t.url);
+ if(t.sport==='jra')return t.kind==='schedule';
  return t.kind==='schedule'&&(t.sport==='auto'&&['/race_info/XML/Hold/Today','/race_info/OtherRaceInfo'].includes(u.pathname)
   ||t.sport==='boat'&&['/owpc/pc/race/index','/owpc/pc/race/raceindex'].includes(u.pathname)
   ||t.sport==='keirin'&&u.pathname==='/pc/json'&&['JSJ048','JST010',config.sources.keirin.identity_json_type].includes(u.searchParams.get('type')??''))
   ||t.sport==='keirin'&&t.kind==='guest'&&u.pathname==='/pc/racelive';
 }
-export function parseProgram(raw:string,t:Target) {
+export function parseProgram(raw:string,t:CaptureTarget) {
  if(!supportsProgram(t))throw new Error('PROGRAM_RESOURCE');const u=new URL(t.url),[,day,venue]=t.race_id.split(':');
  let program;
- if(t.sport==='auto')program=u.pathname.endsWith('/Today')?{venues:autoVenues(raw)}:{races:[autoProgram(raw,{race_date:day,venue:Number(venue),race:Number(t.race_id.split(':')[3])})]};
+ if(t.sport==='jra'){if(t.kind!=='schedule')throw new Error('PROGRAM_RESOURCE');program=parseJraProgram(raw,t);}
+ else if(t.sport==='auto')program=u.pathname.endsWith('/Today')?{venues:autoVenues(raw)}:{races:[autoProgram(raw,{race_date:day,venue:Number(venue),race:Number(t.race_id.split(':')[3])})]};
  else if(t.sport==='boat'){
   if(u.searchParams.get('hd')!==day||u.pathname.endsWith('/raceindex')&&Number(u.searchParams.get('jcd'))!==Number(venue))throw new Error('PROGRAM_IDENTITY');
   program=u.pathname.endsWith('/raceindex')?{races:boatProgram(raw,day,Number(venue))}:{venues:boatVenues(raw,day)};

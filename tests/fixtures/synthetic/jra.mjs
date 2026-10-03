@@ -1,5 +1,15 @@
 export const race='jra:20000101:5:1',entrants=[1,2,10,11],frames={1:1,2:2,10:3,11:3};
 export const roster={entrants,frames};
+export const catalogTarget={sport:'jra',race_id:'jra:20000101:0:0',kind:'schedule',discovery_stage:'catalog',form:true,
+ url:'https://www.jra.go.jp/JRADB/accessO.html',body:'cname=pw15oli00%2F6D'};
+export const venueNavigation='pw15orl00052000010120000101/AA';
+const link=(name,label)=>`<a href="#" onclick="return doAction('/JRADB/accessO.html', '${name}');">${label}</a>`;
+export const jraCatalog=`<h3>1月1日</h3>${link(venueNavigation,'1回東京1日')}<h3>1月2日</h3>${link('pw15orl00052000010220000102/BB','1回東京2日')}`;
+export function jraProgram({clock='10:05',no=1,day='20000101',venue=5}={}){
+ const prefixes={win_place:'pw151ou',frame_quinella:'pw153ou',quinella:'pw154ou',wide:'pw155ou',exacta:'pw156ou',trio:'pw157ou',trifecta:'pw158ou'};
+ const names=Object.entries(prefixes).map(([page,prefix])=>link(`${prefix}S3${String(venue).padStart(2,'0')}20000101${String(no).padStart(2,'0')}${day}Z${page==='trio'?'99':''}/AA`,page));
+ return `<h1>2000年1月1日 1回東京1日</h1><table><tr><th>${names[0]}</th><td class="time">${clock}</td><td>${names.join('')}</td></tr></table>`;
+}
 const classes={win_place:'tanpuku',frame_quinella:'waku',quinella:'umaren',wide:'wide',exacta:'umatan',trio:'fuku3',trifecta:'tan3'};
 export function jraBody(page,{phase='最終オッズ',omit=null,value='12.3',course='芝・左',venue='東京',day='2000年1月1日',category='3歳以上',raceName='合成競走'}={}){
  let body=`<h1><img alt="合成ロゴ" /></h1><h1>合成オッズ<span class="opt">${day}（土曜）1回${venue}1日 1レース</span></h1><span class="race_name">${raceName}</span><div class="cell category">${category}</div><div class="cell course">コース：1,600メートル（${course}）</div><div>発走時刻：<strong>10時05分</strong></div><div class="refresh_line"><div class="cell time"><strong>${phase}</strong></div></div>`;

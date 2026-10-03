@@ -8,7 +8,7 @@ import {parseResult,supportsResult} from './results';
 import {validateContext,requiresContext,jraRunners,RaceContextError} from './context';
 import type {CaptureSport,CaptureTarget,Target,Snapshot,ResultSnapshot} from './types';
 export function normalizationKind(t:CaptureTarget):'odds'|'program'|'result'|null {
- if(t.sport==='jra')return 'odds';
+ if(t.sport==='jra')return t.kind==='schedule'?'program':'odds';
  return supportsProgram(t)?'program':supportsResult(t)?'result':t.kind==='odds'?'odds':null;
 }
 export async function normalize(env:CaptureStorage,event:string,target:CaptureTarget,version?:string):Promise<string> {
@@ -16,7 +16,7 @@ export async function normalize(env:CaptureStorage,event:string,target:CaptureTa
  const saved=await manifest.json<{target:CaptureTarget;fetch_started_at:string}>();if(!saved.target)throw new Error('PARSE_RECIPE_REQUIRED');
  target=saved.target;
  const kind=normalizationKind(target);if(!kind)throw new Error('PARSE_RESOURCE');
- version??=target.sport==='jra'?jraConfig.parser_version:kind==='program'?config.program_parser_version:kind==='result'?config.result_parser_version:config.parser_version;
+ version??=target.sport==='jra'?(kind==='program'?jraConfig.program_parser_version:jraConfig.parser_version):kind==='program'?config.program_parser_version:kind==='result'?config.result_parser_version:config.parser_version;
  if(!new RegExp(`^sports-${kind}-v\\d+$`).test(version))throw new Error('PARSER_KIND');
  const existing=await env.INDEX.prepare('SELECT status FROM sports_parses WHERE observation_id=? AND parser_version=?').bind(event,version).first<{status:string}>();
  if(existing)return existing.status;
@@ -30,12 +30,12 @@ export async function normalize(env:CaptureStorage,event:string,target:CaptureTa
  let key:string|null=null,error:string|null=null,status='PARSE_ERROR';
  let result,known:JraRunners|undefined;
  if(requiresContext(target)){
-  try{if(target.sport==='jra')known=await jraRunners(target,env,Date.parse(saved.fetch_started_at));
+  try{if(target.sport==='jra'&&target.kind==='odds')known=await jraRunners(target,env,Date.parse(saved.fetch_started_at));
    else await validateContext(target,env);}catch(e){if(!(e instanceof RaceContextError))throw e;error='INVALID_CONTEXT';}
  }
  try {
   if(error)throw new Error(error);
-  if(target.sport==='jra')result=parseJra(decodeJra(bytes!),target.race_id,target.page,known);
+  if(target.sport==='jra')result=target.kind==='schedule'?parseProgram(decodeJra(bytes!),target):parseJra(decodeJra(bytes!),target.race_id,target.page,known);
   else result=kind==='program'?parseProgram(text!,target):kind==='result'?parseResult(text!,target):parseOdds(text!,target);
   if(result.schema==='sports-result-v1'&&target.sport==='keirin'){result.identity_status='CONTEXT_VERIFIED';result.identity_evidence=target.context_event!;}
  }catch {error??='PROVIDER_FORMAT';}
@@ -91,7 +91,7 @@ export async function savedProgram(env:CaptureStorage,event:string,at=Date.now()
  if(at-Date.parse(row.received_at)>config.discovery.maximum_program_age_seconds*1000)throw new Error('PROGRAM_STALE');
  const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
  const manifest=await env.RAW.get(`manifests/${event}.json`);if(!manifest)throw new Error('MANIFEST_REQUIRED');
- const {target}=await manifest.json<{target:Target}>();if(!target)throw new Error('PARSE_RECIPE_REQUIRED');
+ const {target}=await manifest.json<{target:CaptureTarget}>();if(!target)throw new Error('PARSE_RECIPE_REQUIRED');
  return {value:await object.json<Program>(),target,available_at:row.available_at,received_at:row.received_at};
 }
 export async function history(env:CaptureStorage,sport:CaptureSport,race:string,cutoff:string,limit=config.maximum_history_rows,after='',kind:'odds'|'program'|'result'='odds') {

@@ -6,13 +6,27 @@ import {normalize,normalizationKind,resourceId} from './storage';
 import {validateContext,requiresContext,contextNavigation,RaceContextError} from './context';
 export {validateContext} from './context';
 import {date} from './discovery';
+import {jraNavigationIdentity} from '../jra-program';
 import {supportsResult} from './results';
 import type {SportsEnv,CaptureTarget,CaptureSport} from './types';
 export const sourceFor=(sport:CaptureSport)=>`sports-${sport}`;
+export const concurrencyFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_maximum_parallel_requests:config.maximum_parallel_requests;
+export const spacingFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_request_spacing_seconds:config.request_spacing_seconds;
 export function validateTarget(t:CaptureTarget):void {
  if(t.sport==='jra'){
   const u=new URL(t.url),id=t.race_id.match(/^jra:(\d{8}):(\d+):(\d+)$/),body=new URLSearchParams(t.body),name=body.get('cname');
   if(u.origin!==jra.origin||u.pathname!==jra.odds_path||u.search||u.hash||u.username||u.password)throw new Error('TARGET_ORIGIN');
+  if(t.kind==='schedule'){
+   if(!t.form||body.size!==1||!name||t.context_event!==undefined||t.deadline_at!==undefined)throw new Error('READ_FORM_REQUIRED');
+   if(!id||Number(id[3])!==0)throw new Error('RACE_ID');date(id[1]);
+   if(t.discovery_stage==='catalog'){
+    if(Number(id[2])!==0||name!==jra.catalog_navigation)throw new Error('PROGRAM_NAVIGATION');
+   }else if(t.discovery_stage==='venue'){
+    const identity=jraNavigationIdentity(name,'venue');
+    if(identity.day!==id[1]||identity.venue!==Number(id[2]))throw new Error('PROGRAM_IDENTITY');
+   }else throw new Error('DISCOVERY_STAGE');
+   return;
+  }
   if(t.kind!=='odds'||!t.form||!Object.hasOwn(jra.tables,t.page)||body.size!==1||!name||
    !name.startsWith(jra.navigation_prefixes[t.page])||name.length>jra.maximum_navigation_length||!/^[A-Za-z0-9/+]+$/.test(name))throw new Error('READ_FORM_REQUIRED');
   if(!id||!Object.hasOwn(jra.venues,id[2])||Number(id[3])<1||Number(id[3])>jra.maximum_race_number)throw new Error('RACE_ID');
@@ -43,8 +57,8 @@ export function validateTarget(t:CaptureTarget):void {
 }
 export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>,parallel=false,deadline=t.deadline_at):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
  validateTarget(t);
- const spacing=(t.sport==='jra'?jra.finite_request_spacing_seconds:config.request_spacing_seconds)*1000;
- const concurrency=t.sport==='jra'?jra.finite_maximum_parallel_requests:config.maximum_parallel_requests;
+ const spacing=spacingFor(t.sport)*1000;
+ const concurrency=concurrencyFor(t.sport);
  const resource=await resourceId(t),event=`sports:${t.sport}:${at}:${resource}`,source=sourceFor(t.sport),started=Date.now();
  const active=env.SPORTS_ENABLED==='true'&&JSON.parse(env.SPORTS_PROVIDERS_JSON).includes(t.sport);
  if(!active)return {status:'DISABLED',event_id:event};

@@ -6,7 +6,7 @@ import type {JraRunners,JraSnapshot} from '../jra';
 export class RaceContextError extends Error {}
 function contextJson(raw:string):any {try{return JSON.parse(raw);}catch{throw new RaceContextError('RACE_CONTEXT_FORMAT');}}
 export function requiresContext(t:CaptureTarget):boolean {
- if(t.sport==='jra')return t.page!=='win_place';
+ if(t.sport==='jra')return t.kind==='odds'&&t.page!=='win_place';
  if(t.sport!=='keirin')return false;const u=new URL(t.url);
  return t.kind==='guest'&&t.discovery_stage==='race'||['odds','result'].includes(t.kind)||t.kind==='schedule'&&u.pathname==='/pc/json'&&u.searchParams.get('type')==='JST010';
 }
@@ -35,7 +35,7 @@ export async function jraRunners(t:JraTarget,env:CaptureStorage,at:number):Promi
  return snapshot.runners;
 }
 export async function validateContext(t:CaptureTarget,env:CaptureStorage,at=Date.now()):Promise<void> {
- if(t.sport==='jra'){await jraRunners(t,env,at);return;}
+ if(t.sport==='jra'){if(t.kind==='odds')await jraRunners(t,env,at);return;}
  if(requiresContext(t)){
   if(!t.context_event)throw new RaceContextError('RACE_CONTEXT_REQUIRED');
   const evidence=await env.INDEX.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=? AND dataset_kind=\'SPORT_KEIRIN_SCHEDULE\'').bind(t.context_event).first<{raw_sha256:string}>();

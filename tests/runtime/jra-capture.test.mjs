@@ -4,14 +4,17 @@ import {readFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
-import {jraBody,race} from '../fixtures/synthetic/jra.mjs';
+import {jraBody,race,catalogTarget,jraCatalog,jraProgram} from '../fixtures/synthetic/jra.mjs';
 const config=JSON.parse(await readFile('configs/jra-source.json','utf8'));
 const encoded=body=>{const result=spawnSync('python3',['-c','import sys;sys.stdout.buffer.write(sys.stdin.read().encode("shift_jis"))'],{input:body});assert.equal(result.status,0);return result.stdout;};
 const target=(page='win_place',context_event)=>({sport:'jra',race_id:race,kind:'odds',page,form:true,
  url:config.origin+config.odds_path,body:new URLSearchParams({cname:config.navigation_prefixes[page]+'S300200001010120000101Z/AA'}).toString(),...(context_event?{context_event}:{})});
 const script=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';
-import {normalize,history} from './workers/sports/storage';import sports from './workers/sports/index';
+import {normalize,history} from './workers/sports/storage';import sports from './workers/sports/index';import {businessDay} from './workers/sports/daily-plan';
 export {SportsCollector,SportsControl} from './workers/sports/index';
+import {SportsCollector} from './workers/sports/index';export class JraTest extends SportsCollector {
+ async step(now){const clock=Date.now;Date.now=()=>now;try{await this.ensureDaily('jra');await this.alarm();}finally{Date.now=clock;}}
+}
 let releaseRead,waiting=false;
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='readState')return Response.json(waiting);
@@ -22,6 +25,10 @@ export default {async fetch(req,env){const v=await req.json();
  const read=async method=>{if(v.bodyIO)throw new Error('SYNTHETIC_R2_IO');if(hold){waiting=true;await hold;waiting=false;}return o[method]();};
  return {...o,arrayBuffer:()=>read('arrayBuffer'),text:()=>read('text')};},head:(...args)=>env.RAW.head(...args),put:(...args)=>env.RAW.put(...args)}};}
  if(v.op==='history')return Response.json(await history(env,'jra',v.race??'${race}',v.at,100));
+ if(v.op==='programHistory')return Response.json(await history(env,'jra',v.race,v.at,100,'','program'));
+ if(v.op==='day')return Response.json(businessDay(Date.now()+86400000));
+ if(v.op==='dailyState')return Response.json(JSON.parse(await env.CONTROL.dailyState('jra')));
+ if(v.op==='alarm'){await env.SPORTS.get(env.SPORTS.idFromName('jra')).step(v.now);return Response.json(true);}
  if(v.op==='reparse'){try{return Response.json(await normalize(storageEnv,v.event,v.target,v.version));}catch(e){return Response.json({error:e.message});}}
  if(v.op==='validate'){try{validateTarget(v.target);return Response.json(true);}catch(e){return Response.json(e.message);}}
  if(v.op==='schedule')return Response.json(await env.CONTROL.schedule(JSON.stringify(v.entries)));
@@ -31,18 +38,18 @@ export default {async fetch(req,env){const v=await req.json();
  return Response.json(await collect(v.at,storageEnv,v.target,undefined,!!v.parallel));}};`,resolveDir:process.cwd()},
  external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
-async function runtime(responses=[]){
+async function runtime(responses=[],daily=false){
  const requests=[];
  const mf=new Miniflare(convertV4MiniflareOptions({name:'jra-test',modules:true,script:script.outputFiles[0].text,
  compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],log:new Log(LogLevel.NONE),
- bindings:{SPORTS_ENABLED:'true',SPORTS_PROVIDERS_JSON:'["jra","boat","auto","keirin"]'},d1Databases:['INDEX'],r2Buckets:['RAW'],
- durableObjects:{SPORTS:{className:'SportsCollector',useSQLite:true}},serviceBindings:{CONTROL:{name:'jra-test',entrypoint:'SportsControl'}},
+ bindings:{SPORTS_ENABLED:'true',SPORTS_DAILY_ENABLED:String(daily),SPORTS_PROVIDERS_JSON:'["jra","boat","auto","keirin"]'},d1Databases:['INDEX'],r2Buckets:['RAW'],
+ durableObjects:{SPORTS:{className:'JraTest',useSQLite:true}},serviceBindings:{CONTROL:{name:'jra-test',entrypoint:'SportsControl'}},
  outboundService:async req=>{requests.push({method:req.method,contentType:req.headers.get('Content-Type'),body:await req.text()});
  const response=responses.shift();assert.ok(response,'unexpected HTTP');if(typeof response==='function')return response(req);
  return new Response(response.body??encoded(jraBody(response.page??'win_place')),{status:response.status??200,headers:response.headers});}}));
  const db=await mf.getD1Database('INDEX'),raw=await mf.getR2Bucket('RAW');
  for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
- const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});assert.equal(r.status,200);return r.json();};
+ const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});if(r.status!==200)assert.fail(await r.text());return r.json();};
  const tick=async(t=target(),at=Date.now(),parallel=false)=>call({target:t,at,parallel});
  const reset=()=>db.prepare("UPDATE source_control SET next_allowed_at=0 WHERE source='sports-jra'").run();
  const parsed=async event=>{const p=await db.prepare('SELECT * FROM sports_parses WHERE observation_id=? ORDER BY available_at DESC').bind(event).first();return {index:p,value:p.normalized_key?await (await raw.get(p.normalized_key)).json():null};};
@@ -96,10 +103,10 @@ test('invalid context and malformed Shift JIS are recorded without inventing odd
  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
  }finally{await r.mf.dispose();}
 });
-test('central finite enablement cannot enter daily processing or stop other sports cron scheduling',async()=>{
+test('daily enablement is separate and central finite enablement preserves every sports cron',async()=>{
  const r=await runtime();try{
- assert.equal(await r.call({op:'daily'}),'DAILY_UNSUPPORTED');
- assert.deepEqual(await r.call({op:'cron'}),['boat','auto','keirin']);
+ assert.equal(await r.call({op:'daily'}),'DISABLED');
+ assert.deepEqual(await r.call({op:'cron'}),['jra','boat','auto','keirin']);
  assert.equal(await r.call({op:'schedule',entries:[{at:Date.now()+60000,target:target(),daily_task:'synthetic-invalid-daily'}]}),'INPUT_OR_CAPACITY_ERROR');
  assert.equal(await r.call({op:'validate',target:{...target(),body:'cname=synthetic&cname=other'}}),'READ_FORM_REQUIRED');
  assert.equal(await r.call({op:'validate',target:{...target(),url:config.origin+config.odds_path+'?unexpected=1'}}),'TARGET_ORIGIN');
@@ -158,5 +165,35 @@ test('object key order does not create a conflicting reservation or a second obs
  assert.equal(await r.call({op:'schedule',entries:[reverse({at,target:target()})]}),'REGISTERED');
  assert.equal((await r.call({op:'planState'})).pending,1);assert.equal(r.requests.length,1);
  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+test('JRA programs use shared immutable capture, parser versions and as-of history',async()=>{
+ const r=await runtime([{body:encoded(jraCatalog)},{body:encoded(jraCatalog)}]);try{
+ const first=await r.tick(catalogTarget),value=await r.parsed(first.event_id);assert.equal(first.status,'RAW_STORED');assert.equal(value.index.status,'PROGRAM_PARSED');
+ assert.equal(value.index.parser_version,config.program_parser_version);assert.equal(value.value.program.venues.length,1);
+ const cutoff=new Date().toISOString(),read=at=>r.call({op:'programHistory',race:catalogTarget.race_id,at});
+ const past=await read(cutoff);assert.equal(past.length,1);await r.reset();await new Promise(resolve=>setTimeout(resolve,3));
+ const second=await r.tick(catalogTarget);assert.notEqual(second.event_id,first.event_id);assert.equal((await read(new Date().toISOString())).length,2);
+ assert.deepEqual(await read(cutoff),past);assert.equal(await r.call({op:'reparse',event:first.event_id,target:catalogTarget,version:'sports-program-v2'}),'PROGRAM_PARSED');
+ assert.deepEqual(await read(cutoff),past);assert.equal(r.requests.length,2);
+ assert.equal((await r.db.prepare("SELECT count(DISTINCT raw_sha256) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,1);
+ assert.equal((await r.call({op:'history',race:catalogTarget.race_id,at:new Date().toISOString()})).length,0);
+ }finally{await r.mf.dispose();}
+});
+test('JRA daily alarm completes catalog/venue actions and preserves clock evidence without generating bets',async()=>{
+ const responses=[],r=await runtime(responses,true);try{
+ // Future business-day morning avoids rollover and matches D1's real publication clock.
+ const window=await r.call({op:'day'}),day=window.day,now=window.start+3600000,year=day.slice(0,4),month=Number(day.slice(4,6)),date=Number(day.slice(6,8));
+ const renamed=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
+ // Keep a single official venue link in the synthetic catalog for this alarm test.
+ const catalog=renamed(jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')));
+ responses.push(...[catalog,renamed(jraProgram())].map(s=>({body:encoded(s)})));
+ for(let i=0;i<6;i++){
+  await r.call({op:'alarm',now:now+i*70000});const state=await r.call({op:'dailyState'});
+  if(state.races[`jra:${day}:5:1`]?.clock&&Object.keys(state.actions??{}).length===0)break;
+ }
+ const state=await r.call({op:'dailyState'});assert.ok(state.races[`jra:${day}:5:1`]?.clock,JSON.stringify({state,requests:r.requests,parses:(await r.db.prepare('SELECT status,error_code FROM sports_parses').all()).results}));assert.equal(state.races[`jra:${day}:5:1`].clock.value.program.races[0].close_at,null);
+ assert.equal(Object.keys(state.actions??{}).length,0);assert.ok(Object.keys(state.tasks).every(k=>k.startsWith('request:')));assert.equal(r.requests.length,2);
+ assert.equal((await r.db.prepare("SELECT count(*) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,2);
  }finally{await r.mf.dispose();}
 });
