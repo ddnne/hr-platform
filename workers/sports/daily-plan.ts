@@ -40,9 +40,15 @@ export function catalogTargets(sport:CaptureSport,day:string):CaptureTarget[] {
 }
 async function requestTask(state:DailyState,target:CaptureTarget,now:number,interval:number) {
  const key='request:'+await resourceId(target),prior=state.tasks[key];
+ let replaced=false;
+ if(target.sport==='jra'&&target.kind==='schedule'&&target.discovery_stage==='venue')
+  for(const [oldKey,old] of Object.entries(state.tasks))if(oldKey!==key&&old.target?.sport==='jra'&&old.target.kind==='schedule'
+   &&old.target.discovery_stage==='venue'&&old.target.race_id===target.race_id){
+   replaced||=!old.done;old.done=true;rejectProgram(state,old.target);
+  }
  if(!prior&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  // A newly observed identity must refresh the clock and runners together.
- const changed=prior&&recipeJson(prior.target)!==recipeJson(target);
+ const changed=prior&&(replaced||recipeJson(prior.target)!==recipeJson(target));
  state.tasks[key]={kind:'request',target,next_at:changed?now:prior?.next_at??now,interval,done:changed?false:prior?.done};
 }
 export async function initialDaily(sport:CaptureSport,now:number):Promise<DailyState> {
@@ -72,6 +78,9 @@ export function migrateDailyCloses(state:DailyState):boolean {
 }
 export async function acceptProgram(state:DailyState,source:Source,now:number) {
  if(source.value.sport!==state.sport||source.value.requested_race_id.split(':')[1]!==state.day)throw new Error('DAILY_PROGRAM_IDENTITY');
+ // A completed old navigation cannot restore clocks after its replacement.
+ if(source.target.sport==='jra'&&source.target.kind==='schedule'&&source.target.discovery_stage==='venue'
+  &&state.tasks['request:'+await resourceId(source.target)]?.done)return;
  migrateDailyCloses(state);rejectProgram(state,source.target);
  const children=discoveryTargets(source.value,source.event);
  for(const t of children.targets)await requestTask(state,t,now,settings.program_interval_seconds);

@@ -24,6 +24,12 @@ test('mismatched link/header/request identities and ambiguous duplicate recipes 
  assert.throws(()=>p.parseProgram(jraCatalog.replaceAll('東京','京都'),catalogTarget),/IDENTITY/);
  assert.throws(()=>p.parseProgram('<html>unexpected body</html>',catalogTarget),/NOT_READY/);
 });
+test('the separate venue navigation state digit never becomes part of the venue number',()=>{
+ const raw=jraCatalog.replace('pw15orl0005','pw15orl1005'),value=p.parseProgram(raw,catalogTarget),child=p.discoveryTargets(value).targets[0];
+ assert.equal(value.program.venues[0].venue,5);assert.equal(child.race_id,'jra:20000101:5:0');p.validateTarget(child);
+ assert.equal(p.parseProgram(jraProgram(),child).program.races[0].venue,5);
+ assert.throws(()=>p.parseProgram(raw.replace('pw15orl1005','pw15orl2005'),catalogTarget),/NAVIGATION/);
+});
 test('ended/cancelled/unknown labels never become a scheduled start or observed deadline',()=>{
  for(const label of ['発走済','中止','変更確認中']){
   const r=p.parseProgram(jraProgram({clock:label}),venue).program.races[0];assert.equal(r.start_label,label);assert.equal(r.start_at,null);assert.equal(r.close_at,null);
@@ -45,4 +51,15 @@ test('shared daily discovery permits one JRA action and no odds/result task or l
  const s=source(jraProgram(),venue);assert.equal(p.oddsTargets(s,'jra:20000101:5:1',now).deferred[0].reason,'JRA_DAILY_ODDS_UNQUALIFIED');
  assert.throws(()=>p.resultTarget(s,'jra:20000101:5:1'),/JRA_RESULT_UNSUPPORTED/);
  p.rejectProgram(state,venue);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
+});
+test('changed venue navigation replaces only the periodic task and cannot restore old clocks',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraCatalog,catalogTarget),now);
+ const old=p.nextDailyParallel(state,now)[0];await p.acceptProgram(state,source(jraProgram(),venue),now);
+ await p.acceptProgram(state,source(jraCatalog.replace('pw15orl0005','pw15orl1005'),catalogTarget),now+1);
+ assert.equal(state.tasks[old.daily_task].done,true);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
+ await p.acceptProgram(state,source(jraProgram(),venue),now+2);assert.equal(state.races['jra:20000101:5:1'].clock,undefined);
+ await p.completeDaily(state,old,'RAW_STORED',now+2);const next=p.nextDailyParallel(state,now+2)[0];
+ assert.ok(next.target.body.includes('pw15orl1005'));assert.equal(Object.values(state.tasks).filter(t=>!t.done).length,1);
+ await p.acceptProgram(state,source(jraCatalog,catalogTarget),now+3);
+ assert.equal(Object.values(state.tasks).filter(t=>!t.done).length,1);assert.equal(state.tasks[old.daily_task].done,false);
 });
