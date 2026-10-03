@@ -22,6 +22,16 @@ test('ties, special payouts and missing markets retain uncertainty without inven
  assert.equal(p.completePayoutMarkets(special,markets),false);assert.ok(special.refund_evidence.display.includes('特払'));
  const missing=p.parseResult(jraResult({missing:true}),resultTarget);assert.equal(p.completePayoutMarkets(missing,markets),false);
 });
+test('whole missing or incorrect winning rows cannot complete daily result collection',()=>{
+ const good=p.parseResult(jraResult(),resultTarget);
+ const missing=structuredClone(good);missing.payouts=missing.payouts.filter(x=>x.market!=='wide'||x.combination.join('-')!=='2-10');
+ assert.equal(p.completePayoutMarkets(missing,markets),false);
+ const wrong=structuredClone(good);wrong.payouts.find(x=>x.market==='quinella').combination=[1,11];
+ assert.equal(p.completePayoutMarkets(wrong,markets),false);
+ const tied=structuredClone(good);tied.placings[3].rank=3;assert.equal(p.completePayoutMarkets(tied,markets),false);
+ const paidTwo=structuredClone(good);paidTwo.payouts=paidTwo.payouts.filter(x=>x.market!=='place'||x.combination[0]!==10);
+ assert.equal(p.completePayoutMarkets(paidTwo,markets),true);
+});
 test('incorrect identity, malformed payout rows and duplicate results fail before publication',()=>{
  assert.throws(()=>p.validateTarget({...resultTarget,race_id:'jra:20000101:5:2'}),/IDENTITY/);
  assert.throws(()=>p.parseResult(jraResult().replace('2000年1月1日','2000年1月2日'),resultTarget),/IDENTITY/);

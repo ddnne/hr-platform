@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
-import {jraBody,race,catalogTarget,jraCatalog,jraProgram,jraResult,resultTarget} from '../fixtures/synthetic/jra.mjs';
+import {jraBody,race,catalogTarget,jraCatalog,jraProgram,jraResult,resultTarget,jraResultCatalog,jraResultProgram} from '../fixtures/synthetic/jra.mjs';
 const config=JSON.parse(await readFile('configs/jra-source.json','utf8'));
 const encoded=body=>{const result=spawnSync('python3',['-c','import sys;sys.stdout.buffer.write(sys.stdin.read().encode("shift_jis"))'],{input:body});assert.equal(result.status,0);return result.stdout;};
 const target=(page='win_place',context_event)=>({sport:'jra',race_id:race,kind:'odds',page,form:true,
@@ -227,14 +227,16 @@ test('JRA daily alarm completes catalog/venue actions and preserves clock eviden
  const renamed=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
  // Keep a single official venue link in the synthetic catalog for this alarm test.
  const catalog=renamed(jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')));
- responses.push(...[catalog,renamed(jraProgram())].map(s=>({body:encoded(s)})));
- for(let i=0;i<6;i++){
+ const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
+  return new Response(encoded(name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw15oli')?catalog:renamed(jraProgram())));};
+ responses.push(...Array(10).fill(respond));
+ for(let i=0;i<10;i++){
   await r.call({op:'alarm',now:now+i*70000});const state=await r.call({op:'dailyState'});
   if(state.races[`jra:${day}:5:1`]?.clock&&Object.keys(state.actions??{}).length===0)break;
  }
  const state=await r.call({op:'dailyState'});assert.ok(state.races[`jra:${day}:5:1`]?.clock,JSON.stringify({state,requests:r.requests,parses:(await r.db.prepare('SELECT status,error_code FROM sports_parses').all()).results}));assert.equal(state.races[`jra:${day}:5:1`].clock.value.program.races[0].close_at,null);
- assert.equal(Object.keys(state.actions??{}).length,0);assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);assert.equal(r.requests.length,2);
- assert.equal((await r.db.prepare("SELECT count(*) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,2);
+ assert.equal(Object.keys(state.actions??{}).length,0);assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);assert.equal(r.requests.length,3);
+ assert.equal((await r.db.prepare("SELECT count(*) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,3);
  }finally{await r.mf.dispose();}
 });
 for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster qualifies each independently scheduled page only from intermediate odds: '+phase,async()=>{
@@ -243,6 +245,7 @@ for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster 
   const rename=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
   const respond=async()=>{
    const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
+   if(name.startsWith('pw01sli'))return new Response(encoded(jraResultCatalog));
    const body=name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):
     name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])),{phase});
    return new Response(encoded(rename(body)));
@@ -260,7 +263,7 @@ for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster 
   if(phase==='最終オッズ'){
    assert.equal(facts.win_context,undefined);
    for(let i=0;i<4;i++){await r.call({op:'alarm',now:at});at=(await r.call({op:'planState'})).alarm_at;}
-   assert.ok(r.requests.filter(q=>!new URLSearchParams(q.body).get('cname').startsWith('pw15o')).every(q=>new URLSearchParams(q.body).get('cname').startsWith(config.navigation_prefixes.win_place)));
+   assert.ok(r.requests.filter(q=>/^pw15[1345678]ou/.test(new URLSearchParams(q.body).get('cname'))).every(q=>new URLSearchParams(q.body).get('cname').startsWith(config.navigation_prefixes.win_place)));
   }else {
    assert.ok(facts.win_context);
    const rows=(await r.db.prepare("SELECT * FROM sports_parses WHERE parser_version LIKE 'sports-odds-v%'").all()).results;
@@ -271,5 +274,34 @@ for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster 
    const starts=manifests.map(m=>Date.parse(m.fetch_started_at)).sort((a,b)=>a-b);
    assert.ok(starts.slice(1).every((t,i)=>t-starts[i]>=config.finite_request_spacing_seconds*1000));
   }
+ }finally{await r.mf.dispose();}
+});
+for(const missingWide of [false,true])test(`JRA daily results retain odds clocks${missingWide?' and retry a whole missing payout row':''}`,async()=>{
+ const responses=[],r=await runtime(responses,true);try{
+  const window=await r.call({op:'day'}),day=window.day,year=day.slice(0,4),month=Number(day.slice(4,6)),date=Number(day.slice(6,8));
+  const rename=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
+  let resultRequests=0,retried=false;
+  const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
+   const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:missingWide&&++resultRequests===1}):
+    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):jraProgram();
+   return new Response(encoded(rename(body)));};
+  responses.push(...Array(32).fill(respond));let at=window.start+3600000;
+  for(let i=0;i<32;i++){
+   await r.call({op:'alarm',now:at});const state=await r.call({op:'dailyState'});
+   if(missingWide&&resultRequests===1&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
+    assert.notEqual(state.tasks[`result:jra:${day}:5:1`].done,true);retried=true;
+   }
+   if(state.races[`jra:${day}:5:1`]?.clock&&state.tasks[`result:jra:${day}:5:1`]?.done&&Object.keys(state.actions??{}).length===0)break;
+   at=(await r.call({op:'planState'})).alarm_at;
+  }
+  const state=await r.call({op:'dailyState'}),id=`jra:${day}:5:1`,facts=state.races[id];
+  assert.ok(facts.clock&&facts.results);assert.equal(facts.clock.target.program_kind,undefined);assert.equal(facts.results.target.program_kind,'results');
+  assert.equal(facts.clock.value.program.races[0].close_at,null);assert.equal(state.tasks['result:'+id].done,true);
+  assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);
+  assert.equal(r.requests.filter(q=>new URLSearchParams(q.body).get('cname').startsWith('pw01sde')).length,missingWide?2:1);
+  const rows=await r.call({op:'resultHistory',race:id,at:new Date(at).toISOString()});assert.equal(rows.length,missingWide?2:1);assert.ok(rows.every(x=>x.status==='RESULT_PARSED'));
+  if(missingWide){assert.ok(retried);assert.equal((await r.parsed(rows[0].observation_id)).value.payouts.length,11);}
+  const v=(await r.parsed(rows.at(-1).observation_id)).value;assert.equal(v.phase,'RESULT_ONLY');assert.equal(v.payouts.length,12);assert.equal(v.settlement_qualified,false);
+  assert.deepEqual(await r.call({op:'history',race:id,at:new Date(at).toISOString()}),[]);
  }finally{await r.mf.dispose();}
 });

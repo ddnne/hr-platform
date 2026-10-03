@@ -75,7 +75,21 @@ export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]
  if(!value||value.schema!=='sports-result-v1'||value.publication!=='PUBLISHED')return false;
  return markets.length>0&&[1,2,3].every(rank=>value.placings.some(p=>p.rank===rank))&&markets.every(m=>{
   const rows=value.payouts.filter(p=>p.market===m);return rows.length>0&&rows.every(p=>p.status==='NUMERIC'&&p.amount_yen!==null&&p.amount_yen>0);
- });
+ })&&(value.sport!=='jra'||normalJraPayouts(value));
+}
+function normalJraPayouts(value:ResultSnapshot):boolean {
+ // A numeric row per market cannot prove that a whole winning row was retained.
+ // Upper ties remain unsupported; do not infer place coverage or frames from field size.
+ const top=[1,2,3].map(rank=>value.placings.filter(p=>p.rank===rank));if(top.some(rows=>rows.length!==1))return false;
+ const [a,b,c]=top.map(rows=>rows[0].entrant),sort=(ids:number[])=>[...ids].sort((x,y)=>x-y).join('-');
+ const expected:Record<string,string[]>={win:[String(a)],exacta:[`${a}-${b}`],quinella:[sort([a,b])],
+  trio:[sort([a,b,c])],trifecta:[`${a}-${b}-${c}`],wide:[sort([a,b]),sort([a,c]),sort([b,c])]};
+ for(const [market,keys] of Object.entries(expected)){
+  const actual=value.payouts.filter(p=>p.market===market).map(p=>p.combination?.join('-'));
+  if(actual.length!==keys.length||keys.some(key=>!actual.includes(key)))return false;
+ }
+ const places=value.payouts.filter(p=>p.market==='place').map(p=>p.combination?.join('-'));
+ return places.includes(String(a))&&places.includes(String(b))&&places.length<=3&&places.every(key=>[a,b,c].some(h=>String(h)===key));
 }
 export async function savedJraResult(env:CaptureStorage,event:string,at:number):Promise<{value:JraResultSnapshot;available_at:string;received_at:string}> {
  const result=await completedObservation<JraResultSnapshot>(env,event,'result','RESULT_PARSED',at);

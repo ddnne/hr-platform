@@ -13,11 +13,11 @@ import type {JraPage} from '../jra';
 import type {CaptureSport,CaptureTarget,Target} from './types';
 
 type Source=Awaited<ReturnType<typeof savedProgram>> & {event:string};
-type Task={kind:'request'|'odds'|'result'|'final_odds';target?:CaptureTarget;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number;start_at?:number;page?:JraPage};
+type Task={kind:'request'|'odds'|'result'|'final_odds';target?:CaptureTarget;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number;start_at?:number;expires_at?:number;page?:JraPage};
 type Action={task:string;entries:DailyEntry[];closed_odds?:boolean;close_at?:number;start_at?:number};
 export type DailyEntry={at:number;target:CaptureTarget;daily_task?:string;daily_day?:string};
 export type DailyState={sport:CaptureSport;day:string;wake_at:number;tasks:Record<string,Task>;
- races:Record<string,{clock?:Source;runners?:Source;win_context?:JraWinContext}>;
+ races:Record<string,{clock?:Source;runners?:Source;results?:Source;win_context?:JraWinContext}>;
  action:Action|null;actions?:Record<string,Action>;
  report:{at:number;status:string;planned:number;deferred:number;reason?:string}};
 
@@ -31,7 +31,9 @@ export function businessDay(now:number):{day:string;start:number;end:number} {
 }
 export function catalogTargets(sport:CaptureSport,day:string):CaptureTarget[] {
  if(sport==='jra'){const target:CaptureTarget={sport,race_id:`jra:${day}:0:0`,kind:'schedule',discovery_stage:'catalog',form:true,
-  url:jra.origin+jra.odds_path,body:new URLSearchParams({cname:jra.catalog_navigation}).toString()};validateTarget(target);return [target];}
+  url:jra.origin+jra.odds_path,body:new URLSearchParams({cname:jra.catalog_navigation}).toString()};
+  const results:CaptureTarget={...target,program_kind:'results' as const,url:jra.origin+jra.result_path,body:new URLSearchParams({cname:jra.result_catalog_navigation}).toString()};
+  [target,results].forEach(validateTarget);return [target,results];}
  const source=config.sources[sport],base={sport,race_id:`${sport}:${day}:0:0`,kind:'schedule' as const};
  const targets:Target[]=sport==='auto'?[{...base,url:source.origin+config.sources.auto.catalog_path}]:
   sport==='boat'?[{...base,url:source.origin+config.sources.boat.catalog_path+'?'+new URLSearchParams({hd:day})}]:
@@ -44,7 +46,7 @@ async function requestTask(state:DailyState,target:CaptureTarget,now:number,inte
  let replaced=false;
  if(target.sport==='jra'&&target.kind==='schedule'&&target.discovery_stage==='venue')
   for(const [oldKey,old] of Object.entries(state.tasks))if(oldKey!==key&&old.target?.sport==='jra'&&old.target.kind==='schedule'
-   &&old.target.discovery_stage==='venue'&&old.target.race_id===target.race_id){
+   &&old.target.discovery_stage==='venue'&&old.target.race_id===target.race_id&&old.target.program_kind===target.program_kind){
    replaced||=!old.done;old.done=true;rejectProgram(state,old.target);
   }
  if(!prior&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
@@ -58,6 +60,14 @@ export async function initialDaily(sport:CaptureSport,now:number):Promise<DailyS
  for(const t of catalogTargets(sport,clock.day))await requestTask(state,t,clock.start,
   t.kind==='guest'?settings.guest_interval_seconds:settings.catalog_interval_seconds);
  return state;
+}
+/** Add newly supported catalogs to a saved day without replacing its races or actions. */
+export async function ensureDailyCatalogs(state:DailyState,now:number):Promise<boolean> {
+ let changed=false;
+ for(const target of catalogTargets(state.sport,state.day))if(!state.tasks['request:'+await resourceId(target)]){
+  await requestTask(state,target,now,settings.catalog_interval_seconds);changed=true;
+ }
+ return changed;
 }
 function raceTask(state:DailyState,key:string,task:Task) {
  if(!state.tasks[key]&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
@@ -86,6 +96,18 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
  const children=discoveryTargets(source.value,source.event);
  for(const t of children.targets)await requestTask(state,t,now,settings.program_interval_seconds);
  const program=source.value.program;
+ if(state.sport==='jra'&&source.target.sport==='jra'&&source.target.kind==='schedule'&&source.target.program_kind==='results'){
+  if('result_navigation' in program)for(const [race_id,name] of Object.entries(program.result_navigation)){
+   const item=state.races[race_id]??={};item.results=source;
+   const target:CaptureTarget={sport:'jra',race_id,kind:'result',form:true,url:jra.origin+jra.result_path,body:new URLSearchParams({cname:name}).toString()};
+   validateTarget(target);const key='result:'+race_id;
+   raceTask(state,key,{kind:'result',race_id,target,next_at:now,interval:settings.result_interval_seconds,expires_at:now+settings.result_window_seconds*1000});
+   const task=state.tasks[key];if(recipeJson(task.target)!==recipeJson(target)){
+    task.target=target;task.done=false;task.next_at=now;task.expires_at=now+settings.result_window_seconds*1000;
+   }
+  }
+  return;
+ }
  if('runners' in program&&program.runners){
   const scope=state.races[source.target.race_id]??={};scope.runners=source;return;
  }
@@ -123,7 +145,7 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
 }
 export function rejectProgram(state:DailyState,target:CaptureTarget) {
  // Invalidate the matching latest resource; an error never revives its old normal copy.
- for(const facts of Object.values(state.races))for(const field of ['clock','runners'] as const)
+ for(const facts of Object.values(state.races))for(const field of ['clock','runners','results'] as const)
   if(facts[field]&&facts[field]!.target.url===target.url&&facts[field]!.target.body===target.body)delete facts[field];
 }
 export function resultTarget(source:Source,raceId:string):Target {
@@ -155,6 +177,7 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
  for(const [key,task] of tasks){
   // Expire finite closing tasks even if their clock/roster resource disappeared.
   if(task.kind==='final_odds'&&task.close_at!==undefined&&now>task.close_at+settings.final_odds_window_seconds*1000){task.done=true;continue;}
+  if(task.kind==='result'&&task.expires_at!==undefined&&now>task.expires_at){task.done=true;continue;}
   if(task.next_at>now)continue;
   if(state.sport==='jra'&&task.kind==='odds'&&task.start_at!==undefined&&now>=task.start_at){task.done=true;continue;}
   // Due preclose/discovery/result work retains precedence over closing price samples.
@@ -166,6 +189,14 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
    if(task.target?.discovery_stage!=='venue'&&known?.close_at&&now>Date.parse(known.close_at)+settings.result_window_seconds*1000){task.done=true;continue;}
    if(task.target?.discovery_stage==='race'&&known?.close_at&&now<Date.parse(known.close_at)-settings.odds_lead_seconds*1000){task.next_at=Date.parse(known.close_at)-settings.odds_lead_seconds*1000;continue;}
    targets=[task.target!];
+  }else if(state.sport==='jra'&&task.kind==='result'&&task.target){
+   const source=state.races[task.race_id!]?.results,program=source?.value.program;
+   const name=program&&'result_navigation' in program?program.result_navigation[task.race_id!]:undefined;
+   if(!source||now-Date.parse(source.received_at)>config.discovery.maximum_program_age_seconds*1000||
+    name!==new URLSearchParams(task.target.body).get('cname')){
+    task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;
+   }
+   targets=[task.target];
   }else {
    const facts=state.races[task.race_id!],source=facts?.clock;
    const races=source?programRaces(source.value.program):[];
@@ -239,7 +270,7 @@ export async function completeDaily(state:DailyState,entry:DailyEntry,status:str
  action.entries=matched.filter(r=>!r.match).map(r=>r.e);
  if(!action.entries.length){
   // A response from an earlier advertised close cannot finish the revised task.
-  if(action.close_at===task.close_at&&action.start_at===task.start_at){
+  if(action.close_at===task.close_at&&action.start_at===task.start_at&&(!task.target||resource===await resourceId(task.target))){
   if(task.kind==='final_odds'&&action.closed_odds||task.kind==='result'&&resultPublished)task.done=true;
   if(task.kind==='request'&&status==='RAW_STORED'&&task.target?.sport==='keirin'&&new URL(task.target.url).searchParams.get('type')===config.sources.keirin.identity_json_type)task.done=true;
   task.last_at=now;task.next_at=now+task.interval*1000;

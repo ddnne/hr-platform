@@ -15,7 +15,8 @@ export const spacingFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_request_
 export function validateTarget(t:CaptureTarget):void {
  if(t.sport==='jra'){
   const u=new URL(t.url),id=t.race_id.match(/^jra:(\d{8}):(\d+):(\d+)$/),body=new URLSearchParams(t.body),name=body.get('cname');
-  if(u.origin!==jra.origin||u.pathname!==(t.kind==='result'?jra.result_path:jra.odds_path)||u.search||u.hash||u.username||u.password)throw new Error('TARGET_ORIGIN');
+  const results=t.kind==='result'||t.kind==='schedule'&&t.program_kind==='results';
+  if(u.origin!==jra.origin||u.pathname!==(results?jra.result_path:jra.odds_path)||u.search||u.hash||u.username||u.password)throw new Error('TARGET_ORIGIN');
   if(t.kind==='result'){
    if(!t.form||body.size!==1||!name)throw new Error('READ_FORM_REQUIRED');
    const identity=jraNavigationIdentity(name,'result');
@@ -25,11 +26,12 @@ export function validateTarget(t:CaptureTarget):void {
   }
   if(t.kind==='schedule'){
    if(!t.form||body.size!==1||!name||t.context_event!==undefined||t.deadline_at!==undefined)throw new Error('READ_FORM_REQUIRED');
+   if(t.program_kind!==undefined&&t.program_kind!=='results')throw new Error('PROGRAM_RESOURCE');
    if(!id||Number(id[3])!==0)throw new Error('RACE_ID');date(id[1]);
    if(t.discovery_stage==='catalog'){
-    if(Number(id[2])!==0||name!==jra.catalog_navigation)throw new Error('PROGRAM_NAVIGATION');
+    if(Number(id[2])!==0||name!==(results?jra.result_catalog_navigation:jra.catalog_navigation))throw new Error('PROGRAM_NAVIGATION');
    }else if(t.discovery_stage==='venue'){
-    const identity=jraNavigationIdentity(name,'venue');
+    const identity=jraNavigationIdentity(name,results?'result_venue':'venue');
     if(identity.day!==id[1]||identity.venue!==Number(id[2]))throw new Error('PROGRAM_IDENTITY');
    }else throw new Error('DISCOVERY_STAGE');
    return;

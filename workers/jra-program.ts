@@ -6,15 +6,17 @@ import type {Race,Venue} from './sports/discovery';
 import type {JraScheduleTarget} from './sports/types';
 import type {JraPage} from './jra';
 type Identity={day:string;venue:number;race?:number};
-export type JraProgram={venues:Venue[]}|{races:Race[];odds_navigation:Record<string,Partial<Record<JraPage,string>>>};
-export function jraNavigationIdentity(name:string,kind:'venue'|'odds'|'result'):Identity {
+export type JraProgram={venues:Venue[];result_catalog?:true}|{races:Race[];odds_navigation:Record<string,Partial<Record<JraPage,string>>>}|
+ {result_navigation:Record<string,string>;final_odds_navigation:Record<string,string>};
+export function jraNavigationIdentity(name:string,kind:'venue'|'odds'|'result'|'result_venue'):Identity {
  const m=kind==='venue'?name.match(/^pw15orl[01](\d{3})(\d{4})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
+  kind==='result_venue'?name.match(/^pw01srl(?:01|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
   kind==='result'?name.match(/^pw01sde(?:01|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
   name.match(/^pw15[1345678]ou(?:S3|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})Z(?:99)?\/[A-Za-z0-9+]+$/);
  if(!m)throw new Error('PROGRAM_NAVIGATION');
- const venue=Number(m[1]),day=date(m[kind==='venue'?5:6]);
+ const venueScope=kind==='venue'||kind==='result_venue',venue=Number(m[1]),day=date(m[venueScope?5:6]);
  if(!Object.hasOwn(config.venues,String(venue))||m[2]!==day.slice(0,4))throw new Error('PROGRAM_IDENTITY');
- if(kind==='venue')return {day,venue};
+ if(venueScope)return {day,venue};
  const race=Number(m[5]);if(race<1||race>config.maximum_race_number)throw new Error('PROGRAM_IDENTITY');
  return {day,venue,race};
 }
@@ -34,23 +36,45 @@ export function jraLinks(raw:string,path:string=config.odds_path) {
 }
 export function parseJraProgram(raw:string,t:JraScheduleTarget):JraProgram {
  const [,requested,scope]=t.race_id.split(':'),day=date(requested);
+ const results=t.program_kind==='results',path=results?config.result_path:config.odds_path;
  if(t.discovery_stage==='catalog'){
+  if(results&&![...raw.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].some(m=>text(m[1])==='レース結果 開催選択'))throw new Error('PROGRAM_NOT_READY');
   const rows=new Map<number,Venue>();let seen=0;
-  for(const link of jraLinks(raw).filter(l=>l.name.startsWith(config.venue_navigation_prefix))){
-   const id=jraNavigationIdentity(link.name,'venue');seen++;
+  for(const link of jraLinks(raw,path).filter(l=>l.name.startsWith(results?config.result_venue_navigation_prefix:config.venue_navigation_prefix))){
+   const id=jraNavigationIdentity(link.name,results?'result_venue':'venue');seen++;
    if(!link.label.includes(config.venues[String(id.venue) as keyof typeof config.venues]))throw new Error('PROGRAM_IDENTITY');
    if(id.day!==day)continue;
    if(rows.has(id.venue)&&rows.get(id.venue)!.public_navigation!==link.name)throw new Error('PROGRAM_DUPLICATE');
    rows.set(id.venue,{sport:'jra',race_date:day,venue:id.venue,current_race:null,public_navigation:link.name,cancel_label:null});
   }
   if(!seen)throw new Error('PROGRAM_NOT_READY');
-  return {venues:[...rows.values()].sort((a,b)=>a.venue-b.venue)};
+  return {venues:[...rows.values()].sort((a,b)=>a.venue-b.venue),...(results?{result_catalog:true as const}:{})};
  }
- const identity=jraNavigationIdentity(new URLSearchParams(t.body).get('cname')??'','venue');
+ const identity=jraNavigationIdentity(new URLSearchParams(t.body).get('cname')??'',results?'result_venue':'venue');
  if(identity.day!==day||identity.venue!==Number(scope))throw new Error('PROGRAM_IDENTITY');
  const headers=[...raw.matchAll(/<h[123]\b[^>]*>([\s\S]*?)<\/h[123]>/gi)].map(m=>text(m[1]));
  const title=new RegExp(`${Number(day.slice(0,4))}年${Number(day.slice(4,6))}月${Number(day.slice(6,8))}日.*${config.venues[String(identity.venue) as keyof typeof config.venues]}`);
  if(!headers.some(h=>title.test(h)))throw new Error('PROGRAM_IDENTITY');
+ if(results){
+  const result_navigation:Record<string,string>={},final_odds_navigation:Record<string,string>={};
+  const tables=[...raw.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi)].filter(m=>
+   /<th\b[^>]*class=["']race_num["'][^>]*>レース結果<\/th>/.test(m[1])&&/<th\b[^>]*class=["']odds["'][^>]*>最終/.test(m[1]));
+  if(tables.length!==1)throw new Error('PROGRAM_NOT_READY');
+  for(const row of tables[0][1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
+   const links=jraLinks(row[1],config.result_path).filter(l=>l.name.startsWith('pw01sde'));
+   if(!links.length)continue;if(links.length!==1)throw new Error('PROGRAM_DUPLICATE');
+   const id=jraNavigationIdentity(links[0].name,'result');
+   if(id.day!==day||id.venue!==identity.venue)throw new Error('PROGRAM_IDENTITY');
+   const race_id=`jra:${day}:${id.venue}:${id.race}`;if(result_navigation[race_id])throw new Error('PROGRAM_DUPLICATE');
+   result_navigation[race_id]=links[0].name;
+   const odds=jraLinks(row[1]).filter(l=>l.name.startsWith(config.navigation_prefixes.win_place));
+   if(odds.length>1)throw new Error('PROGRAM_DUPLICATE');
+   if(odds.length){const o=jraNavigationIdentity(odds[0].name,'odds');
+    if(o.day!==day||o.venue!==id.venue||o.race!==id.race)throw new Error('PROGRAM_IDENTITY');final_odds_navigation[race_id]=odds[0].name;}
+  }
+  // An identified venue may have no published results yet.
+  return {result_navigation,final_odds_navigation};
+ }
  const races:Race[]=[],odds_navigation:Record<string,Partial<Record<JraPage,string>>>={};
  for(const row of raw.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
   const navigation:Partial<Record<JraPage,string>>={};let no:number|undefined;

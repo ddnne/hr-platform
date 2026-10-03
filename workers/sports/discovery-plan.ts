@@ -21,7 +21,8 @@ export function discoveryTargets(value:Program,parentObservation?:string):{targe
   if('venues' in program&&program.venues)for(const v of program.venues){
    if(v.sport!=='jra'||v.race_date!==day||!v.public_navigation){defer(`jra:${day}:${v.venue}:0`,'BUSINESS_DAY_MISMATCH');continue;}
    targets.push({sport:'jra',race_id:`jra:${day}:${v.venue}:0`,kind:'schedule',discovery_stage:'venue',form:true,
-    url:jra.origin+jra.odds_path,body:new URLSearchParams({cname:v.public_navigation}).toString()});
+    ...('result_catalog' in program&&program.result_catalog?{program_kind:'results' as const,url:jra.origin+jra.result_path}:{url:jra.origin+jra.odds_path}),
+    body:new URLSearchParams({cname:v.public_navigation}).toString()});
   }
  }else if('venues' in program&&program.venues)for(const v of program.venues){
   const scope=`${value.sport}:${day}:${v.venue}:0`;

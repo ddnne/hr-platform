@@ -1,10 +1,12 @@
 {
   "version": "jra-source-preview-v1",
   "parser_version": "sports-odds-v1",
-  "program_parser_version": "sports-program-v4",
+  "program_parser_version": "sports-program-v5",
   "result_parser_version": "sports-result-v1",
   "catalog_navigation": "pw15oli00/6D",
   "venue_navigation_prefix": "pw15orl",
+  "result_catalog_navigation": "pw01sli00/AF",
+  "result_venue_navigation_prefix": "pw01srl",
   "finite_request_spacing_seconds": 60,
   "finite_maximum_parallel_requests": 1,
   "maximum_context_age_seconds": 600,

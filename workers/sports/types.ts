@@ -21,7 +21,7 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
 export type JraTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
  sport:'jra';kind:'odds';page:JraPage;body:string;form:true;discovery_stage?:never;context_phase?:'INTERMEDIATE'};
 export type JraScheduleTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
- sport:'jra';kind:'schedule';discovery_stage:'catalog'|'venue';body:string;form:true};
+ sport:'jra';kind:'schedule';discovery_stage:'catalog'|'venue';body:string;form:true;program_kind?:'results'};
 export type JraResultTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'|'context_event'|'deadline_at'> & {
  sport:'jra';kind:'result';body:string;form:true;market?:never;discovery_stage?:never;context_event?:never;deadline_at?:never};
 export type CaptureTarget = Target | JraTarget | JraScheduleTarget | JraResultTarget;
