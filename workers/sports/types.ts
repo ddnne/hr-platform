@@ -15,7 +15,7 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
  // Public navigation/guest headers only. Never persisted in capture manifests or logs.
  headers?: Record<string,string>; kind: 'odds' | 'schedule' | 'result' | 'guest'; market?: string; entrants?: number[]; frames?: Record<string,number>; context_event?: string;
  // Venue navigation may discover an unknown race; a race detail must not fan out again.
- discovery_stage?: 'venue' | 'race'};
+ discovery_stage?: 'venue' | 'race';deadline_at?:number};
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
  SPORTS_DAILY_ENABLED?: string;

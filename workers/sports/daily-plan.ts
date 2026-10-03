@@ -10,11 +10,12 @@ import type {savedProgram} from './storage';
 import type {Sport,Target} from './types';
 
 type Source=Awaited<ReturnType<typeof savedProgram>> & {event:string};
-type Task={kind:'request'|'odds'|'result';target?:Target;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean};
+type Task={kind:'request'|'odds'|'result'|'final_odds';target?:Target;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number};
+type Action={task:string;entries:DailyEntry[];closed_odds?:boolean;close_at?:number};
 export type DailyEntry={at:number;target:Target;daily_task?:string;daily_day?:string};
 export type DailyState={sport:Sport;day:string;wake_at:number;tasks:Record<string,Task>;
  races:Record<string,{clock?:Source;runners?:Source}>;
- action:{task:string;entries:DailyEntry[]}|null;
+ action:Action|null;actions?:Record<string,Action>;
  report:{at:number;status:string;planned:number;deferred:number;reason?:string}};
 
 const settings=config.daily;
@@ -38,7 +39,7 @@ async function requestTask(state:DailyState,target:Target,now:number,interval:nu
  if(!prior&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  // A newly observed identity must refresh the clock and runners together.
  const changed=prior&&JSON.stringify(prior.target)!==JSON.stringify(target);
- state.tasks[key]={kind:'request',target,next_at:changed?now:prior?.next_at??now,interval};
+ state.tasks[key]={kind:'request',target,next_at:changed?now:prior?.next_at??now,interval,done:changed?false:prior?.done};
 }
 export async function initialDaily(sport:Sport,now:number):Promise<DailyState> {
  const clock=businessDay(now),state:DailyState={sport,day:clock.day,wake_at:Math.max(now,clock.start),tasks:{},races:{},action:null,
@@ -51,9 +52,23 @@ function raceTask(state:DailyState,key:string,task:Task) {
  if(!state.tasks[key]&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  state.tasks[key]??=task;
 }
+// Recover the old advertised close BEFORE replacing its saved program evidence.
+export function migrateDailyCloses(state:DailyState):boolean {
+ let changed=false;
+ for(const action of [...(state.action?[state.action]:[]),...Object.values(state.actions??{})]){
+  const task=state.tasks[action.task];if(!task?.race_id)continue;
+  const clock=state.races[task.race_id]?.clock;
+  const label=clock&&programRaces(clock.value.program).find(r=>r.race_id===task.race_id)?.close_at;
+  const close=task.close_at??(label?Date.parse(label):undefined);
+  if(close===undefined)continue;
+  if(action.close_at===undefined){action.close_at=close;changed=true;}
+  if(task.close_at===undefined){task.close_at=close;changed=true;}
+ }
+ return changed;
+}
 export async function acceptProgram(state:DailyState,source:Source,now:number) {
  if(source.value.sport!==state.sport||source.value.requested_race_id.split(':')[1]!==state.day)throw new Error('DAILY_PROGRAM_IDENTITY');
- rejectProgram(state,source.target);
+ migrateDailyCloses(state);rejectProgram(state,source.target);
  const children=discoveryTargets(source.value,source.event);
  for(const t of children.targets)await requestTask(state,t,now,settings.program_interval_seconds);
  const program=source.value.program;
@@ -66,13 +81,18 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
   if(state.sport==='keirin'&&(!source.target.context_event||source.target.discovery_stage!=='race'))continue;
   const item=state.races[race.race_id]??={};item.clock=source;
   if(!race.close_at)continue;
-  const close=Date.parse(race.close_at),odds='odds:'+race.race_id,result='result:'+race.race_id;
-  raceTask(state,odds,{kind:'odds',race_id:race.race_id,next_at:close-settings.odds_lead_seconds*1000,interval:config.interval_seconds});
-  raceTask(state,result,{kind:'result',race_id:race.race_id,next_at:close+settings.result_delay_seconds*1000,interval:settings.result_interval_seconds});
+  const close=Date.parse(race.close_at),odds='odds:'+race.race_id,result='result:'+race.race_id,final='final_odds:'+race.race_id;
+  raceTask(state,odds,{kind:'odds',race_id:race.race_id,close_at:close,next_at:close-settings.odds_lead_seconds*1000,interval:config.interval_seconds});
+  raceTask(state,result,{kind:'result',race_id:race.race_id,close_at:close,next_at:close+settings.result_delay_seconds*1000,interval:settings.result_interval_seconds});
+  raceTask(state,final,{kind:'final_odds',race_id:race.race_id,close_at:close,
+   next_at:close+settings.final_odds_delay_seconds*1000,interval:settings.final_odds_interval_seconds});
   // Follow changed advertisements before generating any further request group.
   const oddsTask=state.tasks[odds],resultTask=state.tasks[result];
-  oddsTask.done=false;oddsTask.next_at=Math.max(now,close-settings.odds_lead_seconds*1000,(oddsTask.last_at??0)+oddsTask.interval*1000);
-  resultTask.done=false;resultTask.next_at=Math.max(now,close+settings.result_delay_seconds*1000,(resultTask.last_at??0)+resultTask.interval*1000);
+  if(oddsTask.close_at!==close){oddsTask.done=false;oddsTask.close_at=close;oddsTask.next_at=Math.max(now,close-settings.odds_lead_seconds*1000,(oddsTask.last_at??0)+oddsTask.interval*1000);}
+  if(resultTask.close_at!==close){resultTask.done=false;resultTask.close_at=close;resultTask.next_at=Math.max(now,close+settings.result_delay_seconds*1000,(resultTask.last_at??0)+resultTask.interval*1000);}
+  const finalTask=state.tasks[final];
+  if(finalTask.close_at!==close){finalTask.done=false;finalTask.close_at=close;}
+  if(!finalTask.done)finalTask.next_at=Math.max(now,close+settings.final_odds_delay_seconds*1000,(finalTask.last_at??0)+finalTask.interval*1000);
  }
  if(children.deferred.length)state.report={at:now,status:'PROGRAM_DEFERRED',planned:0,deferred:children.deferred.length,reason:children.deferred[0].reason};
 }
@@ -107,12 +127,17 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
   tasks=[guest];}
  let deferred=0;
  for(const [key,task] of tasks){
+  // Expire finite closing tasks even if their clock/roster resource disappeared.
+  if(task.kind==='final_odds'&&task.close_at!==undefined&&now>task.close_at+settings.final_odds_window_seconds*1000){task.done=true;continue;}
   if(task.next_at>now)continue;
+  // Due preclose/discovery/result work retains precedence over closing price samples.
+  if(task.kind==='final_odds'&&tasks.some(([,t])=>t.kind!=='final_odds'&&!t.done&&t.next_at<=now))continue;
   const at=now+settings.planning_offset_seconds*1000;let targets:Target[]=[];
   if(task.kind==='request'){
    const race=task.target?state.races[task.target.race_id]?.clock?.value.program:undefined;
    const known=race?programRaces(race).find(r=>r.race_id===task.target!.race_id):undefined;
    if(task.target?.discovery_stage!=='venue'&&known?.close_at&&now>Date.parse(known.close_at)+settings.result_window_seconds*1000){task.done=true;continue;}
+   if(task.target?.discovery_stage==='race'&&known?.close_at&&now<Date.parse(known.close_at)-settings.odds_lead_seconds*1000){task.next_at=Date.parse(known.close_at)-settings.odds_lead_seconds*1000;continue;}
    targets=[task.target!];
   }else {
    const facts=state.races[task.race_id!],source=facts?.clock;
@@ -123,29 +148,62 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
     if(now>close+settings.result_window_seconds*1000){task.done=true;continue;}
     targets=[resultTarget(source,task.race_id!)];
    }else {
-    if(at>=close){task.done=true;continue;}
+    if(task.kind==='odds'&&at>=close){task.done=true;continue;}
     if(now-Date.parse(source.received_at)>config.discovery.maximum_program_age_seconds*1000||state.sport==='keirin'&&(!facts.runners||now-Date.parse(facts.runners.received_at)>config.discovery.maximum_program_age_seconds*1000)){
      task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;
     }
-    try {const plan=oddsTargets(source,task.race_id!,at,facts.runners);if(!plan.deferred.length)targets=plan.targets;}catch {targets=[];}
+    try {const plan=oddsTargets(source,task.race_id!,at,facts.runners,task.kind==='final_odds'?'CLOSED':'INTERMEDIATE');if(!plan.deferred.length)targets=plan.targets;}catch {targets=[];}
     if(!targets.length){task.next_at=now+settings.deferred_interval_seconds*1000;deferred++;continue;}
    }
   }
+  if(task.kind==='final_odds'){
+   // Reserve time for every request's configured timeout and source spacing.
+   // Do not begin a closing round ahead of preclose work due inside that span.
+   const finish=at+targets.length*(config.request_timeout_seconds+config.request_spacing_seconds)*1000;
+   const earlier=tasks.filter(([,t])=>t.kind==='odds'&&!t.done&&t.next_at<=finish);
+   if(earlier.length){task.next_at=Math.max(now+1,Math.min(...earlier.map(([,t])=>t.next_at)));deferred++;continue;}
+  }
   const entries=targets.map((target,i)=>({at:at+i*config.request_spacing_seconds*1000,target,daily_task:key,daily_day:state.day}));
   if(entries.length>config.maximum_plan_entries)throw new Error('DAILY_PLAN_CAPACITY');
-  state.action={task:key,entries};state.wake_at=at;
+  state.action={task:key,entries,close_at:task.close_at,...(task.kind==='final_odds'?{closed_odds:true}:{})};state.wake_at=at;
   state.report={at:now,status:'PLANNED',planned:entries.length,deferred};return entries;
  }
  const future=Object.values(state.tasks).filter(t=>!t.done).map(t=>t.next_at);
  state.wake_at=future.length?Math.max(now+1,Math.min(...future)):window.end;
  state.report={at:now,status:'WAITING',planned:0,deferred};return [];
 }
-export async function completeDaily(state:DailyState,entry:DailyEntry,status:string,now:number) {
- if(entry.daily_day!==state.day||!state.action||state.action.task!==entry.daily_task)return;
+export function nextDailyParallel(state:DailyState,now:number,guestReady=true,capacity=config.maximum_pending_requests):DailyEntry[] {
+ migrateDailyCloses(state);const actions=state.actions??={};
+ if(state.action){actions[state.action.task]=state.action;state.action=null;}
+ if(state.day!==businessDay(now).day&&Object.keys(actions).length)return Object.values(actions).flatMap(a=>a.entries);
+ if(state.sport==='keirin'&&!guestReady&&Object.keys(actions).length)return Object.values(actions).flatMap(a=>a.entries);
+ const working:DailyState={...state,tasks:Object.fromEntries(Object.entries(state.tasks).filter(([key])=>!actions[key])),action:null};
+ let added=0;
+ while(Object.keys(actions).length<(state.sport==='keirin'&&!guestReady?1:config.maximum_parallel_requests)){
+  const entries=nextDaily(working,now,guestReady);if(!entries.length)break;
+  if(entries.length>capacity-added){working.action=null;working.report={at:now,status:'CAPACITY_WAIT',planned:added,deferred:1};break;}
+  const action=working.action!;actions[action.task]=action;working.action=null;delete working.tasks[action.task];added+=entries.length;
+ }
+ state.wake_at=working.wake_at;state.report=working.report;
+ return Object.values(actions).flatMap(a=>a.entries);
+}
+export async function completeDaily(state:DailyState,entry:DailyEntry,status:string,now:number,closedOdds=false,resultPublished=false) {
+ const action=entry.daily_task?state.actions?.[entry.daily_task]??(state.action?.task===entry.daily_task?state.action:null):null;
+ if(entry.daily_day!==state.day||!action)return;
  const resource=await resourceId(entry.target);
- state.action.entries=await Promise.all(state.action.entries.map(async e=>({e,match:e.at===entry.at&&await resourceId(e.target)===resource})))
-  .then(rows=>rows.filter(r=>!r.match).map(r=>r.e));
- if(!state.action.entries.length){const task=state.tasks[state.action.task];task.last_at=now;task.next_at=now+task.interval*1000;
-  state.action=null;state.wake_at=now+config.request_spacing_seconds*1000;}
- state.report={at:now,status,planned:state.action?.entries.length??0,deferred:0};
+ const matched=await Promise.all(action.entries.map(async e=>({e,match:e.at===entry.at&&await resourceId(e.target)===resource})));
+ if(!matched.some(r=>r.match))return;
+ const task=state.tasks[action.task];
+ if(task.kind==='final_odds')action.closed_odds=action.closed_odds===true&&closedOdds;
+ action.entries=matched.filter(r=>!r.match).map(r=>r.e);
+ if(!action.entries.length){
+  // A response from an earlier advertised close cannot finish the revised task.
+  if(action.close_at===task.close_at){
+  if(task.kind==='final_odds'&&action.closed_odds||task.kind==='result'&&resultPublished)task.done=true;
+  if(task.kind==='request'&&status==='RAW_STORED'&&task.target?.sport==='keirin'&&new URL(task.target.url).searchParams.get('type')===config.sources.keirin.identity_json_type)task.done=true;
+  task.last_at=now;task.next_at=now+task.interval*1000;
+  }
+  if(state.action===action)state.action=null;else delete state.actions![action.task];
+  state.wake_at=now+config.request_spacing_seconds*1000;}
+ state.report={at:now,status,planned:action.entries.length,deferred:0};
 }
