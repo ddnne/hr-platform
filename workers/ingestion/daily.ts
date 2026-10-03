@@ -40,6 +40,29 @@ export function nextMonthly(after: number, previous: number | null): Job {
 }
 
 export class NarCollector extends DurableObject<Env> {
+  /** Adjust only unstarted work; all requests still use the one provider gate. */
+  private async withPages(job: Job, previous: number | null, earliestAt: number | null = null): Promise<Job> {
+    const interval = collection.interval_seconds * 1000;
+    const page = await nextPage(this.env, job.at + 2 * interval, earliestAt);
+    if (!job.planned && !job.page) {
+      if (job.kind === "race" && previous !== null) {
+        const offset = policy.timezone_offset_minutes * 60_000;
+        const sameDay = Math.floor((previous + offset) / DAY) === Math.floor((job.at + offset) / DAY);
+        const reserved = sameDay ? await nextPage(this.env,
+          job.at + policy.race_refresh_deferral_seconds * 1000, Math.max(job.at, earliestAt ?? job.at), "race") : null;
+        if (reserved) job = {...job, kind: "odds"};
+      }
+      // Leave an odds observation before the state/race packet instead of
+      // skipping straight to state. Delay at most one regular interval, never
+      // fetch early. Response time may delay later receipts: as-of still gates use.
+      const beforeState = page ? page.at - interval : 0;
+      if (job.kind === "odds" && page?.kind === "state" && job.at <= beforeState
+          && beforeState <= job.at + interval && nextJob(beforeState, previous).at === beforeState) {
+        return beforeState === job.at ? job : {...job, at: beforeState};
+      }
+    }
+    return page && page.at <= job.at + interval ? pageJob(page) : job;
+  }
   private async next(after: number, previous: number | null, allowMonthly = true): Promise<Job> {
     let regular = nextJob(after, previous);
     // The first odds after state/race evidence is needed for the fixed Paper
@@ -48,9 +71,7 @@ export class NarCollector extends DurableObject<Env> {
       const monthly = nextMonthly(after, await lastMonthlyAttempt(this.env));
       if (monthly.at <= regular.at) regular = monthly;
     }
-    // Previously reserved state/payout slots take precedence over the archive.
-    const page = await nextPage(this.env, regular.at);
-    return page ? pageJob(page) : regular;
+    return this.withPages(regular, previous);
   }
   private async control(): Promise<Control | null> {
     return this.env.INDEX.prepare("SELECT blocked,next_allowed_at FROM source_control WHERE source=?")
@@ -68,11 +89,16 @@ export class NarCollector extends DurableObject<Env> {
         // Keep due/in-flight work; any replacement obeys the provider wait/window.
         if (job && job.at > Date.now() && alarm > Date.now()) {
           const window = collection.capture_window_seconds * 1000;
-          const page = await nextPage(this.env, job.at, Math.max(Date.now() + 1, control.next_allowed_at) - window);
-          const executionAt = page ? Math.max(Date.now() + 1, page.at, control.next_allowed_at) : Infinity;
-          if (page && executionAt <= page.at + window
-              && (executionAt < job.at || executionAt === job.at && !job.planned && !job.page)) {
-            job = pageJob(page);
+          const previous = await this.ctx.storage.get<number>("lastRaceAt") ?? null;
+          const candidate = await this.withPages(job, previous,
+            Math.max(Date.now() + 1, control.next_allowed_at) - window);
+          const executionAt = Math.max(Date.now() + 1, candidate.at, control.next_allowed_at);
+          const ordinary = !job.planned && !job.page;
+          if (candidate !== job && (!candidate.planned || executionAt <= candidate.at + window)
+              && (executionAt < job.at || executionAt === job.at && ordinary
+                || ordinary && candidate.kind === "odds" && candidate.at > job.at
+                  && candidate.at <= job.at + collection.interval_seconds * 1000)) {
+            job = candidate;
             await this.ctx.storage.put("job", job);
             await this.ctx.storage.setAlarm(executionAt);
           }
