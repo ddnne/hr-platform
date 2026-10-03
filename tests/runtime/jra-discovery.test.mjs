@@ -30,6 +30,13 @@ test('the separate venue navigation state digit never becomes part of the venue 
  assert.equal(p.parseProgram(jraProgram(),child).program.races[0].venue,5);
  assert.throws(()=>p.parseProgram(raw.replace('pw15orl1005','pw15orl2005'),catalogTarget),/NAVIGATION/);
 });
+test('final-display navigation retains complete recipes without inventing a start or deadline',()=>{
+ const value=p.parseProgram(jraProgram({navigationMode:'final',clock:'発走済'}),venue),r=value.program.races[0];
+ assert.equal(r.race_id,'jra:20000101:5:1');assert.equal(r.start_at,null);assert.equal(r.close_at,null);
+ assert.equal(Object.keys(value.program.odds_navigation[r.race_id]).length,7);
+ assert.ok(value.program.odds_navigation[r.race_id].win_place.startsWith('pw151ou1005'));
+ assert.throws(()=>p.parseProgram(jraProgram({navigationMode:'final',venue:8}),venue),/IDENTITY/);
+});
 test('ended/cancelled/unknown labels never become a scheduled start or observed deadline',()=>{
  for(const label of ['発走済','中止','変更確認中']){
   const r=p.parseProgram(jraProgram({clock:label}),venue).program.races[0];assert.equal(r.start_label,label);assert.equal(r.start_at,null);assert.equal(r.close_at,null);

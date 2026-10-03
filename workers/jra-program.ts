@@ -9,7 +9,7 @@ type Identity={day:string;venue:number;race?:number};
 export type JraProgram={venues:Venue[]}|{races:Race[];odds_navigation:Record<string,Partial<Record<JraPage,string>>>};
 export function jraNavigationIdentity(name:string,kind:'venue'|'odds'):Identity {
  const m=kind==='venue'?name.match(/^pw15orl[01](\d{3})(\d{4})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
-  name.match(/^pw15[1345678]ouS3(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})Z(?:99)?\/[A-Za-z0-9+]+$/);
+  name.match(/^pw15[1345678]ou(?:S3|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})Z(?:99)?\/[A-Za-z0-9+]+$/);
  if(!m)throw new Error('PROGRAM_NAVIGATION');
  const venue=Number(m[1]),day=date(m[kind==='venue'?5:6]);
  if(!Object.hasOwn(config.venues,String(venue))||m[2]!==day.slice(0,4))throw new Error('PROGRAM_IDENTITY');
