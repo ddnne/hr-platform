@@ -6,6 +6,7 @@ import {oddsTargets} from './odds-plan';
 import {contextNavigation} from './context';
 import {validateTarget} from './capture';
 import {resourceId} from './storage';
+import {recipeJson} from '../capture-storage';
 import type {savedProgram} from './storage';
 import type {Sport,Target} from './types';
 
@@ -38,7 +39,7 @@ async function requestTask(state:DailyState,target:Target,now:number,interval:nu
  const key='request:'+await resourceId(target),prior=state.tasks[key];
  if(!prior&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  // A newly observed identity must refresh the clock and runners together.
- const changed=prior&&JSON.stringify(prior.target)!==JSON.stringify(target);
+ const changed=prior&&recipeJson(prior.target)!==recipeJson(target);
  state.tasks[key]={kind:'request',target,next_at:changed?now:prior?.next_at??now,interval,done:changed?false:prior?.done};
 }
 export async function initialDaily(sport:Sport,now:number):Promise<DailyState> {

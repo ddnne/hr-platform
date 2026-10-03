@@ -1,5 +1,9 @@
 /** Private capture persistence shared by every sport. No provider requests. */
 export type CaptureStorage = {RAW: R2Bucket; INDEX: D1Database};
+/** Compare JSON request recipes without treating object key order as a change. */
+export const recipeJson = (value: unknown): string => JSON.stringify(value, (_key, item) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 export const iso = (n: number) => new Date(n).toISOString().replace("Z", "000+00:00");
 export interface CaptureManifest {
   event_id: string; scheduled_capture_at: string; fetch_started_at: string;

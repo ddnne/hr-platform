@@ -8,7 +8,7 @@ import {oddsTargets} from './odds-plan';
 import {businessDay,initialDaily,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
 import {supportsProgram} from './discovery';
 import type {Sport,CaptureSport,SportsEnv,Target,CaptureTarget} from './types';
-import type {CaptureManifest} from '../capture-storage';
+import {recipeJson,type CaptureManifest} from '../capture-storage';
 type Entry=Omit<DailyEntry,'target'> & {target:CaptureTarget};
 type Session={cookie:string;token?:string;expires:number};
 function planTime(event:string,at:number):number {
@@ -55,7 +55,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    const guest=await store.get<Session>('guest-session'),received=await store.get<string>('keirin-guest-received-at'),age=received?now-Date.parse(received):Infinity;
    const entries=nextDailyParallel(state,now,!!guest&&guest.expires>now||age>=0&&age<config.guest_session_seconds*1000,free-missing);
    const items:Record<string,Entry>={};for(const entry of entries){const key=`plan:${entry.at}:${await resourceId(entry.target)}`;
-    if(queue.has(key)&&JSON.stringify(queue.get(key))!==JSON.stringify(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
+    if(queue.has(key)&&recipeJson(queue.get(key))!==recipeJson(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
    if(state.report.status==='CAPACITY_WAIT'&&queue.size)capacityWait();
    await store.put('daily-state',state);if(entries.length)await store.put(items);
   });
@@ -72,13 +72,13 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    if(entry.target.headers||!Number.isSafeInteger(entry.at)||!recovery&&entry.at<Date.now()-config.capture_window_seconds*1000||entry.at>Date.now()+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');
    const resource=await resourceId(entry.target),key=`plan:${entry.at}:${resource}`;
    const recorded=await this.env.INDEX.prepare('SELECT event_id FROM captures WHERE event_id=?').bind(`sports:${entry.target.sport}:${entry.at}:${resource}`).first();
-   if(recorded){const saved=await this.env.RAW.get(`manifests/sports:${entry.target.sport}:${entry.at}:${resource}.json`);if(saved){const m=await saved.json<{target:CaptureTarget}>();if(JSON.stringify(m.target)!==JSON.stringify(entry.target))throw new Error('PLAN_CONFLICT');}}
-   if(!recorded||recovery){if(items[key]&&JSON.stringify(items[key])!==JSON.stringify(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
+   if(recorded){const saved=await this.env.RAW.get(`manifests/sports:${entry.target.sport}:${entry.at}:${resource}.json`);if(saved){const m=await saved.json<{target:CaptureTarget}>();if(recipeJson(m.target)!==recipeJson(entry.target))throw new Error('PLAN_CONFLICT');}}
+   if(!recorded||recovery){if(items[key]&&recipeJson(items[key])!==recipeJson(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
   }
   // Transactional insertion cannot overwrite another concurrent registration.
   await this.ctx.storage.transaction(async store=>{
    const queue=await store.list<Entry>({prefix:'plan:'});
-   for(const [key,entry] of Object.entries(items))if(queue.has(key)&&JSON.stringify(queue.get(key))!==JSON.stringify(entry))throw new Error('PLAN_CONFLICT');
+   for(const [key,entry] of Object.entries(items))if(queue.has(key)&&recipeJson(queue.get(key))!==recipeJson(entry))throw new Error('PLAN_CONFLICT');
    const additions=Object.keys(items).filter(k=>!queue.has(k));
    if(queue.size+additions.length>config.maximum_pending_requests)throw new Error('PLAN_CAPACITY');
    await store.put(items);
