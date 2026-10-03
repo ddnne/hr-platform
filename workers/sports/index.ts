@@ -1,13 +1,14 @@
-/** Separate private Worker. No horse, research, Paper or wagering bindings. */
+/** Shared private collection Worker. No research, Paper or wagering bindings. */
 import {DurableObject,WorkerEntrypoint} from 'cloudflare:workers';
 import config from '../../configs/sports-collection.json';
+import jra from '../../configs/jra-source.json';
 import {collect,validateTarget,validateContext,sourceFor,concurrencyFor,spacingFor} from './capture';
-import {history,resourceId,normalize,savedProgram,savedJraWin,closedOddsSaved,publishedResultSaved} from './storage';
+import {history,resourceId,normalize,savedProgram,savedJraWin,savedJraResult,closedOddsSaved,publishedResultSaved} from './storage';
 import {discoveryTargets} from './discovery-plan';
 import {oddsTargets} from './odds-plan';
 import {businessDay,initialDaily,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
 import {supportsProgram} from './discovery';
-import type {Sport,CaptureSport,SportsEnv,Target,CaptureTarget} from './types';
+import type {CaptureSport,SportsEnv,Target,CaptureTarget,JraResultTarget} from './types';
 import {recipeJson,type CaptureManifest} from '../capture-storage';
 type Entry=Omit<DailyEntry,'target'> & {target:CaptureTarget};
 type Session={cookie:string;token?:string;expires:number};
@@ -246,6 +247,14 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
    runners_observation:runnersEvent??null,runners_available_at:runners?.available_at??null,runners_received_at:runners?.received_at??null,
    entries:planEntries(plan.targets,at,now),deferred:plan.deferred,not_offered:plan.not_offered});
  }
+ async resultPlan(event:string,raceId:string,at:number):Promise<string> {
+  const now=planTime(event,at),source=await savedJraResult(this.env,event,now),name=source.value.result_navigation[raceId];
+  const targets:JraResultTarget[]=name?[{sport:'jra',race_id:raceId,kind:'result',form:true,
+   url:jra.origin+jra.result_path,body:new URLSearchParams({cname:name}).toString()}]:[];
+  targets.forEach(validateTarget);
+  return JSON.stringify({parent_observation:event,available_at:source.available_at,received_at:source.received_at,
+   entries:planEntries(targets,at,now),deferred:name?[]:[{race_id:raceId,reason:'RESULT_NAVIGATION_MISSING'}]});
+ }
  async planState(sport:CaptureSport):Promise<string> {
   if(sport!=='jra'&&!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
   return JSON.stringify(await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).planState());
@@ -265,7 +274,7 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async programHistory(sport:CaptureSport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'program'));
  }
- async resultHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
+ async resultHistory(sport:CaptureSport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after,'result'));
  }
  async reparse(event:string,version:string):Promise<string> {

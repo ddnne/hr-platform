@@ -15,7 +15,14 @@ export const spacingFor=(sport?:CaptureSport)=>sport==='jra'?jra.finite_request_
 export function validateTarget(t:CaptureTarget):void {
  if(t.sport==='jra'){
   const u=new URL(t.url),id=t.race_id.match(/^jra:(\d{8}):(\d+):(\d+)$/),body=new URLSearchParams(t.body),name=body.get('cname');
-  if(u.origin!==jra.origin||u.pathname!==jra.odds_path||u.search||u.hash||u.username||u.password)throw new Error('TARGET_ORIGIN');
+  if(u.origin!==jra.origin||u.pathname!==(t.kind==='result'?jra.result_path:jra.odds_path)||u.search||u.hash||u.username||u.password)throw new Error('TARGET_ORIGIN');
+  if(t.kind==='result'){
+   if(!t.form||body.size!==1||!name)throw new Error('READ_FORM_REQUIRED');
+   const identity=jraNavigationIdentity(name,'result');
+   if(!id||identity.day!==id[1]||identity.venue!==Number(id[2])||identity.race!==Number(id[3]))throw new Error('RESULT_IDENTITY');
+   if('context_event' in t||'deadline_at' in t||'page' in t||'market' in t||'discovery_stage' in t)throw new Error('RESULT_RESOURCE');
+   return;
+  }
   if(t.kind==='schedule'){
    if(!t.form||body.size!==1||!name||t.context_event!==undefined||t.deadline_at!==undefined)throw new Error('READ_FORM_REQUIRED');
    if(!id||Number(id[3])!==0)throw new Error('RACE_ID');date(id[1]);

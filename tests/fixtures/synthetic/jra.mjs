@@ -1,5 +1,17 @@
 export const race='jra:20000101:5:1',entrants=[1,2,10,11],frames={1:1,2:2,10:3,11:3};
 export const roster={entrants,frames};
+export const resultTarget={sport:'jra',race_id:race,kind:'result',form:true,url:'https://www.jra.go.jp/JRADB/accessS.html',
+ body:new URLSearchParams({cname:'pw01sde1005200001010120000101/AA'}).toString()};
+export function jraResult({special=false,tie=false,missing=false}={}){
+ const labels={'単勝':['1'],'複勝':['1','2','10'],'枠連':['1-2'],'馬連':['1-2'],'ワイド':['1-2','1-10','2-10'],'馬単':['1-2'],'3連複':['1-2-10'],'3連単':['1-2-10']};
+ const ranks=entrants.map((h,i)=>`<tr><td class="place">${i===3?'取消':tie&&i===1?1:i+1}</td><td class="num">${h}</td></tr>`).join('');
+ const payments=Object.entries(labels).filter(([m])=>!missing||m!=='3連単').map(([m,cs])=>`<dl><dt>${m}</dt><dd>${cs.map(c=>
+  `<div class="line"><div class="num">${special&&m==='3連単'?'特払':c}</div><div class="yen">${special&&m==='3連単'?'70':'1,230'}<span class="unit">円</span></div><div class="pop">1番人気</div></div>`).join('')}</dd></dl>`).join('');
+ return jraBody('win_place').split('<div class="refresh_line">')[0]+`<table><thead><tr><th class="place">着順</th><th class="num">馬<br>番</th></tr></thead><tbody>${ranks}</tbody></table>`+
+  `<div class="refund_area"><h2>払戻金</h2><div class="refund_unit mt15">${payments}</div><div class="caution">一般説明: 特払い</div></div>`+
+  `<a href="/JRADB/accessS.html?CNAME=pw01sde1005200001010120000101/AA">合成結果1</a>`+
+  `<a href="/JRADB/accessS.html?CNAME=pw01sde1005200001010220000101/BB">合成結果2</a>`;
+}
 export const catalogTarget={sport:'jra',race_id:'jra:20000101:0:0',kind:'schedule',discovery_stage:'catalog',form:true,
  url:'https://www.jra.go.jp/JRADB/accessO.html',body:'cname=pw15oli00%2F6D'};
 export const venueNavigation='pw15orl00052000010120000101/AA';

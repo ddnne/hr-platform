@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
-import {jraBody,race,catalogTarget,jraCatalog,jraProgram} from '../fixtures/synthetic/jra.mjs';
+import {jraBody,race,catalogTarget,jraCatalog,jraProgram,jraResult,resultTarget} from '../fixtures/synthetic/jra.mjs';
 const config=JSON.parse(await readFile('configs/jra-source.json','utf8'));
 const encoded=body=>{const result=spawnSync('python3',['-c','import sys;sys.stdout.buffer.write(sys.stdin.read().encode("shift_jis"))'],{input:body});assert.equal(result.status,0);return result.stdout;};
 const target=(page='win_place',context_event)=>({sport:'jra',race_id:race,kind:'odds',page,form:true,
@@ -26,6 +26,8 @@ export default {async fetch(req,env){const v=await req.json();
  return {...o,arrayBuffer:()=>read('arrayBuffer'),text:()=>read('text')};},head:(...args)=>env.RAW.head(...args),put:(...args)=>env.RAW.put(...args)}};}
  if(v.op==='history')return Response.json(await history(env,'jra',v.race??'${race}',v.at,100));
  if(v.op==='programHistory')return Response.json(await history(env,'jra',v.race,v.at,100,'','program'));
+ if(v.op==='resultHistory')return Response.json(JSON.parse(await env.CONTROL.resultHistory('jra',v.race??'${race}',v.at,100)));
+ if(v.op==='resultPlan'){try{return Response.json(JSON.parse(await env.CONTROL.resultPlan(v.event,v.race,v.at)));}catch(e){return Response.json({error:e.message});}}
  if(v.op==='day')return Response.json(businessDay(Date.now()+86400000));
  if(v.op==='dailyState')return Response.json(JSON.parse(await env.CONTROL.dailyState('jra')));
  if(v.op==='alarm'){await env.SPORTS.get(env.SPORTS.idFromName('jra')).step(v.now);return Response.json(true);}
@@ -77,6 +79,29 @@ test('same-content observations remain separate, delivery is idempotent and past
  await new Promise(resolve=>setTimeout(resolve,3));const second=await r.tick();assert.notEqual(first.event_id,second.event_id);
  const all=await r.call({op:'history',at:new Date().toISOString()});assert.equal(all.length,2);
  assert.equal(all[0].raw_sha256,all[1].raw_sha256);assert.deepEqual(await r.call({op:'history',at:cutoff}),past);
+ }finally{await r.mf.dispose();}
+});
+test('JRA results share immutable originals, as-of history, redelivery and saved-link planning',async()=>{
+ const r=await runtime([{body:encoded(jraResult())},{body:encoded(jraResult())}]);try{
+  const at=Date.now(),first=await r.tick(resultTarget,at),cutoff=new Date().toISOString();
+  assert.equal(first.status,'RAW_STORED');const parsed=await r.parsed(first.event_id);assert.equal(parsed.index.status,'RESULT_PARSED');
+  assert.equal(parsed.value.phase,'RESULT_ONLY');assert.equal(parsed.value.payouts.length,12);
+  const past=await r.call({op:'resultHistory',at:cutoff});assert.equal(past.length,1);
+  assert.deepEqual(await r.call({op:'history',at:cutoff}),[]);
+  await r.tick(resultTarget,at);assert.equal(r.requests.length,1);
+  await r.reset();await new Promise(resolve=>setTimeout(resolve,3));await r.tick(resultTarget);
+  const all=await r.call({op:'resultHistory',at:new Date().toISOString()});assert.equal(all.length,2);assert.equal(all[0].raw_sha256,all[1].raw_sha256);
+  const plan=await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:2',at:Date.now()+60000});
+  assert.equal(plan.entries.length,1);assert.equal(plan.entries[0].target.kind,'result');
+  assert.equal(new URLSearchParams(plan.entries[0].target.body).get('cname'),'pw01sde1005200001010220000101/BB');
+  assert.equal((await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:3',at:Date.now()+60000})).deferred[0].reason,'RESULT_NAVIGATION_MISSING');
+  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v2'}),'RESULT_PARSED');
+  assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);assert.equal(r.requests.length,2);
+  const later=new Date().toISOString().replace('Z','000+00:00');
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+   .bind(later,later,first.event_id,config.result_parser_version).run();
+  assert.deepEqual(await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:2',at:Date.now()+60000}),{error:'RESULT_UNAVAILABLE'});
+  assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);
  }finally{await r.mf.dispose();}
 });
 test('context is fixed to original fetch start, latest failure blocks new fetches but preserves raw recovery',async()=>{
