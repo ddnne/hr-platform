@@ -19,8 +19,10 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
  // Venue navigation may discover an unknown race; a race detail must not fan out again.
  discovery_stage?: 'venue' | 'race';deadline_at?:number};
 export type JraTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
- sport:'jra';kind:'odds';page:JraPage;body:string;form:true};
-export type CaptureTarget = Target | JraTarget;
+ sport:'jra';kind:'odds';page:JraPage;body:string;form:true;discovery_stage?:never};
+export type JraScheduleTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
+ sport:'jra';kind:'schedule';discovery_stage:'catalog'|'venue';body:string;form:true};
+export type CaptureTarget = Target | JraTarget | JraScheduleTarget;
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
  SPORTS_DAILY_ENABLED?: string;

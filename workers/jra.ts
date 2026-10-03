@@ -1,7 +1,7 @@
-/** Pure JRA page adapter. Collection and live strategy use remain disabled. */
+/** Pure JRA odds adapter. Collection uses the shared Sports capture path. */
 import config from '../configs/jra-source.json';
 import {combinations,market,quote,text} from './sports/parsers';
-import {date,programClock} from './sports/discovery';
+import {date,programClock} from './sports/program-clock';
 import type {Market,Quote,Snapshot} from './sports/types';
 export type JraPage = keyof typeof config.tables;
 export type JraRunners={entrants:number[];frames:Record<string,number>};

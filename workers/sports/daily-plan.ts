@@ -1,20 +1,21 @@
 /** Daily request timing from saved program facts. No HTTP, DB or Paper calls. */
 import config from '../../configs/sports-collection.json';
+import jra from '../../configs/jra-source.json';
 import {discoveryTargets} from './discovery-plan';
 import {programRaces} from './discovery';
 import {oddsTargets} from './odds-plan';
 import {contextNavigation} from './context';
-import {validateTarget} from './capture';
+import {validateTarget,concurrencyFor} from './capture';
 import {resourceId} from './storage';
 import {recipeJson} from '../capture-storage';
 import type {savedProgram} from './storage';
-import type {Sport,Target} from './types';
+import type {CaptureSport,CaptureTarget,Target} from './types';
 
 type Source=Awaited<ReturnType<typeof savedProgram>> & {event:string};
-type Task={kind:'request'|'odds'|'result'|'final_odds';target?:Target;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number};
+type Task={kind:'request'|'odds'|'result'|'final_odds';target?:CaptureTarget;race_id?:string;next_at:number;interval:number;last_at?:number;done?:boolean;close_at?:number};
 type Action={task:string;entries:DailyEntry[];closed_odds?:boolean;close_at?:number};
-export type DailyEntry={at:number;target:Target;daily_task?:string;daily_day?:string};
-export type DailyState={sport:Sport;day:string;wake_at:number;tasks:Record<string,Task>;
+export type DailyEntry={at:number;target:CaptureTarget;daily_task?:string;daily_day?:string};
+export type DailyState={sport:CaptureSport;day:string;wake_at:number;tasks:Record<string,Task>;
  races:Record<string,{clock?:Source;runners?:Source}>;
  action:Action|null;actions?:Record<string,Action>;
  report:{at:number;status:string;planned:number;deferred:number;reason?:string}};
@@ -27,7 +28,9 @@ export function businessDay(now:number):{day:string;start:number;end:number} {
  const iso=shifted.toISOString().slice(0,10),midnight=Date.parse(iso+'T00:00:00Z')-config.discovery.clock_timezone_offset_minutes*60_000;
  return {day:iso.replaceAll('-',''),start:midnight+settings.start_hour*3600_000,end:midnight+settings.end_hour*3600_000};
 }
-export function catalogTargets(sport:Sport,day:string):Target[] {
+export function catalogTargets(sport:CaptureSport,day:string):CaptureTarget[] {
+ if(sport==='jra'){const target:CaptureTarget={sport,race_id:`jra:${day}:0:0`,kind:'schedule',discovery_stage:'catalog',form:true,
+  url:jra.origin+jra.odds_path,body:new URLSearchParams({cname:jra.catalog_navigation}).toString()};validateTarget(target);return [target];}
  const source=config.sources[sport],base={sport,race_id:`${sport}:${day}:0:0`,kind:'schedule' as const};
  const targets:Target[]=sport==='auto'?[{...base,url:source.origin+config.sources.auto.catalog_path}]:
   sport==='boat'?[{...base,url:source.origin+config.sources.boat.catalog_path+'?'+new URLSearchParams({hd:day})}]:
@@ -35,14 +38,14 @@ export function catalogTargets(sport:Sport,day:string):Target[] {
    {...base,url:source.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:config.sources.keirin.catalog_json_type})}];
  targets.forEach(validateTarget);return targets;
 }
-async function requestTask(state:DailyState,target:Target,now:number,interval:number) {
+async function requestTask(state:DailyState,target:CaptureTarget,now:number,interval:number) {
  const key='request:'+await resourceId(target),prior=state.tasks[key];
  if(!prior&&Object.keys(state.tasks).length>=settings.maximum_tasks)throw new Error('DAILY_TASK_CAPACITY');
  // A newly observed identity must refresh the clock and runners together.
  const changed=prior&&recipeJson(prior.target)!==recipeJson(target);
  state.tasks[key]={kind:'request',target,next_at:changed?now:prior?.next_at??now,interval,done:changed?false:prior?.done};
 }
-export async function initialDaily(sport:Sport,now:number):Promise<DailyState> {
+export async function initialDaily(sport:CaptureSport,now:number):Promise<DailyState> {
  const clock=businessDay(now),state:DailyState={sport,day:clock.day,wake_at:Math.max(now,clock.start),tasks:{},races:{},action:null,
   report:{at:now,status:'INITIALIZED',planned:0,deferred:0}};
  for(const t of catalogTargets(sport,clock.day))await requestTask(state,t,clock.start,
@@ -81,7 +84,8 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
   // Venue-level Keirin LIVE is discovery, without the individual identity reference.
   if(state.sport==='keirin'&&(!source.target.context_event||source.target.discovery_stage!=='race'))continue;
   const item=state.races[race.race_id]??={};item.clock=source;
-  if(!race.close_at)continue;
+  // Discovery is qualified separately from automatic odds and settlement.
+  if(state.sport==='jra'||!race.close_at)continue;
   const close=Date.parse(race.close_at),odds='odds:'+race.race_id,result='result:'+race.race_id,final='final_odds:'+race.race_id;
   raceTask(state,odds,{kind:'odds',race_id:race.race_id,close_at:close,next_at:close-settings.odds_lead_seconds*1000,interval:config.interval_seconds});
   raceTask(state,result,{kind:'result',race_id:race.race_id,close_at:close,next_at:close+settings.result_delay_seconds*1000,interval:settings.result_interval_seconds});
@@ -97,14 +101,15 @@ export async function acceptProgram(state:DailyState,source:Source,now:number) {
  }
  if(children.deferred.length)state.report={at:now,status:'PROGRAM_DEFERRED',planned:0,deferred:children.deferred.length,reason:children.deferred[0].reason};
 }
-export function rejectProgram(state:DailyState,target:Target) {
+export function rejectProgram(state:DailyState,target:CaptureTarget) {
  // Invalidate the matching latest resource; an error never revives its old normal copy.
  for(const facts of Object.values(state.races))for(const field of ['clock','runners'] as const)
   if(facts[field]&&facts[field]!.target.url===target.url&&facts[field]!.target.body===target.body)delete facts[field];
 }
 export function resultTarget(source:Source,raceId:string):Target {
- const [sport,day,venue,no]=raceId.split(':'),base={sport:sport as Sport,race_id:raceId,kind:'result' as const};
- let target:Target;
+ if(source.target.sport==='jra'||raceId.startsWith('jra:'))throw new Error('JRA_RESULT_UNSUPPORTED');
+ const [sport,day,venue,no]=raceId.split(':'),base={sport:sport as Target['sport'],race_id:raceId,kind:'result' as const};
+ let target:CaptureTarget;
  if(sport==='auto')target={...base,url:config.sources.auto.origin+config.sources.auto.result_path,
   body:JSON.stringify({placeCode:Number(venue),raceDate:`${day.slice(0,4)}-${day.slice(4,6)}-${day.slice(6,8)}`,raceNo:Number(no)})};
  else if(sport==='boat')target={...base,url:config.sources.boat.origin+config.sources.boat.result_path+'?'+new URLSearchParams({hd:day,jcd:venue.padStart(2,'0'),rno:no})};
@@ -133,7 +138,7 @@ export function nextDaily(state:DailyState,now:number,guestReady=true):DailyEntr
   if(task.next_at>now)continue;
   // Due preclose/discovery/result work retains precedence over closing price samples.
   if(task.kind==='final_odds'&&tasks.some(([,t])=>t.kind!=='final_odds'&&!t.done&&t.next_at<=now))continue;
-  const at=now+settings.planning_offset_seconds*1000;let targets:Target[]=[];
+  const at=now+settings.planning_offset_seconds*1000;let targets:CaptureTarget[]=[];
   if(task.kind==='request'){
    const race=task.target?state.races[task.target.race_id]?.clock?.value.program:undefined;
    const known=race?programRaces(race).find(r=>r.race_id===task.target!.race_id):undefined;
@@ -180,7 +185,7 @@ export function nextDailyParallel(state:DailyState,now:number,guestReady=true,ca
  if(state.sport==='keirin'&&!guestReady&&Object.keys(actions).length)return Object.values(actions).flatMap(a=>a.entries);
  const working:DailyState={...state,tasks:Object.fromEntries(Object.entries(state.tasks).filter(([key])=>!actions[key])),action:null};
  let added=0;
- while(Object.keys(actions).length<(state.sport==='keirin'&&!guestReady?1:config.maximum_parallel_requests)){
+ while(Object.keys(actions).length<(state.sport==='keirin'&&!guestReady?1:concurrencyFor(state.sport))){
   const entries=nextDaily(working,now,guestReady);if(!entries.length)break;
   if(entries.length>capacity-added){working.action=null;working.report={at:now,status:'CAPACITY_WAIT',planned:added,deferred:1};break;}
   const action=working.action!;actions[action.task]=action;working.action=null;delete working.tasks[action.task];added+=entries.length;
