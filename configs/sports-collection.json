@@ -1,6 +1,6 @@
 {
   "version": "sports-shadow-v1",
-  "parser_version": "sports-odds-v1",
+  "parser_version": "sports-odds-v4",
   "program_parser_version": "sports-program-v3",
   "result_parser_version": "sports-result-v1",
   "interval_seconds": 120,

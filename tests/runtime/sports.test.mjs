@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {Miniflare,Log,LogLevel,convertV4MiniflareOptions} from 'miniflare';
 const pure=await build({entryPoints:['workers/sports/parsers.ts'],bundle:true,write:false,format:'esm',platform:'node'});
 const parser=await import(`data:text/javascript;base64,${Buffer.from(pure.outputFiles[0].text).toString('base64')}`);
-import {ids,autoBody,autoProgram,keirinIdentity,keirinRunners,keirinProgram} from '../fixtures/synthetic/sports.mjs';
+import {ids,autoBody,boatOddsBody,autoProgram,keirinIdentity,keirinRunners,keirinProgram} from '../fixtures/synthetic/sports.mjs';
 import {autoResult,keirinResult} from '../fixtures/synthetic/sports-results.mjs';
 const target={sport:'auto',race_id:'auto:20000101:6:8',url:'https://autorace.jp/race_info/Odds',kind:'odds',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:8})};
 test('synthetic full seven markets, ranges and explicit zero; unknown source timestamp stays null',()=>{
@@ -35,6 +35,23 @@ test('boat rowspan table maps every trifecta to the correct runner identities',(
  assert.equal(r.phase,'CLOSE_ONLY');assert.equal(r.markets[0].complete,true);assert.equal(r.markets[0].quotes.length,120);
  for(const q of r.markets[0].quotes)assert.equal(q.lower,q.combination[0]*100+q.combination[1]*10+q.combination[2]);
 });
+test('boat current and legacy time classes retain display phase without inventing update timestamps',()=>{
+ const target={sport:'boat',race_id:'boat:20000101:1:1',url:'odds3t',market:'trifecta'};
+ for(const attrs of ['class="tab4_refreshText"', "class='extra tab4_refreshText other'", 'class="tab4_time"']){
+  const raw=boatOddsBody(['trifecta']).replace('<p class="tab4_time">', '<p '+attrs+'>');
+  const current=parser.parseBoat(raw,target);
+  assert.equal(current.phase,'INTERMEDIATE');assert.ok(current.markets.every(m=>m.complete));
+  assert.equal(current.markets[0].source_time_label,'オッズ更新時間 09:00');
+  assert.equal(current.source_updated_at,null);assert.equal(current.source_published_at,null);
+  assert.equal(parser.parseBoat(raw.replace('オッズ更新時間 09:00','締切時オッズ'),target).phase,'CLOSE_ONLY');
+ }
+ const unknown=parser.parseBoat(boatOddsBody(['trifecta']).replace('tab4_time','other-tab4_refreshText'),target);
+ assert.equal(unknown.phase,'UNKNOWN');assert.equal(unknown.markets[0].source_time_label,null);
+ for(const attrs of ['data-class="tab4_refreshText"', `data-note="class='tab4_refreshText'"`]){
+  const fake=boatOddsBody(['trifecta']).replace('class="tab4_time"',attrs);
+  assert.equal(parser.parseBoat(fake,target).phase,'UNKNOWN');
+ }
+});
 const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
 export {SportsControl} from './workers/sports/index';
 export default {async fetch(req,env){const v=await req.json();
@@ -63,6 +80,20 @@ async function runtime(responses=[],enabled=true,doClass=null){
  const reset=()=>db.prepare("UPDATE source_control SET next_allowed_at=0 WHERE source LIKE 'sports-%'").run();
  return {mf,db,requests,tick,reset,call};
 }
+test('an unrecognized boat time label records a format signal and keeps the earlier cutoff unchanged',async()=>{
+ const t={sport:'boat',race_id:'boat:20000101:1:1',kind:'odds',market:'trifecta',
+  url:'https://www.boatrace.jp/owpc/pc/race/odds3t?hd=20000101&jcd=01&rno=1'};
+ const full=boatOddsBody(['trifecta']),r=await runtime([{body:full},{body:full.replace('tab4_time','changed-layout')}]);
+ try{
+  await r.tick(Date.now(),t);await r.reset();const cut=new Date().toISOString();
+  const before=await (await r.call({op:'scopedHistory',sport:'boat',race_id:t.race_id,cutoff:cut,kind:'odds'})).json();
+  assert.equal(before.length,1);assert.equal(before[0].status,'COMPLETE');
+  await new Promise(resolve=>setTimeout(resolve,2));await r.tick(Date.now(),t);
+  const now=await (await r.call({op:'scopedHistory',sport:'boat',race_id:t.race_id,cutoff:new Date().toISOString(),kind:'odds'})).json();
+  assert.equal(now.length,2);assert.equal(now[1].status,'INCOMPLETE');assert.equal(now[1].error_code,'ODDS_PHASE_UNKNOWN');
+  assert.deepEqual(await (await r.call({op:'scopedHistory',sport:'boat',race_id:t.race_id,cutoff:cut,kind:'odds'})).json(),before);
+ }finally{await r.mf.dispose();}
+});
 test('append same body at a later time, redelivery is silent, changed recovery and as-of stay immutable',async()=>{
  const r=await runtime([{},{},{status:500},{body:autoBody('5.0')}]);try{
  const one=await r.tick();await r.reset();const two=await r.tick();await r.reset();const cut=new Date().toISOString();
