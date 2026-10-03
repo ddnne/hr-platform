@@ -143,3 +143,6 @@ export function parseProgram(raw:string,t:Target) {
  return {schema:'sports-program-v1' as const,sport:t.sport,requested_race_id:t.race_id,discovery_stage:t.discovery_stage??'venue',source_updated_at:null,source_published_at:null,program};
 }
 export type Program = ReturnType<typeof parseProgram>;
+export function programRaces(program:Program['program']):Race[] {
+ return 'races' in program&&program.races?program.races:'selected' in program&&program.selected?[program.selected]:[];
+}
