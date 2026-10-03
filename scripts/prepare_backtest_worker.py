@@ -5,7 +5,7 @@ import shutil
 
 from prepare_python_worker import prepare
 
-RESEARCH_FILES = ('cloud_research.py', 'research_evaluation.py', 'evaluation.py',
+RESEARCH_FILES = ('cloud_research.py', 'cloud_research_auto.py', 'research_evaluation.py', 'evaluation.py',
     'research_suite.py', 'research_alternatives.py', 'research_expansions.py',
     'research_joint_kelly.py', 'research_kelly.py', 'research_neutral.py', 'research_portfolio.py',
     'research_portfolio_scenarios.py', 'research_selection.py', 'research_all_markets.py', 'research_ticket_events.py')
@@ -26,7 +26,8 @@ def prepare_backtest(destination):
              'runtime': {k: config[k] for k in ('compatibility_date', 'compatibility_flags', 'python_modules')}}
     config.update(name='hr-platform-dev-backtest', triggers={'crons': []},
         vars={'STORAGE_POLICY_JSON': config['vars']['STORAGE_POLICY_JSON'],
-              'RESEARCH_POLICY_JSON': json.dumps(policy), 'ENGINE_ID': sha(canonical(basis)), 'RESEARCH_ENABLED': 'false'})
+              'RESEARCH_POLICY_JSON': json.dumps(policy), 'ENGINE_ID': sha(canonical(basis)),
+              'RESEARCH_ENABLED': 'false', 'AUTO_RESEARCH_ENABLED': 'false'})
     for key in ('services', 'durable_objects', 'migrations'):
         config.pop(key, None)
     (root / 'wrangler.jsonc').write_text(json.dumps(config, indent=2) + '\n')

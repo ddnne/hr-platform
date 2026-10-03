@@ -1,9 +1,12 @@
 {
-  "version": "cloud-research-v1",
+  "version": "cloud-research-v2",
   "lease_seconds": 180,
   "max_attempts": 2,
   "max_pending_jobs": 500,
   "max_rpc_bytes": 65536,
   "list_limit": 50,
-  "trend_lookback_seconds": 120
+  "trend_lookback_seconds": 120,
+  "enrollment_horizon_seconds": 1800,
+  "schedule_batch_limit": 50,
+  "evaluation_interval_seconds": 60
 }

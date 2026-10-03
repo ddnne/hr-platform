@@ -31,8 +31,9 @@ class Statement:
             raise RuntimeError('injected write failure')
         if self.db.before_publish and self.sql.startswith('UPDATE odds_parses'):
             self.db.before_publish()
-        self.db.conn.execute(self.sql, self.args)
+        cursor = self.db.conn.execute(self.sql, self.args)
         self.db.conn.commit()
+        return {'meta': {'changes': cursor.rowcount}}
 
 
 class Database:

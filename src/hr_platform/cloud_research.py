@@ -21,9 +21,12 @@ class CloudResearch(CloudHistory):
 
     def __init__(self, bucket, database, clock=utcnow, *, storage_policy=None, research_policy, engine_id):
         super().__init__(bucket, database, clock, storage_policy=storage_policy)
-        if (set(research_policy) != {'version', 'lease_seconds', 'max_attempts', 'max_pending_jobs',
-                                    'max_rpc_bytes', 'list_limit', 'trend_lookback_seconds'}
-                or research_policy['version'] != 'cloud-research-v1'
+        fields = {'version', 'lease_seconds', 'max_attempts', 'max_pending_jobs',
+                  'max_rpc_bytes', 'list_limit', 'trend_lookback_seconds'}
+        if research_policy.get('version') == 'cloud-research-v2':
+            fields |= {'enrollment_horizon_seconds', 'schedule_batch_limit', 'evaluation_interval_seconds'}
+        if (set(research_policy) != fields
+                or research_policy['version'] not in {'cloud-research-v1', 'cloud-research-v2'}
                 or any(type(v) is not int or v <= 0 for k, v in research_policy.items() if k != 'version')
                 or not re.fullmatch('[0-9a-f]{64}', engine_id)):
             raise ValueError('RESEARCH_POLICY')
@@ -76,6 +79,18 @@ class CloudResearch(CloudHistory):
     async def jobs(self, bundle_id, after=None):
         return await self.all('''SELECT * FROM cloud_research_jobs WHERE bundle_id=? AND job_id>?
             ORDER BY job_id LIMIT ?''', bundle_id, after or '', self.policy['list_limit'])
+
+    async def activate(self, bundle_id, from_date):
+        from .cloud_research_auto import activate
+        return await activate(self, bundle_id, from_date)
+
+    async def schedule_registered(self):
+        from .cloud_research_auto import schedule_registered
+        return await schedule_registered(self)
+
+    async def refresh_evaluations(self):
+        from .cloud_research_auto import refresh_evaluations
+        return await refresh_evaluations(self)
 
     async def final_prices(self, race_id, markets, at):
         return await self.odds.final_prices(race_id, markets, at)
@@ -177,8 +192,9 @@ class CloudResearch(CloudHistory):
             WHERE status='RUNNING' AND lease_until<={PUBLICATION_CLOCK} AND attempts>=?''', self.policy['max_attempts'])
         row = await self.first(f'''SELECT j.*,b.engine_id,b.body_hash FROM cloud_research_jobs j
             JOIN cloud_research_bundles b USING(bundle_id)
-            WHERE (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_until<={PUBLICATION_CLOCK}))
-            AND j.attempts<? ORDER BY j.registered_at,j.job_id LIMIT 1''', self.policy['max_attempts'])
+            WHERE j.asof_at<={PUBLICATION_CLOCK} AND j.asof_at<=?
+            AND (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_until<={PUBLICATION_CLOCK}))
+            AND j.attempts<? ORDER BY j.registered_at,j.job_id LIMIT 1''', stamp(self.clock()), self.policy['max_attempts'])
         if not row:
             return {'status': 'IDLE'}
         if row['engine_id'] != self.engine_id:
@@ -199,6 +215,12 @@ class CloudResearch(CloudHistory):
         try:
             bundle = await self.read_body(row['body_hash'])
             saved = await self.input(job, bundle)
+            if job['schedule_hash']:
+                enrollment = await self.read_body(job['schedule_hash'])
+                saved['enrollment'] = enrollment
+                if (not saved['schedule'] or saved['schedule']['scheduled_start_at'] != enrollment['scheduled_start_at']
+                        or enrollment['known_at'] > job['asof_at']):
+                    saved['view']['reason'] = 'SCHEDULE_CHANGED'
             input_hash = await self.save_body(canonical(saved))
             if saved['view']['reason']:
                 output = {'candidates': {n: {'status': 'INPUT_EXCLUDED', 'reason': saved['view']['reason'],
