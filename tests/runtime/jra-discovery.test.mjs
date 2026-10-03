@@ -24,6 +24,12 @@ test('mismatched link/header/request identities and ambiguous duplicate recipes 
  assert.throws(()=>p.parseProgram(jraCatalog.replaceAll('東京','京都'),catalogTarget),/IDENTITY/);
  assert.throws(()=>p.parseProgram('<html>unexpected body</html>',catalogTarget),/NOT_READY/);
 });
+test('the separate venue navigation state digit never becomes part of the venue number',()=>{
+ const raw=jraCatalog.replace('pw15orl0005','pw15orl1005'),value=p.parseProgram(raw,catalogTarget),child=p.discoveryTargets(value).targets[0];
+ assert.equal(value.program.venues[0].venue,5);assert.equal(child.race_id,'jra:20000101:5:0');p.validateTarget(child);
+ assert.equal(p.parseProgram(jraProgram(),child).program.races[0].venue,5);
+ assert.throws(()=>p.parseProgram(raw.replace('pw15orl1005','pw15orl2005'),catalogTarget),/NAVIGATION/);
+});
 test('ended/cancelled/unknown labels never become a scheduled start or observed deadline',()=>{
  for(const label of ['発走済','中止','変更確認中']){
   const r=p.parseProgram(jraProgram({clock:label}),venue).program.races[0];assert.equal(r.start_label,label);assert.equal(r.start_at,null);assert.equal(r.close_at,null);
