@@ -1,7 +1,7 @@
 import json
 from .common import canonical, identity, instant, paper_asof, stamp, seconds
 from .model import analyze, ModelError
-from .paper_rules import eligibility, select, settlement_values, validate_paper_config, model_error_reason
+from .paper_rules import eligibility, reference_eligibility, select, settlement_values, validate_paper_config, model_error_reason
 
 
 def register_experiment(store, config):
@@ -53,11 +53,8 @@ def decide(store, race_id, schedule, config, clock=None, analyzer=analyze):
         content = {h: x["content"] for h, x in view["markets"].items()}
         try:
             result = analyzer(content[config["target"]]["state"]["runners"], content, config)
-            if result["identification"]["status"] == "INCONSISTENT":
-                if reference_policy == "require_feasible":
-                    reason = "REFERENCE_INCONSISTENT"
-                else:
-                    assumptions.append("INCONSISTENT_REFERENCES_SOFT_CALIBRATION")
+            reason, reference_assumptions = reference_eligibility(result, config)
+            assumptions.extend(reference_assumptions)
         except ModelError as exc:
             reason = model_error_reason(exc)
         except Exception:

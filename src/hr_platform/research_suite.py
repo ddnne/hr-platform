@@ -2,7 +2,7 @@
 from copy import deepcopy
 
 from .model import ModelError, analyze, fit, matrix
-from .paper_rules import select
+from .paper_rules import reference_eligibility, select
 from .research_all_markets import all_market_portfolios
 from .research_alternatives import estimate, purchases
 from .research_expansions import expansions
@@ -54,6 +54,9 @@ def candidate_suite(runners, markets, analysis, base, configs, *, previous_quote
     """
     if analysis['reference_diagnostics']['references'] != base['references']:
         raise ModelError('SAVED_REFERENCE_MISMATCH')
+    reason, assumptions = reference_eligibility(analysis, base)
+    if reason:
+        raise ModelError(reason)
     work = deepcopy(analysis)
     baseline = None
     baseline_error = None
@@ -113,7 +116,8 @@ def candidate_suite(runners, markets, analysis, base, configs, *, previous_quote
         excluded['trio'] = trio_error
     return {'candidates': candidates, 'estimators': estimates, 'finite_baseline': baseline,
             'all_market_diagnostics': all_markets, 'trio_analysis': trio, 'family_exclusions': excluded,
-            'win_probability_source': win_probability_source, 'used_reference_markets': refs}
+            'win_probability_source': win_probability_source, 'used_reference_markets': refs,
+            'research_assumptions': assumptions}
 
 
 def _trio_candidates(runners, markets, base):
@@ -124,11 +128,15 @@ def _trio_candidates(runners, markets, base):
         if not {trio_config['target'], *trio_config['references']} <= set(markets):
             raise ModelError('INCOMPLETE_MARKET')
         trio = analyze(runners, markets, trio_config)
+        reason, assumptions = reference_eligibility(trio, trio_config)
+        if reason:
+            raise ModelError(reason)
         for method in ('direct', 'marginal', 'reference'):
             choice = select(trio['rows'], method, base['tie_tolerance'])
             candidates['trio_' + method] = {'tickets': [{'market': 'trio', 'selection': choice['selection'],
                                                        'stake_yen': base['stake_yen'], 'row': choice}] if choice else [],
-                                            'stake_yen': base['stake_yen'] if choice else 0}
+                                            'stake_yen': base['stake_yen'] if choice else 0,
+                                            'research_assumptions': assumptions}
     except ModelError as error:
         return candidates, None, str(error)
     return candidates, trio, None
