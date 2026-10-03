@@ -61,3 +61,45 @@ def test_grouped_stream_matches_full_parser_but_rejects_split_race_blocks():
     assert len(parse_odds(split, {})) == 2
     with pytest.raises(ValueError, match='NONCONTIGUOUS_RACE'):
         dict(iter_odds_races(split, {}))
+
+
+def monthly_archive(parts=None):
+    body = next(iter(unzip(f.archive()).values()))
+    if parts is None:
+        parts = {'200001_01_odds.csv': body,
+                 '200001_02_odds.csv': body.replace(b'20000101', b'20000102'),
+                 '200001_03_odds.csv': body.splitlines(keepends=True)[0]}
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return out.getvalue()
+
+
+def test_monthly_parts_share_daily_rows_and_keep_empty_parts():
+    from hr_platform.parser import iter_monthly_odds_races
+    final = dict(iter_monthly_odds_races(monthly_archive(), {}, '200001'))
+    assert final[f.RACE] == parse_odds(f.archive(), {})[f.RACE]
+    assert set(final) == {f.RACE, f.RACE.replace('20000101', '20000102')}
+    assert all(r['state']['status'] == 'UNKNOWN' for r in final.values())
+    with pytest.raises(ValueError, match='ODDS_FILE_COUNT'):
+        parse_odds(monthly_archive(), {})
+
+
+@pytest.mark.parametrize('fault', ['duplicate', 'wrong_month', 'bad_date', 'bad_header', 'foreign_member', 'empty'])
+def test_monthly_rejects_ambiguous_or_changed_archives(fault):
+    from hr_platform.parser import iter_monthly_odds_races
+    body = next(iter(unzip(f.archive()).values()))
+    parts = {'200001_01_odds.csv': body}
+    if fault == 'duplicate':
+        parts['200001_02_odds.csv'] = body
+    elif fault in {'wrong_month', 'bad_date'}:
+        parts['200001_01_odds.csv'] = body.replace(b'20000101', b'20000201' if fault == 'wrong_month' else b'20000132')
+    elif fault == 'bad_header':
+        parts['200001_02_odds.csv'] = b'SYNTHETIC changed header\n'
+    elif fault == 'foreign_member':
+        parts['200001_01_race.csv'] = b'SYNTHETIC foreign body'
+    else:
+        parts['200001_01_odds.csv'] = body.splitlines(keepends=True)[0]
+    with pytest.raises(ValueError):
+        dict(iter_monthly_odds_races(monthly_archive(parts), {}, '200001'))
