@@ -7,7 +7,7 @@ from uuid import uuid4
 from .cloud_history import CloudHistory, PUBLICATION_CLOCK
 from .cloud_pages import CloudPages
 from .cloud_race_files import CloudRaceFiles
-from .common import canonical, identity, instant, seconds, stamp, utcnow
+from .common import canonical, identity, instant, seconds, sha, stamp, utcnow
 from .history import asof_view
 from .paper_rules import validate_paper_config
 from .prospective_rules import configuration, metadata_reason, qualify_observed
@@ -89,6 +89,58 @@ class CloudResearch(CloudHistory):
         index = row if published else ({k: row[k] for k in
                  ('job_id', 'bundle_id', 'race_id', 'asof_at', 'registered_at')} if row else None)
         return {'job': index, 'result': await self.read_body(row['result_hash']) if published and row['result_hash'] else None,
+                'asof_at': cutoff, 'paper_eligible': False}
+
+    async def evaluate(self, job_id, at):
+        """Publish a separate evaluation of frozen candidates; never refit them."""
+        from .research_evaluation import VERSION, evaluate_candidates, qualified_payout
+        from .race_state import MAX_BYTES
+        available = await self.result(job_id, at)
+        job, result = available['job'], available['result']
+        if not result or job['status'] != 'COMPLETE':
+            raise ValueError('RESEARCH_RESULT_UNAVAILABLE')
+        saved = await self.read_body(job['input_hash'])
+        bundle_row = await self.first('SELECT * FROM cloud_research_bundles WHERE bundle_id=?', job['bundle_id'])
+        bundle = await self.read_body(bundle_row['body_hash'])
+        markets = sorted(saved['view']['markets'])
+        prices = (await self.odds.final_prices(job['race_id'], markets, at) if markets else {'markets': {}})
+        evidence = (await self.pages.asof('payout', job['race_id'], at))['evidence']
+        basis = {'version': VERSION, 'evaluator_engine_id': self.engine_id,
+                 'job_id': job_id, 'result_hash': job['result_hash'],
+                 'input_hash': job['input_hash'], 'payout': evidence,
+                 'final_prices': prices['markets']}
+        evaluation_id = identity(basis)
+        existing = await self.first('SELECT * FROM cloud_research_evaluations WHERE evaluation_id=?', evaluation_id)
+        if existing:
+            return {'record': existing, 'evaluation': await self.read_body(existing['body_hash'])}
+        payout, payout_basis = {}, 'PAYOUT_UNAVAILABLE_OR_UNQUALIFIED'
+        if (evidence and evidence['status'] == 'PAYOUT_QUALIFIED'
+                and evidence['available_at'] >= result['asof_at']):
+            raw = await self.pages.body(f"raw/{evidence['raw_hash']}", MAX_BYTES)
+            if sha(raw) != evidence['raw_hash']:
+                raise ValueError('BODY_CORRUPT')
+            metadata = saved['metadata']['evidence']
+            if metadata and metadata.get('metadata'):
+                horses = metadata['metadata']['horses']
+                places = 2 if len(horses) <= bundle['configs']['all-markets-kelly']['place_two_paid_max_runners'] else 3
+                payout, payout_basis = qualified_payout(raw, evidence, job['race_id'], horses, markets, places)
+        evaluation = {**basis, 'evidence_asof_at': available['asof_at'],
+            'strategies': evaluate_candidates(result, saved, bundle['base'], payout, payout_basis, prices),
+            'payout_basis': payout_basis, 'complete_payout_markets': payout.get('complete_markets', []),
+            'paper_eligible': False, 'timing_qualified': False, 'daily_budget_applied': False,
+            'purpose': 'RETROSPECTIVE_FIXED_CANDIDATES_NOT_LIVE_PAPER',
+            'price_basis': 'STAKE_WEIGHTED_DISPLAYED_BOUNDS_NOT_INFERRED_FROM_PAYOUT'}
+        digest = await self.save_body(canonical(evaluation))
+        await self.run(f'''INSERT OR IGNORE INTO cloud_research_evaluations
+            VALUES(?,?,?,?,{PUBLICATION_CLOCK})''', evaluation_id, job_id, VERSION, digest)
+        row = await self.first('SELECT * FROM cloud_research_evaluations WHERE evaluation_id=?', evaluation_id)
+        return {'record': row, 'evaluation': await self.read_body(row['body_hash'])}
+
+    async def evaluation(self, evaluation_id, at):
+        cutoff = self.cutoff(at)
+        row = await self.first('''SELECT * FROM cloud_research_evaluations
+            WHERE evaluation_id=? AND available_at<=?''', evaluation_id, cutoff)
+        return {'record': row, 'evaluation': await self.read_body(row['body_hash']) if row else None,
                 'asof_at': cutoff, 'paper_eligible': False}
 
     async def input(self, job, bundle):
