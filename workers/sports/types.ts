@@ -1,5 +1,7 @@
 import type {CaptureStorage} from '../capture-storage';
+import type {JraPage} from '../jra';
 export type Sport = 'boat' | 'keirin' | 'auto';
+export type CaptureSport = Sport | 'jra';
 export type Quote = {combination: number[]; display: string; lower: number | null; upper: number | null; status: 'NUMERIC' | 'ZERO_DISPLAY' | 'UNAVAILABLE'};
 export type Market = {market: string; quotes: Quote[]; expected: number; complete: boolean; source_time_label: string | null};
 export type Snapshot = {schema: 'sports-odds-v1'; sport: Sport; race_id: string; phase: 'INTERMEDIATE' | 'CLOSE_ONLY' | 'FINAL_ONLY' | 'UNKNOWN';
@@ -16,6 +18,9 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
  headers?: Record<string,string>; kind: 'odds' | 'schedule' | 'result' | 'guest'; market?: string; entrants?: number[]; frames?: Record<string,number>; context_event?: string;
  // Venue navigation may discover an unknown race; a race detail must not fan out again.
  discovery_stage?: 'venue' | 'race';deadline_at?:number};
+export type JraTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
+ sport:'jra';kind:'odds';page:JraPage;body:string;form:true};
+export type CaptureTarget = Target | JraTarget;
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
  SPORTS_DAILY_ENABLED?: string;

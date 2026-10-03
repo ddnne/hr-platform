@@ -3,7 +3,7 @@ import config from '../configs/jra-source.json';
 import {combinations,market,quote,text} from './sports/parsers';
 import {date,programClock} from './sports/discovery';
 import type {Market,Quote,Snapshot} from './sports/types';
-type Page = keyof typeof config.tables;
+export type JraPage = keyof typeof config.tables;
 export type JraRunners={entrants:number[];frames:Record<string,number>};
 export type JraSnapshot=Omit<Snapshot,'sport'> & {sport:'jra';metadata:{race_date:string;venue:number;scheduled_start_at:string|null;course_label:string|null;race_type_label:string|null;flat:boolean|null};runners:JraRunners|null};
 const attribute=(raw:string,name:string)=>raw.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`,'i'))?.slice(1).find(x=>x!==undefined)??null;
@@ -16,7 +16,7 @@ function support(r:JraRunners){
  return [...r.entrants].sort((a,b)=>a-b);
 }
 export function decodeJra(body:Uint8Array):string {return new TextDecoder(config.charset,{fatal:true,ignoreBOM:false}).decode(body);}
-export function parseJra(raw:string,raceId:string,page:Page,known?:JraRunners):JraSnapshot {
+export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners):JraSnapshot {
  if(!Object.hasOwn(config.tables,page))throw new Error('JRA_PAGE');
  const ids=[...raw.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map(m=>text(m[1]).match(/(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]*\d+回([^\d]+)\d+日\s*(\d+)レース/)).filter(m=>m!==null);
  if(ids.length!==1)throw new Error('JRA_IDENTITY');const id=ids[0];

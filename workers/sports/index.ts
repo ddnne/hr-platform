@@ -7,9 +7,9 @@ import {discoveryTargets} from './discovery-plan';
 import {oddsTargets} from './odds-plan';
 import {businessDay,initialDaily,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
 import {supportsProgram} from './discovery';
-import type {Sport,SportsEnv,Target} from './types';
+import type {Sport,CaptureSport,SportsEnv,Target,CaptureTarget} from './types';
 import type {CaptureManifest} from '../capture-storage';
-type Entry=DailyEntry;
+type Entry=Omit<DailyEntry,'target'> & {target:CaptureTarget};
 type Session={cookie:string;token?:string;expires:number};
 function planTime(event:string,at:number):number {
  const now=Date.now();if(!/^sports:(?:auto|boat|keirin):\d+:[0-9a-f]{64}$/.test(event)||!Number.isSafeInteger(at)||at<now||at>now+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');return now;
@@ -19,10 +19,11 @@ function planEntries(targets:Target[],at:number,now:number):Entry[] {
  if(entries.length>config.maximum_plan_entries||entries.some(e=>e.at>now+config.plan_horizon_seconds*1000))throw new Error('PLAN_WINDOW');return entries;
 }
 export class SportsCollector extends DurableObject<SportsEnv> {
- private dailyEnabled(sport:Sport):boolean {
-  return this.env.SPORTS_DAILY_ENABLED==='true'&&this.env.SPORTS_ENABLED==='true'&&JSON.parse(this.env.SPORTS_PROVIDERS_JSON).includes(sport);
+ private dailyEnabled(sport:CaptureSport):boolean {
+  return sport!=='jra'&&this.env.SPORTS_DAILY_ENABLED==='true'&&this.env.SPORTS_ENABLED==='true'&&JSON.parse(this.env.SPORTS_PROVIDERS_JSON).includes(sport);
  }
- async ensureDaily(sport:Sport):Promise<string> {
+ async ensureDaily(sport:CaptureSport):Promise<string> {
+  if(sport==='jra')throw new Error('DAILY_UNSUPPORTED');
   if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
   if(!this.dailyEnabled(sport))return 'DISABLED';
   const saved=await this.ctx.storage.get<Sport>('daily-sport');if(saved&&saved!==sport)throw new Error('ONE_SOURCE');
@@ -66,11 +67,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   if(this.env.SPORTS_ENABLED!=='true')return 'DISABLED';
   const items:Record<string,Entry>={};
   for(const entry of entries){validateTarget(entry.target);
+   if(entry.target.sport==='jra'&&(entry.daily_task!==undefined||entry.daily_day!==undefined))throw new Error('DAILY_UNSUPPORTED');
    if(!recovery)await validateContext(entry.target,this.env);
    if(entry.target.headers||!Number.isSafeInteger(entry.at)||!recovery&&entry.at<Date.now()-config.capture_window_seconds*1000||entry.at>Date.now()+config.plan_horizon_seconds*1000)throw new Error('PLAN_WINDOW');
    const resource=await resourceId(entry.target),key=`plan:${entry.at}:${resource}`;
    const recorded=await this.env.INDEX.prepare('SELECT event_id FROM captures WHERE event_id=?').bind(`sports:${entry.target.sport}:${entry.at}:${resource}`).first();
-   if(recorded){const saved=await this.env.RAW.get(`manifests/sports:${entry.target.sport}:${entry.at}:${resource}.json`);if(saved){const m=await saved.json<{target:Target}>();if(JSON.stringify(m.target)!==JSON.stringify(entry.target))throw new Error('PLAN_CONFLICT');}}
+   if(recorded){const saved=await this.env.RAW.get(`manifests/sports:${entry.target.sport}:${entry.at}:${resource}.json`);if(saved){const m=await saved.json<{target:CaptureTarget}>();if(JSON.stringify(m.target)!==JSON.stringify(entry.target))throw new Error('PLAN_CONFLICT');}}
    if(!recorded||recovery){if(items[key]&&JSON.stringify(items[key])!==JSON.stringify(entry))throw new Error('PLAN_CONFLICT');items[key]=entry;}
   }
   // Transactional insertion cannot overwrite another concurrent registration.
@@ -87,7 +89,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  async planState():Promise<{pending:number;alarm_at:number|null}> {
   return {pending:await this.pending(),alarm_at:await this.ctx.storage.getAlarm()};
  }
- private async rememberKeirinGuest(t:Target,result:Awaited<ReturnType<typeof collect>>):Promise<void> {
+ private async rememberKeirinGuest(t:CaptureTarget,result:Awaited<ReturnType<typeof collect>>):Promise<void> {
   if(t.sport!=='keirin'||t.kind!=='guest'||t.url!==config.sources.keirin.origin+config.sources.keirin.guest_path||result.status!=='RAW_STORED'||!result.received_at)return;
   const received=Date.parse(result.received_at),prior=await this.ctx.storage.get<string>('keirin-guest-received-at');
   if(Number.isFinite(received)&&received<=Date.now()&&(!prior||received>Date.parse(prior)))
@@ -108,6 +110,8 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  private async finish(key:string,status:string):Promise<void> {
   if(['WAIT_OR_BLOCKED','STORAGE_ERROR','FETCHING'].includes(status)){await this.ctx.storage.setAlarm(Date.now()+config.request_spacing_seconds*1000);return;}
   const entry=await this.ctx.storage.get<Entry>(key);if(!entry)return;
+  if(entry.target.sport==='jra'){await this.ctx.storage.delete(key);await this.arm();return;}
+  const dailyEntry:DailyEntry={...entry,target:entry.target};
   const event=`sports:${entry.target.sport}:${entry.at}:${await resourceId(entry.target)}`;
   let source:Awaited<ReturnType<typeof savedProgram>>|null=null;
   if(entry.daily_task&&this.dailyEnabled(entry.target.sport)&&supportsProgram(entry.target)&&status==='RAW_STORED'){
@@ -127,8 +131,8 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    const state=entry.daily_task?await store.get<DailyState>('daily-state'):null;
    if(state&&entry.daily_day===state.day){
     if(source)await acceptProgram(state,{...source,event},Date.now());
-    else if(supportsProgram(entry.target))rejectProgram(state,entry.target);
-    await completeDaily(state,entry,status,Date.now(),closing,published);await store.put('daily-state',state);
+    else if(supportsProgram(dailyEntry.target))rejectProgram(state,dailyEntry.target);
+    await completeDaily(state,dailyEntry,status,Date.now(),closing,published);await store.put('daily-state',state);
    }
    await store.delete(key);
   });await this.arm();
@@ -225,8 +229,8 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  }
 }
 export class SportsControl extends WorkerEntrypoint<SportsEnv> {
- async ensureDaily(sport:Sport):Promise<string> {return this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).ensureDaily(sport);}
- async dailyState(sport:Sport):Promise<string> {return JSON.stringify(await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).dailyState());}
+ async ensureDaily(sport:CaptureSport):Promise<string> {return this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).ensureDaily(sport);}
+ async dailyState(sport:CaptureSport):Promise<string> {return JSON.stringify(await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).dailyState());}
  async discoveryPlan(event:string,at:number):Promise<string> {
   const now=planTime(event,at);
   const source=await savedProgram(this.env,event,now),plan=discoveryTargets(source.value,event);
@@ -242,8 +246,8 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
    runners_observation:runnersEvent??null,runners_available_at:runners?.available_at??null,runners_received_at:runners?.received_at??null,
    entries:planEntries(plan.targets,at,now),deferred:plan.deferred,not_offered:plan.not_offered});
  }
- async planState(sport:Sport):Promise<string> {
-  if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
+ async planState(sport:CaptureSport):Promise<string> {
+  if(sport!=='jra'&&!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
   return JSON.stringify(await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).planState());
  }
  async schedule(payload:string):Promise<string> {
@@ -255,7 +259,7 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
    return await this.env.SPORTS.get(this.env.SPORTS.idFromName(sport)).schedule(entries);
   }catch{return 'INPUT_OR_CAPACITY_ERROR';}
  }
- async history(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
+ async history(sport:CaptureSport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
   return JSON.stringify(await history(this.env,sport,race,cutoff,limit,after));
  }
  async programHistory(sport:Sport,race:string,cutoff:string,limit:number,after=''):Promise<string> {
@@ -267,14 +271,15 @@ export class SportsControl extends WorkerEntrypoint<SportsEnv> {
  async reparse(event:string,version:string):Promise<string> {
   if(!/^sports:[a-z]+:\d+:[0-9a-f]{64}$/.test(event)||!/^sports-(?:odds|program|result)-v\d+$/.test(version))throw new Error('PARSER_ID');
   const object=await this.env.RAW.get(`manifests/${event}.json`);if(!object)throw new Error('MANIFEST_MISSING');
-  const m=await object.json<CaptureManifest & {target:Target}>();return normalize(this.env,event,m.target,version);
+  const m=await object.json<CaptureManifest & {target:CaptureTarget}>();return normalize(this.env,event,m.target,version);
  }
 }
 export default {
  async fetch(){return new Response('Not found',{status:404});},
  async scheduled(_controller:ScheduledController,env:SportsEnv):Promise<void> {
   if(env.SPORTS_DAILY_ENABLED!=='true'||env.SPORTS_ENABLED!=='true')return;
-  for(const sport of JSON.parse(env.SPORTS_PROVIDERS_JSON) as Sport[]){
+  for(const sport of JSON.parse(env.SPORTS_PROVIDERS_JSON) as CaptureSport[]){
+   if(sport==='jra')continue;
    if(!Object.hasOwn(config.sources,sport))throw new Error('SPORT');
    await env.SPORTS.get(env.SPORTS.idFromName(sport)).ensureDaily(sport);
   }
