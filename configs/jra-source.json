@@ -1,8 +1,8 @@
 {
   "version": "jra-source-preview-v1",
-  "parser_version": "sports-odds-v1",
+  "parser_version": "sports-odds-v2",
   "program_parser_version": "sports-program-v5",
-  "result_parser_version": "sports-result-v1",
+  "result_parser_version": "sports-result-v2",
   "catalog_navigation": "pw15oli00/6D",
   "venue_navigation_prefix": "pw15orl",
   "result_catalog_navigation": "pw01sli00/AF",

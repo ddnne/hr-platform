@@ -126,7 +126,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   const winContext=entry.daily_task&&entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&status==='RAW_STORED'?await savedJraWin(this.env,event,entry.daily_task.startsWith('final_odds:')?'FINAL_ONLY':'INTERMEDIATE'):null;
   let published=false;
   if(entry.daily_task?.startsWith('result:')&&status==='RAW_STORED'){
-   if(entry.target.sport==='jra')published=await publishedResultSaved(this.env,event,['win','place','frame_quinella','quinella','wide','trifecta','trio','exacta']);
+   if(entry.target.sport==='jra'){
+    const state=await this.ctx.storage.get<DailyState>('daily-state'),context=state?.races[entry.target.race_id]?.final_context;
+    const evidence=context?await savedJraWin(this.env,context.event,'FINAL_ONLY'):null;
+    published=await publishedResultSaved(this.env,event,['win','place','frame_quinella','quinella','wide','trifecta','trio','exacta'],
+     evidence?.race_id===entry.target.race_id?evidence.place_paid_positions:null);
+   }
    else {
    const state=await this.ctx.storage.get<DailyState>('daily-state'),facts=state?.races[entry.target.race_id];
    if(facts?.clock){const plan=oddsTargets(facts.clock,entry.target.race_id,(state!.tasks[entry.daily_task]?.close_at??Date.now())+config.daily.final_odds_delay_seconds*1000,facts.runners,'CLOSED');

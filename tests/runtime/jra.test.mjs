@@ -14,6 +14,14 @@ test('eight JRA markets retain complete support, frame self-pairs and ranged pri
   if(page==='wide')assert.equal(s.markets[0].quotes[0].upper,3);
  }
 });
+test('place payout positions come from the official header and frame attributes are exact',()=>{
+ for(const n of [2,3])assert.equal(parseJra(jraBody('win_place',{paidPlaces:n}),race,'win_place').place_paid_positions,n);
+ assert.equal(parseJra(jraBody('win_place',{paidPlaces:null}),race,'win_place').place_paid_positions,null);
+ const duplicate=jraBody('win_place').replace('<th>複勝（3着払い）</th>','<th>複勝（3着払い）</th><th>複勝（2着払い）</th>');
+ assert.equal(parseJra(duplicate,race,'win_place').place_paid_positions,null);
+ for(const tag of ['<img data-alt="枠1" />',`<img data-note="note alt='枠1'" />`,'<img alt="枠1" alt="枠2" />'])
+  assert.throws(()=>parseJra(jraBody('win_place').replace('<img alt="枠1" />',tag),race,'win_place'),/RUNNERS/);
+});
 test('missing combination is incomplete; an explicit no-vote cell stays unavailable',()=>{
  const absent=parseJra(jraBody('trifecta',{omit:'1-2-10'}),race,'trifecta',roster);assert.equal(absent.markets[0].complete,false);
  assert.equal(absent.markets[0].quotes.length,23);

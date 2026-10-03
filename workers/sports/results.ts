@@ -1,7 +1,7 @@
 /** Published results are evaluation-only. A payout table does not certify refund coverage. */
 import {text} from './parsers';
 import jra from '../../configs/jra-source.json';
-import {jraMetadata,type JraSnapshot} from '../jra';
+import {jraMetadata,jraFrame,type JraSnapshot} from '../jra';
 import {jraLinks,jraNavigationIdentity} from '../jra-program';
 import type {ResultSnapshot,CaptureTarget,JraResultTarget} from './types';
 export type JraResultSnapshot=ResultSnapshot & {sport:'jra';metadata:JraSnapshot['metadata'];result_navigation:Record<string,string>};
@@ -61,7 +61,7 @@ function jraResult(raw:string,t:JraResultTarget,result:ResultSnapshot):JraResult
   const cells=new Map([...row[1].matchAll(/<td\b[^>]*class=["']([^"']+)["'][^>]*>([\s\S]*?)<\/td>/gi)].map(m=>[m[1],m[2]]));
   if(!cells.has('num'))continue;
   if(!cells.has('place'))throw new Error('RESULT_PLACINGS');
-  const p=placing(text(cells.get('num')!),text(cells.get('place')!));
+  const p={...placing(text(cells.get('num')!),text(cells.get('place')!)),frame:jraFrame(cells.get('waku'))};
   if(p.entrant>jra.maximum_entrants)throw new Error('RESULT_ENTRANT');result.placings.push(p);
  }
  if(!result.placings.length)throw new Error('RESULT_NOT_READY');
