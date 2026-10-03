@@ -118,6 +118,22 @@ test('a queued intermediate request cannot start after its advertised deadline e
  assert.equal(result.status,'MISSED_WINDOW');assert.equal(r.requests.length,0);
  }finally{await r.mf.dispose();}
 });
+test('a held request records deadline cutoff separately from the normal request timeout',async()=>{
+ for(const deadlineLimited of [true,false]){
+  let release;const hold=new Promise(resolve=>release=resolve);
+  const r=await runtime([async()=>{await hold;return new Response(autoBody());}]);
+  try{
+   const at=Date.now(),deadline_at=at+(deadlineLimited?500:settings.request_timeout_seconds*1000+60000);
+   const result=await r.tick(at,{...target,deadline_at},true);
+   const code=deadlineLimited?'DEADLINE_REACHED':'FETCH_TIMEOUT';
+   assert.equal(result.status,code);
+   const row=await r.db.prepare('SELECT status,error_code FROM captures WHERE event_id=?').bind(result.event_id).first();
+   assert.deepEqual(row,{status:'FAILED',error_code:code});
+   assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,0);
+   assert.equal((await r.db.prepare("SELECT blocked FROM source_control WHERE source='sports-auto'").first()).blocked,0);
+  }finally{release();await r.mf.dispose();}
+ }
+});
 test('an unrecognized boat time label records a format signal and keeps the earlier cutoff unchanged',async()=>{
  const t={sport:'boat',race_id:'boat:20000101:1:1',kind:'odds',market:'trifecta',
   url:'https://www.boatrace.jp/owpc/pc/race/odds3t?hd=20000101&jcd=01&rno=1'};
