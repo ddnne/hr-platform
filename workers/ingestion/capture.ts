@@ -229,6 +229,9 @@ export async function capture(scheduledTime: number, env: Env, kind: CaptureKind
     } else {
       const body = await boundedBody(response, isPage ? policy.page_max_bytes : policy.max_raw_bytes);
       receivedAt = iso(Date.now());
+      // An empty successful stream carries no refusal/challenge content.
+      // Treat it like a missing body; explicit denial headers were handled above.
+      if (body.byteLength === 0) { errorBody = body; throw new Error("BODY_EMPTY"); }
       const validBody = isPage
         ? !!contentType?.includes("text/html") && /<(?:!doctype\s+html|html)\b/i.test(new TextDecoder().decode(body.subarray(0, 8192)))
           && !/captcha|challenge/i.test(new TextDecoder().decode(body))
