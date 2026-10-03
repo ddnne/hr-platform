@@ -1,10 +1,17 @@
 {
   "version": "jra-source-preview-v1",
+  "parser_version": "sports-odds-v1",
+  "finite_request_spacing_seconds": 60,
+  "finite_maximum_parallel_requests": 1,
+  "maximum_context_age_seconds": 600,
+  "maximum_race_number": 12,
+  "maximum_navigation_length": 256,
   "origin": "https://www.jra.go.jp",
   "odds_path": "/JRADB/accessO.html",
   "charset": "shift_jis",
   "maximum_entrants": 18,
   "maximum_frames": 8,
   "venues": {"1":"札幌","2":"函館","3":"福島","4":"新潟","5":"東京","6":"中山","7":"中京","8":"京都","9":"阪神","10":"小倉"},
-  "tables": {"win_place":"tanpuku","frame_quinella":"waku","quinella":"umaren","wide":"wide","exacta":"umatan","trio":"fuku3","trifecta":"tan3"}
+  "tables": {"win_place":"tanpuku","frame_quinella":"waku","quinella":"umaren","wide":"wide","exacta":"umatan","trio":"fuku3","trifecta":"tan3"},
+  "navigation_prefixes": {"win_place":"pw151ou","frame_quinella":"pw153ou","quinella":"pw154ou","wide":"pw155ou","exacta":"pw156ou","trio":"pw157ou","trifecta":"pw158ou"}
 }
