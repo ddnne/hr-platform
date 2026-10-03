@@ -33,6 +33,35 @@ def receipt(raw, minute=15):
     return r
 
 
+def lower_tie_page():
+    rows = "".join(
+        "<tr>" + "".join(f"<td>{v}</td>" for v in [rank, "1", str(horse)] + ["SYNTHETIC"] * (len(HEADERS) - 3)) + "</tr>"
+        for horse, rank in [(5, "4"), (6, "6")]
+    )
+    return page("4").replace(b"</table></section>", (rows + "</table></section>").encode(), 1)
+
+
+def test_lower_tie_preserves_published_winners_and_original_rank_labels():
+    result = parse_payout_page(lower_tie_page(), f.RACE)
+    assert result['tickets'] == parse_payout_page(page('4'), f.RACE)['tickets']
+    assert result['complete_markets'] == ['quinella', 'trio']
+    assert result['runners']['2']['finish_label'] == result['runners']['5']['finish_label'] == '4'
+    assert result['runners']['6']['finish_label'] == '6'
+
+
+@pytest.mark.parametrize('rank', ['1', '2', '3'])
+def test_top_three_ties_remain_unqualified(rank):
+    with pytest.raises(ValueError, match='PAYOUT_TIE_UNQUALIFIED'):
+        parse_payout_page(page(rank), f.RACE)
+
+
+def test_lower_tie_cannot_hide_a_missing_rank_or_runner():
+    with pytest.raises(ValueError, match='INCOMPLETE_ROSTER_OR_RANKS'):
+        parse_payout_page(lower_tie_page().replace(b'<td>6</td><td>1</td><td>6</td>', b'<td>5</td><td>1</td><td>6</td>'), f.RACE)
+    with pytest.raises(ValueError, match='INCOMPLETE_ROSTER_OR_RANKS'):
+        parse_payout_page(lower_tie_page().replace(b'<td>6</td><td>1</td><td>6</td>', b'<td>6</td><td>1</td><td>7</td>'), f.RACE)
+
+
 def test_missing_corner_column_preserves_payouts_and_requires_matching_rows():
     assert parse_payout_page(page(corners=False), f.RACE) == parse_payout_page(page(), f.RACE)
     # A missing header alone must not silently shift mismatched result rows.

@@ -1,7 +1,7 @@
 """Published ordinary quinella/trio payouts and horse-number exclusion refunds.
 
 The result table is a consistency check; monetary payouts always come from the
-official payout table. Frame bets, ties, special payouts and void races are not
+official payout table. Frame bets, top-three ties, special payouts and void races are not
 qualified by this adapter. Result evidence never supplies pre-race state.
 """
 
@@ -13,7 +13,7 @@ from .common import stamp
 from .payout_check import ResultPage, parse_result_page
 from .race_state import StateEvidence, compact
 
-VERSION = "nar-result-payout-v3"
+VERSION = "nar-result-payout-v4"
 RULE_SOURCE = "https://www.keiba.go.jp/beginner/step6.html"
 STATUS_SOURCE = "https://www.keiba.go.jp/beginner/step2.html"
 HEADERS = [
@@ -195,7 +195,7 @@ def parse_payout_page(raw, race_id):
         or not re.fullmatch(r"[0-9]{2}", query["k_babaCode"][0])
     ):
         raise ValueError("PAYOUT_RACE_LINK")
-    runners, ranks = {}, {}
+    runners, ranks, finish_ranks = {}, {}, []
     for row in page.grade_rows[1:]:
         if len(row) != len(header) or any(c["tag"] != "td" for c in row):
             raise ValueError("PAYOUT_GRADE_ROW")
@@ -204,18 +204,22 @@ def parse_payout_page(raw, race_id):
             raise ValueError("PAYOUT_HORSE_ID")
         statuses = {"除外": "EXCLUDED", "取消": "CANCELLED_BEFORE_SALES", "中止": "DID_NOT_FINISH"}
         if re.fullmatch(r"[1-9][0-9]?", rank) and 1 <= int(rank) <= 16:
-            if int(rank) in ranks:
+            if int(rank) in ranks and int(rank) <= 3:
                 raise ValueError("PAYOUT_TIE_UNQUALIFIED")
             ranks[int(rank)] = int(horse)
+            finish_ranks.append(int(rank))
             status = "FINISHED"
         elif rank in statuses:
             status = statuses[rank]
         else:
             raise ValueError("PAYOUT_FINISH_UNQUALIFIED")
         runners[horse] = {"finish_label": rank, "status": status}
-    if set(map(int, runners)) != set(range(1, len(runners) + 1)) or set(ranks) != set(
-        range(1, len(ranks) + 1)
-    ):
+    # Lower ties cannot change these winning tickets. Keep their labels and
+    # require competition ranking: 4,4 is followed by 6, never 5.
+    ordered_ranks = sorted(finish_ranks)
+    valid_ranks = all(rank == (ordered_ranks[i - 1] if i and rank == ordered_ranks[i - 1] else i + 1)
+                      for i, rank in enumerate(ordered_ranks))
+    if set(map(int, runners)) != set(range(1, len(runners) + 1)) or not valid_ranks:
         raise ValueError("PAYOUT_INCOMPLETE_ROSTER_OR_RANKS")
     published = parse_result_page(raw, race_id)
     tickets, complete = [], []
@@ -254,7 +258,7 @@ def parse_payout_page(raw, race_id):
         "finality_basis": "OFFICIAL_PUBLISHED_PAYOUT",
         "refund_basis": "EXCLUDED_HORSE_COMBINATIONS",
         "rule_sources": [RULE_SOURCE, STATUS_SOURCE],
-        "scope": "ORDINARY_QUINELLA_TRIO_WITHOUT_TIES",
+        "scope": "ORDINARY_QUINELLA_TRIO_WITH_UNIQUE_TOP_THREE",
     }
 
 
