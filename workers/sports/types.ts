@@ -19,7 +19,7 @@ export type Target = {sport: Sport; race_id: string; url: string; body?: string;
  // Venue navigation may discover an unknown race; a race detail must not fan out again.
  discovery_stage?: 'venue' | 'race';deadline_at?:number};
 export type JraTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
- sport:'jra';kind:'odds';page:JraPage;body:string;form:true;discovery_stage?:never};
+ sport:'jra';kind:'odds';page:JraPage;body:string;form:true;discovery_stage?:never;context_phase?:'INTERMEDIATE'};
 export type JraScheduleTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
  sport:'jra';kind:'schedule';discovery_stage:'catalog'|'venue';body:string;form:true};
 export type CaptureTarget = Target | JraTarget | JraScheduleTarget;

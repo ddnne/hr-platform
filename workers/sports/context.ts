@@ -11,6 +11,10 @@ export function requiresContext(t:CaptureTarget):boolean {
  return t.kind==='guest'&&t.discovery_stage==='race'||['odds','result'].includes(t.kind)||t.kind==='schedule'&&u.pathname==='/pc/json'&&u.searchParams.get('type')==='JST010';
 }
 export const contextNavigation=(t:CaptureTarget)=>t.form?new URLSearchParams(t.body).get('encp'):new URL(t.url).searchParams.get('encp');
+export function qualifiedJraWin(snapshot:JraSnapshot,phase?:'INTERMEDIATE'):boolean {
+ return snapshot.sport==='jra'&&snapshot.metadata?.flat===true&&!!snapshot.runners&&snapshot.markets.length===2&&
+  snapshot.markets.every(m=>['win','place'].includes(m.market)&&m.complete)&&(!phase||snapshot.phase===phase);
+}
 export async function jraRunners(t:JraTarget,env:CaptureStorage,at:number):Promise<JraRunners|undefined> {
  if(t.page==='win_place')return undefined;
  if(!t.context_event)throw new RaceContextError('RACE_CONTEXT_REQUIRED');
@@ -30,9 +34,8 @@ export async function jraRunners(t:JraTarget,env:CaptureStorage,at:number):Promi
   throw new RaceContextError('RACE_CONTEXT_IDENTITY');
  const object=await env.RAW.get(row.normalized_key);if(!object)throw new RaceContextError('RACE_CONTEXT_REQUIRED');
  const snapshot=await object.json<JraSnapshot>();
- if(snapshot.sport!=='jra'||snapshot.race_id!==t.race_id||!snapshot.runners||snapshot.markets.length!==2||
-  !snapshot.markets.every(m=>['win','place'].includes(m.market)&&m.complete))throw new RaceContextError('RACE_CONTEXT_IDENTITY');
- return snapshot.runners;
+ if(snapshot.race_id!==t.race_id||!qualifiedJraWin(snapshot,t.context_phase))throw new RaceContextError('RACE_CONTEXT_IDENTITY');
+ return snapshot.runners!;
 }
 export async function validateContext(t:CaptureTarget,env:CaptureStorage,at=Date.now()):Promise<void> {
  if(t.sport==='jra'){if(t.kind==='odds')await jraRunners(t,env,at);return;}

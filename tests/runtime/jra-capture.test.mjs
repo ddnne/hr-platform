@@ -96,6 +96,19 @@ test('context is fixed to original fetch start, latest failure blocks new fetche
  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations WHERE observation_id=?').bind(second.event_id).first()).n,1);
  }finally{await r.mf.dispose();}
 });
+for(const change of ['phase','flat'])test('daily context rechecks latest intermediate flat support while finite final collection remains usable: '+change,async()=>{
+ const r=await runtime([{body:encoded(jraBody('win_place',{phase:'9時45分現在'}))},{page:'quinella'}]);try{
+  const first=await r.tick(),original=await r.parsed(first.event_id),value=structuredClone(original.value);
+  if(change==='phase')value.phase='FINAL_ONLY';else value.metadata.flat=false;
+  const key='synthetic/reparsed-'+change+'.json';await r.raw.put(key,JSON.stringify(value));
+  await new Promise(resolve=>setTimeout(resolve,3));const later=new Date().toISOString().replace('Z','000+00:00');
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v2',sport,race_id,resource_id,?,?,'COMPLETE',?,NULL FROM sports_parses WHERE observation_id=? AND parser_version=?")
+   .bind(later,later,key,first.event_id,config.parser_version).run();
+  await r.reset();assert.equal((await r.tick({...target('quinella',first.event_id),context_phase:'INTERMEDIATE'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
+  await r.reset();const finite=await r.tick(target('quinella',first.event_id));
+  assert.equal(finite.status,change==='phase'?'RAW_STORED':'INVALID_CONTEXT');assert.equal(r.requests.length,change==='phase'?2:1);
+ }finally{await r.mf.dispose();}
+});
 test('invalid context and malformed Shift JIS are recorded without inventing odds or losing the original',async()=>{
  const r=await runtime([{body:new Uint8Array([0x81])}]);try{
  assert.equal((await r.tick(target('quinella','missing-synthetic-context'))).status,'INVALID_CONTEXT');assert.equal(r.requests.length,0);
@@ -195,7 +208,43 @@ test('JRA daily alarm completes catalog/venue actions and preserves clock eviden
   if(state.races[`jra:${day}:5:1`]?.clock&&Object.keys(state.actions??{}).length===0)break;
  }
  const state=await r.call({op:'dailyState'});assert.ok(state.races[`jra:${day}:5:1`]?.clock,JSON.stringify({state,requests:r.requests,parses:(await r.db.prepare('SELECT status,error_code FROM sports_parses').all()).results}));assert.equal(state.races[`jra:${day}:5:1`].clock.value.program.races[0].close_at,null);
- assert.equal(Object.keys(state.actions??{}).length,0);assert.ok(Object.keys(state.tasks).every(k=>k.startsWith('request:')));assert.equal(r.requests.length,2);
+ assert.equal(Object.keys(state.actions??{}).length,0);assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);assert.equal(r.requests.length,2);
  assert.equal((await r.db.prepare("SELECT count(*) AS n FROM raw_observations WHERE dataset_kind='SPORT_JRA_SCHEDULE'").first()).n,2);
+ }finally{await r.mf.dispose();}
+});
+for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster qualifies each independently scheduled page only from intermediate odds: '+phase,async()=>{
+ const responses=[],r=await runtime(responses,true);try{
+  const window=await r.call({op:'day'}),day=window.day,year=day.slice(0,4),month=Number(day.slice(4,6)),date=Number(day.slice(6,8));
+  const rename=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
+  const respond=async()=>{
+   const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
+   const body=name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):
+    name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])),{phase});
+   return new Response(encoded(rename(body)));
+  };
+  responses.push(...Array(40).fill(respond));let at=window.start+2*3600000+45*60000;
+  for(let i=0;i<40;i++){
+   await r.call({op:'alarm',now:at});const plan=await r.call({op:'planState'});assert.ok(plan.alarm_at);at=plan.alarm_at;
+   const rows=(await r.db.prepare("SELECT normalized_key FROM sports_parses WHERE sport='jra' AND parser_version LIKE 'sports-odds-v%' AND status='COMPLETE'").all()).results;
+   const values=await Promise.all(rows.map(async x=>(await r.raw.get(x.normalized_key)).json()));
+   const markets=new Set(values.flatMap(v=>v.markets.map(m=>m.market)));
+   if(phase==='最終オッズ'&&rows.length||markets.size===8)break;
+  }
+  const state=await r.call({op:'dailyState'}),facts=state.races[`jra:${day}:5:1`];assert.ok(facts?.clock);
+  assert.equal(facts.clock.value.program.races[0].close_at,null);assert.ok(Object.values(state.tasks).every(t=>['request','odds'].includes(t.kind)));
+  if(phase==='最終オッズ'){
+   assert.equal(facts.win_context,undefined);
+   for(let i=0;i<4;i++){await r.call({op:'alarm',now:at});at=(await r.call({op:'planState'})).alarm_at;}
+   assert.ok(r.requests.filter(q=>!new URLSearchParams(q.body).get('cname').startsWith('pw15o')).every(q=>new URLSearchParams(q.body).get('cname').startsWith(config.navigation_prefixes.win_place)));
+  }else {
+   assert.ok(facts.win_context);
+   const rows=(await r.db.prepare("SELECT * FROM sports_parses WHERE parser_version LIKE 'sports-odds-v%'").all()).results;
+   const values=await Promise.all(rows.map(async x=>(await r.raw.get(x.normalized_key)).json()));
+   assert.equal(new Set(values.flatMap(v=>v.markets.map(m=>m.market))).size,8);assert.ok(rows.every(x=>x.status==='COMPLETE'));
+   const manifests=await Promise.all(rows.map(async x=>(await r.raw.get('manifests/'+x.observation_id+'.json')).json()));
+   assert.ok(manifests.filter(m=>m.target.page!=='win_place').every(m=>m.target.context_event));
+   const starts=manifests.map(m=>Date.parse(m.fetch_started_at)).sort((a,b)=>a-b);
+   assert.ok(starts.slice(1).every((t,i)=>t-starts[i]>=config.finite_request_spacing_seconds*1000));
+  }
  }finally{await r.mf.dispose();}
 });
