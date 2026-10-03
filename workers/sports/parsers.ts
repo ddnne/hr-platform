@@ -14,7 +14,7 @@ export function combinations(ids:number[], size:number, ordered=false):number[][
  if(size === 0) return [[]];
  return ids.flatMap((id,i)=>combinations(ordered ? ids.filter(x=>x!==id) : ids.slice(i+1),size-1,ordered).map(t=>[id,...t]));
 }
-function market(name:string, quotes:Quote[], support:number[][], label:string|null=null):Market {
+export function market(name:string, quotes:Quote[], support:number[][], label:string|null=null):Market {
  const keys=quotes.map(q=>q.combination.join('-')), expected=new Set(support.map(c=>c.join('-')));
  if(new Set(keys).size !== keys.length || keys.some(k=>!expected.has(k))) throw new Error('COMBINATION_IDENTITY');
  return {market:name,quotes,expected:expected.size,complete:keys.length === expected.size,source_time_label:label};
