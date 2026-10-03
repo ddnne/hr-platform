@@ -75,7 +75,12 @@ function grid(section:string):Cell[][] {
 const boatLabels:Record<string,string>={trifecta:'3連単オッズ',trio:'3連複オッズ',exacta:'2連単オッズ',quinella:'2連複オッズ',wide:'拡連複オッズ',win:'単勝オッズ',place:'複勝オッズ'};
 export function parseBoat(raw:string,t:Target):Snapshot {
  const names=t.url.includes('odds2tf')?['exacta','quinella']:t.url.includes('oddstf')?['win','place']:[t.market??''];
- const label=text(raw.match(/<p\b[^>]*class="tab4_time"[^>]*>([\s\S]*?)<\/p>/)?.[1]??'')||null;
+ const timeParagraph=[...raw.matchAll(/<p\b([^>]*)>([\s\S]*?)<\/p>/gi)].find(m=>{
+  const attributes=[...m[1].matchAll(/([^\s="'<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)];
+  const classes=attributes.find(a=>a[1].toLowerCase()==='class');
+  return (classes?.[2]??classes?.[3]??classes?.[4]??'').split(/\s+/).some(c=>c==='tab4_time'||c==='tab4_refreshText');
+ });
+ const label=text(timeParagraph?.[2]??'')||null;
  const phase=label?.includes('締切時')?'CLOSE_ONLY':label?.includes('オッズ更新時間')?'INTERMEDIATE':'UNKNOWN';
  const ids=[1,2,3,4,5,6];
  const markets=names.map(name=>{
@@ -96,7 +101,7 @@ export function parseBoat(raw:string,t:Target):Snapshot {
   }
   return market(name,q,combinations(ids,size,ordered),label);
  });
- return snapshot(t,phase,markets,null,'tab4_time is display/site receipt label; exact provider update time unknown');
+ return snapshot(t,phase,markets,null,'odds time paragraph is a provider display label; exact update/publish time unknown');
 }
 export function parseOdds(raw:string,target:Target):Snapshot {
  if(target.sport==='auto')return parseAuto(raw,target);

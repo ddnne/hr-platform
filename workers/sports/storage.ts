@@ -35,6 +35,9 @@ export async function normalize(env:CaptureStorage,event:string,target:Target,ve
   key=`sports/normalized/${await digest(body)}.json`;const saved=await env.RAW.put(key,body);if(!saved)throw new Error('NORMALIZED_PUT_FAILED');
   status=result.schema==='sports-odds-v1'?result.markets.every(m=>m.complete)?'COMPLETE':'INCOMPLETE':
    result.schema==='sports-result-v1'?result.publication==='PUBLISHED'?'RESULT_PARSED':'RESULT_PENDING':'PROGRAM_PARSED';
+  if(result.schema==='sports-odds-v1'&&result.phase==='UNKNOWN'){
+   status='INCOMPLETE';error='ODDS_PHASE_UNKNOWN';
+  }
  }
  const resource=await resourceId(target);
  // Publication time is assigned by D1 AFTER the immutable normalized body is stored.
