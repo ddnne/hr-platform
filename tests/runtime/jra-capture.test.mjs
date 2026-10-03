@@ -24,6 +24,7 @@ export default {async fetch(req,env){const v=await req.json();
  storageEnv={...env,RAW:{get:async(...args)=>{const o=await env.RAW.get(...args);if(!o||!args[0].startsWith('raw/'))return o;
  const read=async method=>{if(v.bodyIO)throw new Error('SYNTHETIC_R2_IO');if(hold){waiting=true;await hold;waiting=false;}return o[method]();};
  return {...o,arrayBuffer:()=>read('arrayBuffer'),text:()=>read('text')};},head:(...args)=>env.RAW.head(...args),put:(...args)=>env.RAW.put(...args)}};}
+ if(v.batchLag)storageEnv={...storageEnv,INDEX:{prepare:s=>env.INDEX.prepare(s),batch:async rows=>{const result=await env.INDEX.batch(rows);await new Promise(resolve=>setTimeout(resolve,v.batchLag));return result;}}};
  if(v.op==='history')return Response.json(await history(env,'jra',v.race??'${race}',v.at,100));
  if(v.op==='programHistory')return Response.json(await history(env,'jra',v.race,v.at,100,'','program'));
  if(v.op==='resultHistory')return Response.json(JSON.parse(await env.CONTROL.resultHistory('jra',v.race??'${race}',v.at,100)));
@@ -37,7 +38,7 @@ export default {async fetch(req,env){const v=await req.json();
  if(v.op==='planState')return Response.json(JSON.parse(await env.CONTROL.planState('jra')));
  if(v.op==='daily'){try{return Response.json(await env.CONTROL.ensureDaily('jra'));}catch(e){return Response.json(e.message);}}
  if(v.op==='cron'){const called=[];await sports.scheduled({}, {...env,SPORTS_DAILY_ENABLED:'true',SPORTS:{idFromName:s=>s,get:s=>({ensureDaily:async()=>called.push(s)})}});return Response.json(called);}
- return Response.json(await collect(v.at,storageEnv,v.target,undefined,!!v.parallel));}};`,resolveDir:process.cwd()},
+ return Response.json(await collect(v.at,storageEnv,v.target,undefined,!!v.parallel,undefined,!!v.daily));}};`,resolveDir:process.cwd()},
  external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
 async function runtime(responses=[],daily=false){
@@ -46,13 +47,13 @@ async function runtime(responses=[],daily=false){
  compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],log:new Log(LogLevel.NONE),
  bindings:{SPORTS_ENABLED:'true',SPORTS_DAILY_ENABLED:String(daily),SPORTS_PROVIDERS_JSON:'["jra","boat","auto","keirin"]'},d1Databases:['INDEX'],r2Buckets:['RAW'],
  durableObjects:{SPORTS:{className:'JraTest',useSQLite:true}},serviceBindings:{CONTROL:{name:'jra-test',entrypoint:'SportsControl'}},
- outboundService:async req=>{requests.push({method:req.method,contentType:req.headers.get('Content-Type'),body:await req.text()});
+ outboundService:async req=>{requests.push({method:req.method,contentType:req.headers.get('Content-Type'),body:await req.text(),started:performance.now()});
  const response=responses.shift();assert.ok(response,'unexpected HTTP');if(typeof response==='function')return response(req);
  return new Response(response.body??encoded(jraBody(response.page??'win_place')),{status:response.status??200,headers:response.headers});}}));
  const db=await mf.getD1Database('INDEX'),raw=await mf.getR2Bucket('RAW');
  for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
  const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});if(r.status!==200)assert.fail(await r.text());return r.json();};
- const tick=async(t=target(),at=Date.now(),parallel=false)=>call({target:t,at,parallel});
+ const tick=async(t=target(),at=Date.now(),parallel=false,daily=false)=>call({target:t,at,parallel,daily});
  const reset=()=>db.prepare("UPDATE source_control SET next_allowed_at=0 WHERE source='sports-jra'").run();
  const parsed=async event=>{const p=await db.prepare('SELECT * FROM sports_parses WHERE observation_id=? ORDER BY available_at DESC').bind(event).first();return {index:p,value:p.normalized_key?await (await raw.get(p.normalized_key)).json():null};};
  return {mf,db,raw,requests,call,tick,reset,parsed};
@@ -230,9 +231,11 @@ test('JRA daily alarm completes catalog/venue actions and preserves clock eviden
  const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
   return new Response(encoded(name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw15oli')?catalog:renamed(jraProgram())));};
  responses.push(...Array(10).fill(respond));
- for(let i=0;i<10;i++){
-  await r.call({op:'alarm',now:now+i*70000});const state=await r.call({op:'dailyState'});
+ let at=now;
+ for(let i=0;i<20;i++){
+  await r.call({op:'alarm',now:at});const state=await r.call({op:'dailyState'});
   if(state.races[`jra:${day}:5:1`]?.clock&&Object.keys(state.actions??{}).length===0)break;
+  at=(await r.call({op:'planState'})).alarm_at;
  }
  const state=await r.call({op:'dailyState'});assert.ok(state.races[`jra:${day}:5:1`]?.clock,JSON.stringify({state,requests:r.requests,parses:(await r.db.prepare('SELECT status,error_code FROM sports_parses').all()).results}));assert.equal(state.races[`jra:${day}:5:1`].clock.value.program.races[0].close_at,null);
  assert.equal(Object.keys(state.actions??{}).length,0);assert.equal(Object.values(state.tasks).filter(t=>t.kind==='odds').length,7);assert.equal(r.requests.length,3);
@@ -272,7 +275,7 @@ for(const phase of ['9時45分現在','最終オッズ'])test('daily JRA roster 
    const manifests=await Promise.all(rows.map(async x=>(await r.raw.get('manifests/'+x.observation_id+'.json')).json()));
    assert.ok(manifests.filter(m=>m.target.page!=='win_place').every(m=>m.target.context_event));
    const starts=manifests.map(m=>Date.parse(m.fetch_started_at)).sort((a,b)=>a-b);
-   assert.ok(starts.slice(1).every((t,i)=>t-starts[i]>=config.finite_request_spacing_seconds*1000));
+   assert.ok(starts.slice(1).every((t,i)=>t-starts[i]>=config.daily_request_spacing_seconds*1000));
   }
  }finally{await r.mf.dispose();}
 });
@@ -283,7 +286,7 @@ for(const missingWide of [false,true])test(`JRA daily results retain odds clocks
   let resultRequests=0,retried=false;
   const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
    const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:missingWide&&++resultRequests===1}):
-    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):jraProgram();
+    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])));
    return new Response(encoded(rename(body)));};
   responses.push(...Array(32).fill(respond));let at=window.start+3600000;
   for(let i=0;i<32;i++){
@@ -291,7 +294,7 @@ for(const missingWide of [false,true])test(`JRA daily results retain odds clocks
    if(missingWide&&resultRequests===1&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
     assert.notEqual(state.tasks[`result:jra:${day}:5:1`].done,true);retried=true;
    }
-   if(state.races[`jra:${day}:5:1`]?.clock&&state.tasks[`result:jra:${day}:5:1`]?.done&&Object.keys(state.actions??{}).length===0)break;
+   if(state.races[`jra:${day}:5:1`]?.clock&&state.tasks[`result:jra:${day}:5:1`]?.done&&Object.values(state.tasks).filter(t=>t.kind==='final_odds').every(t=>t.done)&&Object.keys(state.actions??{}).length===0)break;
    at=(await r.call({op:'planState'})).alarm_at;
   }
   const state=await r.call({op:'dailyState'}),id=`jra:${day}:5:1`,facts=state.races[id];
@@ -302,6 +305,48 @@ for(const missingWide of [false,true])test(`JRA daily results retain odds clocks
   const rows=await r.call({op:'resultHistory',race:id,at:new Date(at).toISOString()});assert.equal(rows.length,missingWide?2:1);assert.ok(rows.every(x=>x.status==='RESULT_PARSED'));
   if(missingWide){assert.ok(retried);assert.equal((await r.parsed(rows[0].observation_id)).value.payouts.length,11);}
   const v=(await r.parsed(rows.at(-1).observation_id)).value;assert.equal(v.phase,'RESULT_ONLY');assert.equal(v.payouts.length,12);assert.equal(v.settlement_qualified,false);
-  assert.deepEqual(await r.call({op:'history',race:id,at:new Date(at).toISOString()}),[]);
+  const odds=await r.call({op:'history',race:id,at:new Date(at).toISOString()});assert.equal(odds.length,7);assert.ok(odds.every(x=>x.status==='COMPLETE'));
+  const values=await Promise.all(odds.map(async x=>(await r.parsed(x.observation_id)).value));assert.ok(values.every(v=>v.phase==='FINAL_ONLY'));
+  assert.equal(new Set(values.flatMap(v=>v.markets.map(m=>m.market))).size,8);assert.equal(facts.win_context,undefined);assert.ok(facts.final_context);
+ }finally{await r.mf.dispose();}
+});
+test('overdue JRA daily claims share an atomic start gate and a held request allows a later daily slot',async()=>{
+ let release;const held=new Promise(resolve=>release=resolve),r=await runtime([async()=>{await held;return new Response(encoded(jraBody('win_place')));},{}]);
+ try{
+  const at=Date.now()-1000,first=r.tick(target(),at,true,true);for(let i=0;i<100&&!r.requests.length;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(r.requests.length,1);
+  const rest=await Promise.all([1,2,3].map(i=>r.tick(target(),at-i,true,true)));assert.ok(rest.every(v=>v.status==='WAIT_OR_BLOCKED'));assert.equal(r.requests.length,1);
+  await new Promise(resolve=>setTimeout(resolve,(config.daily_request_spacing_seconds+0.1)*1000));
+  const next=await r.tick(target(),at-4,true,true);assert.equal(next.status,'RAW_STORED');assert.equal(r.requests.length,2);
+  release();assert.equal((await first).status,'RAW_STORED');
+ }finally{release();await r.mf.dispose();}
+});
+test('a held finite JRA lease remains exclusive even if the start timer elapsed for daily requests',async()=>{
+ let release;const held=new Promise(resolve=>release=resolve),r=await runtime([async()=>{await held;return new Response(encoded(jraBody('win_place')));}]);
+ try{
+  const at=Date.now()-1000,first=r.tick(target(),at,true);for(let i=0;i<100&&!r.requests.length;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(r.requests.length,1);
+  await r.reset();const next=await r.tick(target(),at-1,true,true);assert.equal(next.status,'WAIT_OR_BLOCKED');assert.equal(r.requests.length,1);
+  release();assert.equal((await first).status,'RAW_STORED');
+  const gate=await r.db.prepare("SELECT next_allowed_at FROM source_control WHERE source='sports-jra'").first();assert.ok(gate.next_allowed_at>Date.now()+59000);
+ }finally{release();await r.mf.dispose();}
+});
+test('delayed D1 grant responses cannot bunch JRA HTTP starts after the durable timer passed',async()=>{
+ let release;const held=new Promise(resolve=>release=resolve),r=await runtime([async()=>{await held;return new Response(encoded(jraBody()));},{}]);try{
+  const at=Date.now()-1000,spacing=config.daily_request_spacing_seconds*1000;
+  const delayed=r.call({target:target(),at,parallel:true,daily:true,batchLag:spacing+1000});
+  await new Promise(resolve=>setTimeout(resolve,spacing+200));
+  const next=r.tick(target(),at-1,true,true);assert.equal((await delayed).status,'RAW_STORED');release();assert.equal((await next).status,'RAW_STORED');
+  assert.equal(r.requests.length,2);assert.ok(r.requests[1].started-r.requests[0].started>=spacing-20);
+ }finally{release();await r.mf.dispose();}
+});
+for(const status of [403,429])test(`a delayed granted JRA request respects a later ${status} before sending HTTP`,async()=>{
+ const r=await runtime([{status,headers:status===429?{'retry-after':'120'}:undefined}]);try{
+  const at=Date.now()-1000,spacing=config.daily_request_spacing_seconds*1000;
+  const delayed=r.call({target:target(),at,parallel:true,daily:true,batchLag:spacing+1000});
+  await new Promise(resolve=>setTimeout(resolve,spacing+200));
+  const response=await r.tick(target(),at-1,true,true);assert.equal(response.status,status===403?'SOURCE_DENIED':'RATE_LIMITED');
+  assert.equal((await delayed).status,status===403?'SOURCE_DENIED':'SOURCE_WAIT');assert.equal(r.requests.length,1);
+  const gate=await r.db.prepare("SELECT blocked,next_allowed_at FROM source_control WHERE source='sports-jra'").first();
+  assert.equal(gate.blocked,status===403?1:0);if(status===429)assert.ok(gate.next_allowed_at>Date.now()+110000);
+  assert.equal((await r.db.prepare("SELECT count(*) n FROM captures WHERE status='FETCHING'").first()).n,0);
  }finally{await r.mf.dispose();}
 });
