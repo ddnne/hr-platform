@@ -6,9 +6,9 @@ export type Quote = {combination: number[]; display: string; lower: number | nul
 export type Market = {market: string; quotes: Quote[]; expected: number; complete: boolean; source_time_label: string | null};
 export type Snapshot = {schema: 'sports-odds-v1'; sport: Sport; race_id: string; phase: 'INTERMEDIATE' | 'CLOSE_ONLY' | 'FINAL_ONLY' | 'UNKNOWN';
  source_updated_at: null; source_published_at: string | null; time_semantics: string; markets: Market[]};
-export type ResultSnapshot = {schema:'sports-result-v1';sport:Sport;race_id:string;phase:'RESULT_ONLY';publication:'PUBLISHED'|'PENDING';
+export type ResultSnapshot = {schema:'sports-result-v1';sport:CaptureSport;race_id:string;phase:'RESULT_ONLY';publication:'PUBLISHED'|'PENDING';
  source_updated_at:null;source_published_at:null;source_time_label:string|null;
- identity_status:'REQUEST_BOUND'|'CONTEXT_VERIFIED';identity_evidence:string|null;
+ identity_status:'REQUEST_BOUND'|'CONTEXT_VERIFIED'|'DOCUMENT_VERIFIED';identity_evidence:string|null;
  payout_unit_yen:null;settlement_qualified:false;
  placings:{entrant:number;rank_label:string;rank:number|null;state_label:string|null}[];
  payouts:{market:string;combination:number[]|null;combination_label:string;display:string;amount_yen:number|null;status:'NUMERIC'|'DISPLAY_ONLY'}[];
@@ -22,7 +22,9 @@ export type JraTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> &
  sport:'jra';kind:'odds';page:JraPage;body:string;form:true;discovery_stage?:never;context_phase?:'INTERMEDIATE'};
 export type JraScheduleTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'> & {
  sport:'jra';kind:'schedule';discovery_stage:'catalog'|'venue';body:string;form:true};
-export type CaptureTarget = Target | JraTarget | JraScheduleTarget;
+export type JraResultTarget = Omit<Target,'sport'|'kind'|'market'|'discovery_stage'|'context_event'|'deadline_at'> & {
+ sport:'jra';kind:'result';body:string;form:true;market?:never;discovery_stage?:never;context_event?:never;deadline_at?:never};
+export type CaptureTarget = Target | JraTarget | JraScheduleTarget | JraResultTarget;
 export interface SportsEnv extends CaptureStorage {
  SPORTS_ENABLED: string; SPORTS_PROVIDERS_JSON: string;
  SPORTS_DAILY_ENABLED?: string;

@@ -16,8 +16,7 @@ function support(r:JraRunners){
  return [...r.entrants].sort((a,b)=>a-b);
 }
 export function decodeJra(body:Uint8Array):string {return new TextDecoder(config.charset,{fatal:true,ignoreBOM:false}).decode(body);}
-export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners):JraSnapshot {
- if(!Object.hasOwn(config.tables,page))throw new Error('JRA_PAGE');
+export function jraMetadata(raw:string,raceId:string):JraSnapshot['metadata'] {
  const ids=[...raw.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map(m=>text(m[1]).match(/(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]*\d+回([^\d]+)\d+日\s*(\d+)レース/)).filter(m=>m!==null);
  if(ids.length!==1)throw new Error('JRA_IDENTITY');const id=ids[0];
  const day=date(id[1]+id[2].padStart(2,'0')+id[3].padStart(2,'0'));
@@ -30,6 +29,11 @@ export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners
  const type=name&&category?text(name)+' '+text(category):null;
  const flat=course===null||type===null?null:/障害/.test(course+' '+type)?false:/芝|ダート/.test(course)?true:null;
  const start=raw.match(/発走時刻[：:]\s*<strong\b[^>]*>(\d{1,2})時(\d{2})分<\/strong>/)?.slice(1);
+ return {race_date:day,venue,scheduled_start_at:start?programClock(day,start.join(':')):null,course_label:course,race_type_label:type,flat};
+}
+export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners):JraSnapshot {
+ if(!Object.hasOwn(config.tables,page))throw new Error('JRA_PAGE');
+ const metadata=jraMetadata(raw,raceId);
  const time=raw.match(/<div\b[^>]*class=["']refresh_line["'][^>]*>[\s\S]*?<div\b[^>]*class=["']cell time["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
  const label=time?text(time):null,phase:Snapshot['phase']=label==='最終オッズ'?'FINAL_ONLY':label&&/\d+時\d+分.*現在/.test(label)?'INTERMEDIATE':'UNKNOWN';
  let runners: JraRunners|null=known??null;const markets:Market[]=[];
@@ -73,5 +77,5 @@ export function parseJra(raw:string,raceId:string,page:JraPage,known?:JraRunners
  }
  return {schema:'sports-odds-v1',sport:'jra',race_id:raceId,phase,source_updated_at:null,source_published_at:null,
   time_semantics:'JRA display time label; update/publish semantics unverified',markets,runners,
-  metadata:{race_date:day,venue,scheduled_start_at:start?programClock(day,start.join(':')):null,course_label:course,race_type_label:type,flat}};
+  metadata};
 }

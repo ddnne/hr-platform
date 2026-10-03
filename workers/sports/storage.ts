@@ -4,11 +4,11 @@ import jraConfig from '../../configs/jra-source.json';
 import {decodeJra,parseJra,type JraRunners,type JraSnapshot} from '../jra';
 import {parseOdds} from './parsers';
 import {parseProgram,supportsProgram,type Program} from './discovery';
-import {parseResult,supportsResult} from './results';
+import {parseResult,supportsResult,type JraResultSnapshot} from './results';
 import {validateContext,requiresContext,jraRunners,qualifiedJraWin,RaceContextError} from './context';
 import type {CaptureSport,CaptureTarget,Target,Snapshot,ResultSnapshot} from './types';
 export function normalizationKind(t:CaptureTarget):'odds'|'program'|'result'|null {
- if(t.sport==='jra')return t.kind==='schedule'?'program':'odds';
+ if(t.sport==='jra')return t.kind==='schedule'?'program':supportsResult(t)?'result':t.kind==='odds'?'odds':null;
  return supportsProgram(t)?'program':supportsResult(t)?'result':t.kind==='odds'?'odds':null;
 }
 export async function normalize(env:CaptureStorage,event:string,target:CaptureTarget,version?:string):Promise<string> {
@@ -16,7 +16,7 @@ export async function normalize(env:CaptureStorage,event:string,target:CaptureTa
  const saved=await manifest.json<{target:CaptureTarget;fetch_started_at:string}>();if(!saved.target)throw new Error('PARSE_RECIPE_REQUIRED');
  target=saved.target;
  const kind=normalizationKind(target);if(!kind)throw new Error('PARSE_RESOURCE');
- version??=target.sport==='jra'?(kind==='program'?jraConfig.program_parser_version:jraConfig.parser_version):kind==='program'?config.program_parser_version:kind==='result'?config.result_parser_version:config.parser_version;
+ version??=target.sport==='jra'?(kind==='program'?jraConfig.program_parser_version:kind==='result'?jraConfig.result_parser_version:jraConfig.parser_version):kind==='program'?config.program_parser_version:kind==='result'?config.result_parser_version:config.parser_version;
  if(!new RegExp(`^sports-${kind}-v\\d+$`).test(version))throw new Error('PARSER_KIND');
  const existing=await env.INDEX.prepare('SELECT status FROM sports_parses WHERE observation_id=? AND parser_version=?').bind(event,version).first<{status:string}>();
  if(existing)return existing.status;
@@ -35,7 +35,7 @@ export async function normalize(env:CaptureStorage,event:string,target:CaptureTa
  }
  try {
   if(error)throw new Error(error);
-  if(target.sport==='jra')result=target.kind==='schedule'?parseProgram(decodeJra(bytes!),target):parseJra(decodeJra(bytes!),target.race_id,target.page,known);
+  if(target.sport==='jra')result=target.kind==='schedule'?parseProgram(decodeJra(bytes!),target):target.kind==='result'?parseResult(decodeJra(bytes!),target):parseJra(decodeJra(bytes!),target.race_id,target.page,known);
   else result=kind==='program'?parseProgram(text!,target):kind==='result'?parseResult(text!,target):parseOdds(text!,target);
   if(result.schema==='sports-result-v1'&&target.sport==='keirin'){result.identity_status='CONTEXT_VERIFIED';result.identity_evidence=target.context_event!;}
  }catch {error??='PROVIDER_FORMAT';}
@@ -77,12 +77,18 @@ export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]
   const rows=value.payouts.filter(p=>p.market===m);return rows.length>0&&rows.every(p=>p.status==='NUMERIC'&&p.amount_yen!==null&&p.amount_yen>0);
  });
 }
-async function completedObservation<T>(env:CaptureStorage,event:string,kind:'odds'|'result',status:string):Promise<{value:T;available_at:string;received_at:string}|null> {
+export async function savedJraResult(env:CaptureStorage,event:string,at:number):Promise<{value:JraResultSnapshot;available_at:string;received_at:string}> {
+ const result=await completedObservation<JraResultSnapshot>(env,event,'result','RESULT_PARSED',at);
+ if(!result||result.value.sport!=='jra'||result.value.identity_status!=='DOCUMENT_VERIFIED')throw new Error('RESULT_UNAVAILABLE');
+ return result;
+}
+async function completedObservation<T>(env:CaptureStorage,event:string,kind:'odds'|'result',status:string,at=Date.now()):Promise<{value:T;available_at:string;received_at:string}|null> {
  const prefix=`sports-${kind}-v`;
  const row=await env.INDEX.prepare(`SELECT p.status,p.normalized_key,p.available_at,o.received_at FROM sports_parses p
  JOIN raw_observations o ON o.observation_id=p.observation_id WHERE p.observation_id=?
- AND p.parser_version LIKE ? ORDER BY p.available_at DESC,CAST(substr(p.parser_version,?) AS INTEGER) DESC LIMIT 1`)
- .bind(event,prefix+'%',prefix.length+1).first<{status:string;normalized_key:string|null;available_at:string;received_at:string}>();
+ AND p.parser_version LIKE ? AND p.available_at<=? AND o.received_at<=?
+ ORDER BY p.available_at DESC,CAST(substr(p.parser_version,?) AS INTEGER) DESC LIMIT 1`)
+ .bind(event,prefix+'%',iso(at),iso(at),prefix.length+1).first<{status:string;normalized_key:string|null;available_at:string;received_at:string}>();
  if(!row||row.status!==status||!row.normalized_key)return null;
  const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
  return {value:await object.json<T>(),available_at:row.available_at,received_at:row.received_at};

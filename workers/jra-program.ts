@@ -7,8 +7,9 @@ import type {JraScheduleTarget} from './sports/types';
 import type {JraPage} from './jra';
 type Identity={day:string;venue:number;race?:number};
 export type JraProgram={venues:Venue[]}|{races:Race[];odds_navigation:Record<string,Partial<Record<JraPage,string>>>};
-export function jraNavigationIdentity(name:string,kind:'venue'|'odds'):Identity {
+export function jraNavigationIdentity(name:string,kind:'venue'|'odds'|'result'):Identity {
  const m=kind==='venue'?name.match(/^pw15orl[01](\d{3})(\d{4})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
+  kind==='result'?name.match(/^pw01sde(?:01|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})\/[A-Za-z0-9+]+$/):
   name.match(/^pw15[1345678]ou(?:S3|10)(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})Z(?:99)?\/[A-Za-z0-9+]+$/);
  if(!m)throw new Error('PROGRAM_NAVIGATION');
  const venue=Number(m[1]),day=date(m[kind==='venue'?5:6]);
@@ -17,18 +18,25 @@ export function jraNavigationIdentity(name:string,kind:'venue'|'odds'):Identity 
  const race=Number(m[5]);if(race<1||race>config.maximum_race_number)throw new Error('PROGRAM_IDENTITY');
  return {day,venue,race};
 }
-function links(raw:string) {
+export function jraLinks(raw:string,path:string=config.odds_path) {
  return [...raw.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)].flatMap(a=>{
   const action=a[1].match(/\bonclick\s*=\s*"([^"]*)"/i)?.[1]??a[1].match(/\bonclick\s*=\s*'([^']*)'/i)?.[1];
   const m=action?.match(/^\s*return\s+doAction\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)\s*;?\s*$/);
-  return m&&m[1]===config.odds_path?[{name:m[2],label:text(a[2])}]:[];
+  if(m&&m[1]===path)return [{name:m[2],label:text(a[2])}];
+  // Result detail pages use GET links; preserve the existing program parser behavior.
+  if(path!==config.result_path)return [];
+  const href=a[1].match(/\bhref\s*=\s*"([^"]*)"/i)?.[1]??a[1].match(/\bhref\s*=\s*'([^']*)'/i)?.[1];
+  if(!href)return [];
+  const url=new URL(href.replaceAll('&amp;','&'),config.origin);
+  const name=url.searchParams.get('CNAME');
+  return url.origin===config.origin&&url.pathname===path&&url.searchParams.size===1&&name?[{name,label:text(a[2])}]:[];
  });
 }
 export function parseJraProgram(raw:string,t:JraScheduleTarget):JraProgram {
  const [,requested,scope]=t.race_id.split(':'),day=date(requested);
  if(t.discovery_stage==='catalog'){
   const rows=new Map<number,Venue>();let seen=0;
-  for(const link of links(raw).filter(l=>l.name.startsWith(config.venue_navigation_prefix))){
+  for(const link of jraLinks(raw).filter(l=>l.name.startsWith(config.venue_navigation_prefix))){
    const id=jraNavigationIdentity(link.name,'venue');seen++;
    if(!link.label.includes(config.venues[String(id.venue) as keyof typeof config.venues]))throw new Error('PROGRAM_IDENTITY');
    if(id.day!==day)continue;
@@ -46,7 +54,7 @@ export function parseJraProgram(raw:string,t:JraScheduleTarget):JraProgram {
  const races:Race[]=[],odds_navigation:Record<string,Partial<Record<JraPage,string>>>={};
  for(const row of raw.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
   const navigation:Partial<Record<JraPage,string>>={};let no:number|undefined;
-  for(const link of links(row[1])){
+  for(const link of jraLinks(row[1])){
    const page=Object.entries(config.navigation_prefixes).find(([,prefix])=>link.name.startsWith(prefix))?.[0] as JraPage|undefined;
    if(!page)continue;
    const id=jraNavigationIdentity(link.name,'odds');
