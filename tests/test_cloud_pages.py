@@ -73,6 +73,32 @@ def test_quarantine_does_not_resurrect_older_good_state_and_results_stay_separat
     asyncio.run(run())
 
 
+def test_repaired_payout_link_publishes_new_parse_without_backdating(cloud, monkeypatch):
+    from hr_platform import cloud_pages as module
+    async def run():
+        h = CloudPages(cloud.bucket, cloud.db, cloud.h.clock)
+        raw = payout_page().replace(b'k_babaCode=19', b'_ts=2000000000000&amp;k_babaCode=19')
+        event = seed(cloud, 1, 0, 'payout', raw)
+        parser, version = module.PARSERS['payout'], module.VERSIONS['payout']
+        def legacy_parser(*_):
+            raise ValueError('PAYOUT_RACE_LINK')
+        monkeypatch.setitem(module.PARSERS, 'payout', legacy_parser)
+        monkeypatch.setitem(module.VERSIONS, 'payout', 'synthetic-legacy-payout')
+        await h.normalize(event)
+        old = await h.asof('payout', f.RACE, f.at(5))
+        assert old['evidence']['status'] == 'QUARANTINED'
+        monkeypatch.setitem(module.PARSERS, 'payout', parser)
+        monkeypatch.setitem(module.VERSIONS, 'payout', version)
+        cloud.clock[0] = f.at(6)
+        repaired = await h.normalize(event)
+        assert repaired['available_at'] == stamp(f.at(6))
+        assert await h.asof('payout', f.RACE, f.at(5)) == old
+        assert (await h.asof('payout', f.RACE, f.at(6)))['evidence']['status'] == 'PAYOUT_QUALIFIED'
+        assert await h.normalize(event) == repaired
+        assert cloud.db.conn.execute('SELECT count(*) FROM raw_observations').fetchone()[0] == 1
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('field,value', [('url', 'https://invalid.example/'), ('http_status', 304),
                                          ('raw_bytes', 0), ('race_id', '20000101:SYNTHETIC:2')])
 def test_invalid_receipt_cannot_publish(cloud, field, value):

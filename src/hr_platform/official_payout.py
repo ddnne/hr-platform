@@ -13,7 +13,7 @@ from .common import stamp
 from .payout_check import ResultPage, parse_result_page
 from .race_state import StateEvidence, compact
 
-VERSION = "nar-result-payout-v2"
+VERSION = "nar-result-payout-v3"
 RULE_SOURCE = "https://www.keiba.go.jp/beginner/step6.html"
 STATUS_SOURCE = "https://www.keiba.go.jp/beginner/step2.html"
 HEADERS = [
@@ -177,13 +177,17 @@ def parse_payout_page(raw, race_id):
     if len(page.race_links) != 1:
         raise ValueError("PAYOUT_RACE_LINK")
     link = urlsplit(page.race_links[0])
-    query = parse_qs(link.query, strict_parsing=True)
+    query = parse_qs(link.query, strict_parsing=True, keep_blank_values=True)
+    # Official links may carry a numeric cache key. It identifies no race and
+    # establishes neither the result's publication time nor an odds update time.
+    cache_key = query.pop('_ts', None)
     date, _, number = race_id.split(":")
     if (
         link.scheme
         or link.netloc
         or link.fragment
         or link.path != "../TodayRaceInfo/RaceList"
+        or cache_key is not None and (len(cache_key) != 1 or not re.fullmatch(r'[0-9]+', cache_key[0]))
         or set(query) != {"k_raceDate", "k_raceNo", "k_babaCode"}
         or query["k_raceDate"] != [f"{date[:4]}/{date[4:6]}/{date[6:]}"]
         or query["k_raceNo"] != [number]
