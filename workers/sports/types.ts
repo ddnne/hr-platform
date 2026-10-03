@@ -9,7 +9,7 @@ export type Snapshot = {schema: 'sports-odds-v1'; sport: Sport; race_id: string;
 export type ResultSnapshot = {schema:'sports-result-v1';sport:CaptureSport;race_id:string;phase:'RESULT_ONLY';publication:'PUBLISHED'|'PENDING';
  source_updated_at:null;source_published_at:null;source_time_label:string|null;
  identity_status:'REQUEST_BOUND'|'CONTEXT_VERIFIED'|'DOCUMENT_VERIFIED';identity_evidence:string|null;
- payout_unit_yen:null;settlement_qualified:false;
+ payout_unit_yen:number|null;settlement_qualified:false;
  placings:{entrant:number;rank_label:string;rank:number|null;state_label:string|null;frame?:number|null}[];
  payouts:{market:string;combination:number[]|null;combination_label:string;display:string;amount_yen:number|null;status:'NUMERIC'|'DISPLAY_ONLY'}[];
  refund_evidence:{display:string|null;source_flags:Record<string,string|boolean|null>}};

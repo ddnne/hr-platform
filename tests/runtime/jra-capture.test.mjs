@@ -96,13 +96,32 @@ test('JRA results share immutable originals, as-of history, redelivery and saved
   assert.equal(plan.entries.length,1);assert.equal(plan.entries[0].target.kind,'result');
   assert.equal(new URLSearchParams(plan.entries[0].target.body).get('cname'),'pw01sde1005200001010220000101/BB');
   assert.equal((await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:3',at:Date.now()+60000})).deferred[0].reason,'RESULT_NAVIGATION_MISSING');
-  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v4'}),'RESULT_PARSED');
+  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v5'}),'RESULT_PARSED');
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);assert.equal(r.requests.length,2);
   const later=new Date().toISOString().replace('Z','000+00:00');
-  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v5',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v6',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
    .bind(later,later,first.event_id,config.result_parser_version).run();
   assert.deepEqual(await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:2',at:Date.now()+60000}),{error:'RESULT_UNAVAILABLE'});
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);
+ }finally{await r.mf.dispose();}
+});
+test('documented payout unit in a later result parse leaves the old as-of unknown',async()=>{
+ const r=await runtime([{body:encoded(jraResult())}]);try{
+  const first=await r.tick(resultTarget),parsed=await r.parsed(first.event_id),legacy=structuredClone(parsed.value);
+  legacy.payout_unit_yen=null;delete legacy.payout_unit_evidence;
+  const key='synthetic/legacy-result-v3.json';await r.raw.put(key,JSON.stringify(legacy));
+  await r.db.prepare("UPDATE sports_parses SET parser_version='sports-result-v3',normalized_key=? WHERE observation_id=?")
+   .bind(key,first.event_id).run();
+  const cutoff=new Date().toISOString(),past=await r.call({op:'resultHistory',at:cutoff});
+  assert.equal(past.length,1);assert.equal(past[0].parser_version,'sports-result-v3');
+  await new Promise(resolve=>setTimeout(resolve,3));
+  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:config.result_parser_version}),'RESULT_PARSED');
+  const current=await r.parsed(first.event_id);
+  assert.equal(current.value.payout_unit_yen,100);assert.equal(current.value.settlement_qualified,false);
+  assert.equal(current.value.refund_evidence.source_flags.refund_coverage_verified,false);
+  assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);
+  assert.equal((await (await r.raw.get(past[0].normalized_key)).json()).payout_unit_yen,null);
+  assert.equal((await r.call({op:'resultHistory',at:new Date().toISOString()})).length,2);assert.equal(r.requests.length,1);
  }finally{await r.mf.dispose();}
 });
 test('context is fixed to original fetch start, latest failure blocks new fetches but preserves raw recovery',async()=>{
