@@ -2,7 +2,7 @@
 import {DurableObject,WorkerEntrypoint} from 'cloudflare:workers';
 import config from '../../configs/sports-collection.json';
 import {collect,validateTarget,validateContext,sourceFor,concurrencyFor,spacingFor} from './capture';
-import {history,resourceId,normalize,savedProgram,closedOddsSaved,publishedResultSaved} from './storage';
+import {history,resourceId,normalize,savedProgram,savedJraWin,closedOddsSaved,publishedResultSaved} from './storage';
 import {discoveryTargets} from './discovery-plan';
 import {oddsTargets} from './odds-plan';
 import {businessDay,initialDaily,nextDailyParallel,migrateDailyCloses,acceptProgram,rejectProgram,completeDaily,type DailyState,type DailyEntry} from './daily-plan';
@@ -118,11 +118,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    catch(e){if(!(e instanceof Error)||!['PROGRAM_UNAVAILABLE','PROGRAM_STALE'].includes(e.message))throw e;status=e.message;}
   }
   const closing=!!entry.daily_task?.startsWith('final_odds:')&&status==='RAW_STORED'&&await closedOddsSaved(this.env,event);
+  const winContext=entry.daily_task&&entry.target.sport==='jra'&&entry.target.kind==='odds'&&entry.target.page==='win_place'&&status==='RAW_STORED'?await savedJraWin(this.env,event):null;
   let published=false;
   if(entry.daily_task?.startsWith('result:')&&status==='RAW_STORED'){
    const state=await this.ctx.storage.get<DailyState>('daily-state'),facts=state?.races[entry.target.race_id];
    if(facts?.clock){const plan=oddsTargets(facts.clock,entry.target.race_id,(state!.tasks[entry.daily_task]?.close_at??Date.now())+config.daily.final_odds_delay_seconds*1000,facts.runners,'CLOSED');
-    const markets=entry.target.sport==='keirin'?plan.targets.map(t=>t.market!):['win','place','exacta','quinella','wide','trifecta','trio'];
+    const markets=entry.target.sport==='keirin'?plan.targets.map(t=>t.sport==='keirin'?t.market!:''):['win','place','exacta','quinella','wide','trifecta','trio'];
     if(entry.target.sport!=='keirin'||!plan.deferred.length)published=await publishedResultSaved(this.env,event,markets);}
   }
   // Concurrent HTTP completion must merge into the current state atomically.
@@ -131,7 +132,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    if(state&&entry.daily_day===state.day){
     if(source)await acceptProgram(state,{...source,event},Date.now());
     else if(supportsProgram(dailyEntry.target))rejectProgram(state,dailyEntry.target);
-    await completeDaily(state,dailyEntry,status,Date.now(),closing,published);await store.put('daily-state',state);
+    await completeDaily(state,dailyEntry,status,Date.now(),closing,published,winContext);await store.put('daily-state',state);
    }
    await store.delete(key);
   });await this.arm();
@@ -168,8 +169,8 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  private async runEntry(key:string,entry:Entry,parallel=false):Promise<void> {
   const t=entry.target;let deadline=t.deadline_at;
   if(entry.daily_task){const state=await this.ctx.storage.transaction(async store=>{const value=await store.get<DailyState>('daily-state');if(value&&migrateDailyCloses(value))await store.put('daily-state',value);return value;}),action=state?.actions?.[entry.daily_task]??(state?.action?.task===entry.daily_task?state.action:null),task=state?.tasks[entry.daily_task];
-   if(task?.kind==='odds')deadline=task.close_at??deadline;
-   if(action&&task&&action.close_at!==task.close_at){
+   if(task?.kind==='odds')deadline=task.close_at??task.start_at??deadline;
+   if(action&&task&&(action.close_at!==task.close_at||action.start_at!==task.start_at)){
     const event=`sports:${t.sport}:${entry.at}:${await resourceId(t)}`,prior=await this.env.INDEX.prepare('SELECT event_id FROM captures WHERE event_id=?').bind(event).first();
     await this.finish(key,prior?(await collect(entry.at,this.env,t)).status:'CLOSE_CHANGED');return;}
   }

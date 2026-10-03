@@ -32,6 +32,7 @@ export function validateTarget(t:CaptureTarget):void {
   if(!id||!Object.hasOwn(jra.venues,id[2])||Number(id[3])<1||Number(id[3])>jra.maximum_race_number)throw new Error('RACE_ID');
   date(id[1]);
   if(t.page==='win_place'?t.context_event!==undefined:!t.context_event)throw new Error('RACE_CONTEXT_REQUIRED');
+  if(t.context_phase!==undefined&&(t.page==='win_place'||t.context_phase!=='INTERMEDIATE'))throw new Error('RACE_CONTEXT_PHASE');
   if(t.deadline_at!==undefined&&!Number.isSafeInteger(t.deadline_at))throw new Error('CAPTURE_DEADLINE');
   return;
  }

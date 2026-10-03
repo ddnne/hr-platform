@@ -1,11 +1,11 @@
 import {digest,iso,type CaptureStorage} from '../capture-storage';
 import config from '../../configs/sports-collection.json';
 import jraConfig from '../../configs/jra-source.json';
-import {decodeJra,parseJra,type JraRunners} from '../jra';
+import {decodeJra,parseJra,type JraRunners,type JraSnapshot} from '../jra';
 import {parseOdds} from './parsers';
 import {parseProgram,supportsProgram,type Program} from './discovery';
 import {parseResult,supportsResult} from './results';
-import {validateContext,requiresContext,jraRunners,RaceContextError} from './context';
+import {validateContext,requiresContext,jraRunners,qualifiedJraWin,RaceContextError} from './context';
 import type {CaptureSport,CaptureTarget,Target,Snapshot,ResultSnapshot} from './types';
 export function normalizationKind(t:CaptureTarget):'odds'|'program'|'result'|null {
  if(t.sport==='jra')return t.kind==='schedule'?'program':'odds';
@@ -57,12 +57,19 @@ export async function resourceId(t:CaptureTarget):Promise<string> {
  return digest(new TextEncoder().encode(JSON.stringify([t.sport,t.race_id,t.kind,t.url,t.body??null])));
 }
 export async function closedOddsSaved(env:CaptureStorage,event:string):Promise<boolean> {
- const value=await completedBody<Snapshot>(env,event,'odds','COMPLETE');
+ const value=(await completedObservation<Snapshot>(env,event,'odds','COMPLETE'))?.value;
  return !!value&&value.schema==='sports-odds-v1'&&['FINAL_ONLY','CLOSE_ONLY'].includes(value.phase)&&value.markets.length>0&&value.markets.every(m=>m.complete);
 }
 export async function publishedResultSaved(env:CaptureStorage,event:string,markets:string[]):Promise<boolean> {
- const value=await completedBody<ResultSnapshot>(env,event,'result','RESULT_PARSED');
- return completePayoutMarkets(value,markets);
+ const value=(await completedObservation<ResultSnapshot>(env,event,'result','RESULT_PARSED'))?.value;
+ return completePayoutMarkets(value??null,markets);
+}
+export type JraWinContext={event:string;race_id:string;received_at:string;available_at:string};
+export async function savedJraWin(env:CaptureStorage,event:string):Promise<JraWinContext|null> {
+ const result=await completedObservation<JraSnapshot>(env,event,'odds','COMPLETE');
+ if(!result)return null;const v=result.value;
+ if(!qualifiedJraWin(v,'INTERMEDIATE'))return null;
+ return {event,race_id:v.race_id,received_at:result.received_at,available_at:result.available_at};
 }
 export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]):boolean {
  if(!value||value.schema!=='sports-result-v1'||value.publication!=='PUBLISHED')return false;
@@ -70,14 +77,15 @@ export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]
   const rows=value.payouts.filter(p=>p.market===m);return rows.length>0&&rows.every(p=>p.status==='NUMERIC'&&p.amount_yen!==null&&p.amount_yen>0);
  });
 }
-async function completedBody<T>(env:CaptureStorage,event:string,kind:'odds'|'result',status:string):Promise<T|null> {
+async function completedObservation<T>(env:CaptureStorage,event:string,kind:'odds'|'result',status:string):Promise<{value:T;available_at:string;received_at:string}|null> {
  const prefix=`sports-${kind}-v`;
- const row=await env.INDEX.prepare(`SELECT status,normalized_key FROM sports_parses WHERE observation_id=?
- AND parser_version LIKE ? ORDER BY available_at DESC,CAST(substr(parser_version,?) AS INTEGER) DESC LIMIT 1`)
- .bind(event,prefix+'%',prefix.length+1).first<{status:string;normalized_key:string|null}>();
+ const row=await env.INDEX.prepare(`SELECT p.status,p.normalized_key,p.available_at,o.received_at FROM sports_parses p
+ JOIN raw_observations o ON o.observation_id=p.observation_id WHERE p.observation_id=?
+ AND p.parser_version LIKE ? ORDER BY p.available_at DESC,CAST(substr(p.parser_version,?) AS INTEGER) DESC LIMIT 1`)
+ .bind(event,prefix+'%',prefix.length+1).first<{status:string;normalized_key:string|null;available_at:string;received_at:string}>();
  if(!row||row.status!==status||!row.normalized_key)return null;
  const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
- return object.json<T>();
+ return {value:await object.json<T>(),available_at:row.available_at,received_at:row.received_at};
 }
 export async function savedProgram(env:CaptureStorage,event:string,at=Date.now()) {
  const cutoff=iso(at);

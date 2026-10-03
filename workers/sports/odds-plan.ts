@@ -1,18 +1,31 @@
 /** Read-only request recipes from saved race clocks and published runner support. */
 import config from '../../configs/sports-collection.json';
+import jra from '../../configs/jra-source.json';
 import {validateTarget} from './capture';
 import {contextNavigation} from './context';
 import {programRaces,type Program} from './discovery';
 import type {CaptureTarget,Target} from './types';
+import type {JraPage} from '../jra';
 type Source={value:Program;target:CaptureTarget};
-export function oddsTargets(source:Source,raceId:string,at:number,runners?:Source,purpose:'INTERMEDIATE'|'CLOSED'='INTERMEDIATE') {
- const {value,target}=source,program=value.program,targets:Target[]=[],deferred:{race_id:string;reason:string;market?:string}[]=[],not_offered:{market:string;source_label:string}[]=[];
+export function oddsTargets(source:Source,raceId:string,at:number,runners?:Source,purpose:'INTERMEDIATE'|'CLOSED'='INTERMEDIATE',selection?:{page:JraPage;context_event?:string}) {
+ const {value,target}=source,program=value.program,targets:CaptureTarget[]=[],deferred:{race_id:string;reason:string;market?:string}[]=[],not_offered:{market:string;source_label:string}[]=[];
  validateTarget(target);if(runners)validateTarget(runners.target);
  const defer=(reason:string,market?:string)=>deferred.push({race_id:raceId,reason,...(market?{market}:{})});
  if(target.sport!==value.sport||target.race_id!==value.requested_race_id)throw new Error('PROGRAM_IDENTITY');
- if(value.sport==='jra'){defer('JRA_DAILY_ODDS_UNQUALIFIED');return {targets,deferred,not_offered};}
  const races=programRaces(program);
  const race=races.find(r=>r.race_id===raceId);if(!race){defer('RACE_NOT_IN_PROGRAM');return {targets,deferred,not_offered};}
+ if(value.sport==='jra'){
+  const page=selection?.page,navigation=page&&'odds_navigation' in program&&program.odds_navigation[raceId]?.[page];
+  if(!page){defer('JRA_ODDS_PAGE_REQUIRED');return {targets,deferred,not_offered};}
+  if(!navigation){defer('ODDS_NAVIGATION_UNKNOWN');return {targets,deferred,not_offered};}
+  if(purpose!=='INTERMEDIATE'||!race.start_at){defer('START_TIME_UNKNOWN');return {targets,deferred,not_offered};}
+  const start=Date.parse(race.start_at);
+  if(!Number.isSafeInteger(at)||at>=start){defer('OUTSIDE_PRE_START_WINDOW');return {targets,deferred,not_offered};}
+  if(page!=='win_place'&&!selection?.context_event){defer('RACE_CONTEXT_REQUIRED');return {targets,deferred,not_offered};}
+  const recipe:CaptureTarget={sport:'jra',race_id:raceId,kind:'odds',page,form:true,url:jra.origin+jra.odds_path,
+   body:new URLSearchParams({cname:navigation}).toString(),deadline_at:start,...(page!=='win_place'?{context_event:selection!.context_event,context_phase:'INTERMEDIATE' as const}:{})};
+  validateTarget(recipe);targets.push(recipe);return {targets,deferred,not_offered};
+ }
  if(!race.close_at){defer('CLOSE_TIME_UNKNOWN');return {targets,deferred,not_offered};}
  const [,day,venue,no]=raceId.split(':'),base:Target={sport:value.sport,race_id:raceId,kind:'odds',url:''};
  if(value.sport==='auto')targets.push({...base,url:config.sources.auto.origin+config.sources.auto.odds_path,
