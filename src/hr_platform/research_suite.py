@@ -84,6 +84,8 @@ def candidate_suite(runners, markets, analysis, base, configs, *, previous_quote
                               *(['win'] if win_probability_source == 'market' else [])]))
     excluded = {'finite_baseline': baseline_error} if baseline_error else {}
     try:
+        if not set(configs['joint-kelly']['markets']) <= set(markets):
+            raise ModelError('INCOMPLETE_MARKET')
         candidates.update(joint_kelly_portfolios(estimates, markets, refs, base, configs['successors'],
                                                  configs['portfolio-scenarios'], configs['kelly'], configs['joint-kelly']))
     except ModelError as error:
@@ -119,6 +121,8 @@ def _trio_candidates(runners, markets, base):
                    else ['exacta', 'trifecta'], 'solver': 'CLARABEL'}
     candidates = {}
     try:
+        if not {trio_config['target'], *trio_config['references']} <= set(markets):
+            raise ModelError('INCOMPLETE_MARKET')
         trio = analyze(runners, markets, trio_config)
         for method in ('direct', 'marginal', 'reference'):
             choice = select(trio['rows'], method, base['tie_tolerance'])
@@ -150,6 +154,8 @@ def analyze_suite(runners, markets, base, configs, **options):
     primary = 'win_exacta' if base['references'] == ['win', 'exacta'] else 'primary'
     primary_error = None
     try:
+        if not {base['target'], *base['references']} <= set(markets):
+            raise ModelError('INCOMPLETE_MARKET')
         analysis = analyze(runners, markets, base)
         result = candidate_suite(runners, markets, analysis, base, configs, **options)
     except ModelError as error:

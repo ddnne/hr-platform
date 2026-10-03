@@ -43,8 +43,14 @@ def qualify(view, meta, state, plan, race_id, schedule, config, at):
     if (not plan or plan["config"] != config or plan["schedule"] != schedule
         or plan["registered_at"] >= stamp(at) or plan["asof_at"] != stamp(at)):
         return {**view, "reason": "PROSPECTIVE_PLAN_REQUIRED"}
-    view["state_evidence"] = state
     view["plan_revision_id"] = plan["revision_id"]
+    return qualify_observed(view, meta, state, race_id, schedule, config, at)
+
+
+def qualify_observed(view, meta, state, race_id, schedule, config, at):
+    """Shared evidence checks for Paper and explicitly retrospective research."""
+    validate_policy(config)
+    view["state_evidence"] = state
     view["metadata_evidence"] = meta
     view["input_policy"] = config["input_policy"]
     reason = metadata_reason(race_id, meta["evidence"])

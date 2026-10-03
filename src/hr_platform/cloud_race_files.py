@@ -3,7 +3,7 @@ import csv
 import json
 import re
 from .cloud_history import CloudHistory, PUBLICATION_CLOCK
-from .common import canonical, identity, sha, stamp
+from .common import canonical, identity, sha, stamp, seconds
 from .parser import MAX_COMPRESSED, MAX_EXPANDED
 from .race_files import parse_race_bundle, VERSION as PARSER_VERSION
 
@@ -102,3 +102,14 @@ class CloudRaceFiles(CloudHistory):
                  if key.split(':')[0] == date and (race_id is None or key == race_id)}
         return {'asof_at': cutoff, 'snapshot': row, 'races': races, 'paper_eligible': False,
                 'availability_clock': 'D1_PUBLICATION_STATEMENT_UTC'}
+
+    async def metadata(self, race_id, at):
+        saved = await self.day(race_id.split(':')[0], at, race_id)
+        row = saved['snapshot']
+        evidence = None if not row else {
+            'id': row['parse_id'], 'observation_id': row['observation_id'], 'raw_hash': row['raw_sha256'],
+            'received_at': row['received_at'], 'available_at': row['available_at'],
+            'status': 'OBSERVED_UNQUALIFIED', 'metadata': saved['races'].get(race_id),
+        }
+        return {'race_id': race_id, 'asof_at': stamp(at), 'evidence': evidence,
+                'age_seconds': seconds(at, row['received_at']) if row else None}
