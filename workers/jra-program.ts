@@ -57,7 +57,9 @@ export function parseJraProgram(raw:string,t:JraScheduleTarget):JraProgram {
   const label=row[1].match(/<td\b[^>]*class=["']time["'][^>]*>([\s\S]*?)<\/td>/i)?.[1];
   const start_label=label?text(label):null;
   // Ended/cancelled/unknown labels remain evidence, without manufacturing a clock.
-  const start_at=start_label&&/^\d{1,2}:\d{2}$/.test(start_label)?programClock(day,start_label):null;
+  const japanese=start_label?.match(/^(\d{1,2})時(\d{2})分$/);
+  const clock=japanese?`${japanese[1]}:${japanese[2]}`:start_label;
+  const start_at=clock&&/^\d{1,2}:\d{2}$/.test(clock)?programClock(day,clock):null;
   const race_id=`jra:${day}:${identity.venue}:${no}`;
   if(odds_navigation[race_id])throw new Error('PROGRAM_DUPLICATE');odds_navigation[race_id]=navigation;
   races.push({race_id,race_date:day,venue:identity.venue,race:no,start_at,start_label,close_at:null,close_label:null,
