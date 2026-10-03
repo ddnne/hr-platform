@@ -5,9 +5,9 @@ export const catalogTarget={sport:'jra',race_id:'jra:20000101:0:0',kind:'schedul
 export const venueNavigation='pw15orl00052000010120000101/AA';
 const link=(name,label)=>`<a href="#" onclick="return doAction('/JRADB/accessO.html', '${name}');">${label}</a>`;
 export const jraCatalog=`<h3>1月1日</h3>${link(venueNavigation,'1回東京1日')}<h3>1月2日</h3>${link('pw15orl00052000010220000102/BB','1回東京2日')}`;
-export function jraProgram({clock='10:05',no=1,day='20000101',venue=5}={}){
+export function jraProgram({clock='10:05',no=1,day='20000101',venue=5,navigationMode='intermediate'}={}){
  const prefixes={win_place:'pw151ou',frame_quinella:'pw153ou',quinella:'pw154ou',wide:'pw155ou',exacta:'pw156ou',trio:'pw157ou',trifecta:'pw158ou'};
- const names=Object.entries(prefixes).map(([page,prefix])=>link(`${prefix}S3${String(venue).padStart(2,'0')}20000101${String(no).padStart(2,'0')}${day}Z${page==='trio'?'99':''}/AA`,page));
+ const names=Object.entries(prefixes).map(([page,prefix])=>link(`${prefix}${navigationMode==='final'?'10':'S3'}${String(venue).padStart(2,'0')}20000101${String(no).padStart(2,'0')}${day}Z${page==='trio'?'99':''}/AA`,page));
  return `<h1>2000年1月1日 1回東京1日</h1><table><tr><th>${names[0]}</th><td class="time">${clock}</td><td>${names.join('')}</td></tr></table>`;
 }
 const classes={win_place:'tanpuku',frame_quinella:'waku',quinella:'umaren',wide:'wide',exacta:'umatan',trio:'fuku3',trifecta:'tan3'};
