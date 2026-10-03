@@ -45,8 +45,9 @@ export class SportsCollector extends DurableObject<SportsEnv> {
    state.report={at:Date.now(),status:gate.blocked?'SOURCE_BLOCKED':'SOURCE_WAIT',planned:0,deferred:0};
    await this.ctx.storage.put('daily-state',state);return;
   }
-  const guest=await this.ctx.storage.get<Session>('guest-session'),recovering=!!state.action,
-   entries=nextDaily(state,Date.now(),!!guest&&guest.expires>Date.now());
+  const guest=await this.ctx.storage.get<Session>('guest-session'),received=await this.ctx.storage.get<string>('keirin-guest-received-at'),
+   age=received?Date.now()-Date.parse(received):Infinity,recovering=!!state.action,
+   entries=nextDaily(state,Date.now(),!!guest&&guest.expires>Date.now()||age>=0&&age<config.guest_session_seconds*1000);
   if(queued.length+entries.length>config.maximum_pending_requests){
    if(!recovering)state.action=null;
    state.wake_at=Math.min(...queued.map(e=>e.at));
@@ -83,6 +84,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
  async pending():Promise<number> {return (await this.ctx.storage.list({prefix:'plan:'})).size;}
  async planState():Promise<{pending:number;alarm_at:number|null}> {
   return {pending:await this.pending(),alarm_at:await this.ctx.storage.getAlarm()};
+ }
+ private async rememberKeirinGuest(t:Target,result:Awaited<ReturnType<typeof collect>>):Promise<void> {
+  if(t.sport!=='keirin'||t.kind!=='guest'||t.url!==config.sources.keirin.origin+config.sources.keirin.guest_path||result.status!=='RAW_STORED'||!result.received_at)return;
+  const received=Date.parse(result.received_at),prior=await this.ctx.storage.get<string>('keirin-guest-received-at');
+  if(Number.isFinite(received)&&received<=Date.now()&&(!prior||received>Date.parse(prior)))
+   await this.ctx.storage.put('keirin-guest-received-at',result.received_at);
  }
  private async arm() {
   const daily=await this.daily();
@@ -135,7 +142,7 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   if(pending){const repaired=await collect(pending.at,this.env,pending.target);
    if(['STORAGE_ERROR','FETCHING','WAIT_OR_BLOCKED'].includes(repaired.status)){await this.ctx.storage.setAlarm(Date.now()+config.request_spacing_seconds*1000);return;}
    await this.ctx.storage.delete('guest-pending');if(repaired.status!=='RAW_STORED'){await this.finish(key,repaired.status);return;}}
-  if(Date.now()-entry.at>config.capture_window_seconds*1000){const r=await collect(entry.at,this.env,t);await this.finish(key,r.status);return;}
+  if(Date.now()-entry.at>config.capture_window_seconds*1000){const r=await collect(entry.at,this.env,t);await this.rememberKeirinGuest(t,r);await this.finish(key,r.status);return;}
   const session=await this.ctx.storage.get<Session>('guest-session');
   if(t.sport==='auto'&&t.body&&(!session||session.expires<Date.now())) {
    const place=JSON.parse(t.body!).placeCode;
@@ -155,9 +162,12 @@ export class SportsCollector extends DurableObject<SportsEnv> {
   }
   const headers:Record<string,string>={};
   if(t.sport==='auto'&&t.body){if(!session)throw new Error('GUEST_SESSION_REQUIRED');Object.assign(headers,{'Cookie':session.cookie,'X-CSRF-TOKEN':session.token!,'X-Requested-With':'XMLHttpRequest'});}
-  if(t.sport==='keirin'&&session)headers.Cookie=session.cookie;
+  if(t.sport==='keirin'&&session&&session.expires>Date.now()&&session.cookie)headers.Cookie=session.cookie;
   if(t.form)headers['Content-Type']='application/x-www-form-urlencoded';
   const result=await collect(entry.at,this.env,{...t,headers});
+  // Successful anonymous initialization does not require a Set-Cookie header.
+  // Redelivery retains the original receipt time, so it cannot refresh readiness.
+  await this.rememberKeirinGuest(t,result);
   if(t.sport==='keirin'&&result.response_headers){const cookie=result.response_headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');
    if(cookie)await this.ctx.storage.put('guest-session',{cookie,expires:Date.now()+config.guest_session_seconds*1000});}
   if(result.status==='WAIT_OR_BLOCKED'){await this.ctx.storage.setAlarm(Date.now()+config.request_spacing_seconds*1000);return;}

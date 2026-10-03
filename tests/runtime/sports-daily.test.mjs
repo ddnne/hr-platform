@@ -72,15 +72,15 @@ const doScript=(await build({stdin:{contents:`import {SportsCollector} from './w
 export class DailyTest extends SportsCollector {
  constructor(ctx,env){let failed=false;super(ctx,env.TEST_FAULT==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async(...a)=>{if(!failed){failed=true;throw new Error('SYNTHETIC_PUBLISH_FAULT');}return env.INDEX.batch(...a);}}}:env);}
  async seed(s,entries){await this.ctx.storage.put({'daily-state':s,'daily-sport':s.sport});if(entries)await this.schedule(entries);}
- async inspect(){return {state:await this.ctx.storage.get('daily-state'),plan:await this.planState()};}
- async step(now,enabled,session){const clock=Date.now;Date.now=()=>now;try{if(enabled!==undefined)this.env.SPORTS_DAILY_ENABLED=String(enabled);if(session)await this.ctx.storage.put('guest-session',{cookie:'SYNTHETIC',token:'SYNTHETIC',expires:now+3600000});await this.alarm();return this.inspect();}finally{Date.now=clock;}}
+ async inspect(){return {state:await this.ctx.storage.get('daily-state'),plan:await this.planState(),guest_received_at:await this.ctx.storage.get('keirin-guest-received-at')};}
+ async step(now,enabled,session){const clock=Date.now;Date.now=()=>now;try{if(enabled!==undefined)this.env.SPORTS_DAILY_ENABLED=String(enabled);if(session)await this.ctx.storage.put('guest-session',typeof session==='object'?session:{cookie:'SYNTHETIC',token:'SYNTHETIC',expires:now+3600000});await this.alarm();return this.inspect();}finally{Date.now=clock;}}
 }
 export default {async fetch(req,env){const v=await req.json(),s=env.SPORTS.get(env.SPORTS.idFromName(v.sport??'auto'));try{if(v.op==='seed'){await s.seed(v.state,v.entries);return Response.json(true);}if(v.op==='step')return Response.json(await s.step(v.now,v.enabled,v.session));if(v.op==='ensure')return Response.json(await s.ensureDaily(v.sport));return Response.json(await s.inspect());}catch(e){return Response.json({error:e.message},{status:500});}}};`,resolveDir:process.cwd()},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'})).outputFiles[0].text;
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
 async function runtime({enabled=true,fault='',body=autoCatalog}={}){
  const requests=[];const mf=new Miniflare(convertV4MiniflareOptions({name:'sports-daily-test',modules:true,script:doScript,compatibilityDate:'2026-09-28',compatibilityFlags:['nodejs_compat'],
  bindings:{SPORTS_ENABLED:'true',SPORTS_DAILY_ENABLED:String(enabled),SPORTS_PROVIDERS_JSON:'["auto","boat","keirin"]',TEST_FAULT:fault},durableObjects:{SPORTS:{className:'DailyTest',useSQLite:true}},d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),
- outboundService:async req=>{requests.push(req.url);return new Response(typeof body==='function'?await body(req):body);}}));
+ outboundService:async req=>{requests.push(req.url);const value=typeof body==='function'?await body(req):body;return value instanceof Response?value:new Response(value);}}));
  const db=await mf.getD1Database('INDEX');for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
  const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});const result=await r.json();assert.equal(r.status,200,JSON.stringify(result));return result;};
  return {mf,db,call,requests};
@@ -90,6 +90,37 @@ async function fixture(at=Date.now()+60000){
  if(at+900000>=window.end)at=p.businessDay(window.end).start;
  const s=await p.initialDaily('auto',at),e=p.nextDaily(s,at);return {s,e,at:e[0].at};
 }
+for(const expired of [false,true])test('anonymous Keirin guest without Set-Cookie advances the daily catalog; expired='+expired,async()=>{
+ const sample=await fixture(),s=await p.initialDaily('keirin',sample.at-1000),e=p.nextDaily(s,sample.at-1000,false),at=e[0].at,cookies=[];
+ const r=await runtime({body:async req=>{cookies.push(req.headers.get('Cookie'));return req.url.endsWith('/top')?'<html>synthetic public top</html>':JSON.stringify({resultCd:0,RaceList:[]});}});
+ try{await r.call({op:'seed',sport:'keirin',state:s,entries:e});
+ let result=await r.call({op:'step',sport:'keirin',now:at,session:expired?{cookie:'STALE_SYNTHETIC',expires:at-1}:false});
+ for(let i=0;i<5&&r.requests.length<2;i++)result=await r.call({op:'step',sport:'keirin',now:result.plan.alarm_at});
+ assert.equal(r.requests.length,2);assert.ok(r.requests[1].includes('type=JSJ048'));assert.deepEqual(cookies,[null,null]);
+ assert.equal((await r.db.prepare("SELECT count(*) AS n FROM sports_parses WHERE status='PROGRAM_PARSED'").first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+for(const delay of [6000,120000])test('Keirin saved guest recovery retains original receipt and old redelivery cannot renew readiness; delay='+delay,async()=>{
+ const sample=await fixture(),s=await p.initialDaily('keirin',sample.at-1000),e=p.nextDaily(s,sample.at-1000,false),at=e[0].at;
+ const r=await runtime({fault:'publish',body:'<html>synthetic public top</html>'});
+ try{await r.call({op:'seed',sport:'keirin',state:s,entries:e});
+ const failed=await r.call({op:'step',sport:'keirin',now:at});assert.equal(failed.guest_received_at,undefined);assert.equal(r.requests.length,1);
+ const recovered=await r.call({op:'step',sport:'keirin',now:at+delay});assert.equal(Date.parse(recovered.guest_received_at),at);assert.equal(r.requests.length,1);
+ await r.call({op:'seed',sport:'keirin',state:s});
+ const later=await r.call({op:'step',sport:'keirin',now:at+(config.guest_session_seconds+1)*1000});
+ assert.equal(later.guest_received_at,recovered.guest_received_at);assert.equal(r.requests.length,1);
+ const waiting=await r.call({op:'step',sport:'keirin',now:later.plan.alarm_at});
+ assert.equal(waiting.state.report.status,'GUEST_WAIT');assert.equal(r.requests.length,1);
+ }finally{await r.mf.dispose();}
+});
+test('Keirin unsuccessful top keeps catalog waiting and does not record readiness',async()=>{
+ const sample=await fixture(),s=await p.initialDaily('keirin',sample.at-1000),e=p.nextDaily(s,sample.at-1000,false),at=e[0].at;
+ const r=await runtime({body:()=>new Response('synthetic unavailable',{status:500})});
+ try{await r.call({op:'seed',sport:'keirin',state:s,entries:e});const failed=await r.call({op:'step',sport:'keirin',now:at});
+ assert.equal(failed.guest_received_at,undefined);const waiting=await r.call({op:'step',sport:'keirin',now:failed.plan.alarm_at});
+ assert.equal(waiting.state.report.status,'GUEST_WAIT');assert.equal(r.requests.length,1);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,0);
+ }finally{await r.mf.dispose();}
+});
 test('daily disabled does not arm discovery; finite reservation remains unchanged',async()=>{
  const r=await runtime({enabled:false});try{assert.equal(await r.call({op:'ensure',sport:'auto'}),'DISABLED');assert.equal((await r.call({})).plan.pending,0);assert.equal(r.requests.length,0);}finally{await r.mf.dispose();}
 });

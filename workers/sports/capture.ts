@@ -28,7 +28,7 @@ export function validateTarget(t:Target):void {
   const b=JSON.parse(t.body);if(Object.keys(b).sort().join(',')!=='placeCode,raceDate,raceNo'||!Number.isInteger(b.placeCode)||!Number.isInteger(b.raceNo)||!/^\d{4}-\d{2}-\d{2}$/.test(b.raceDate))throw new Error('READ_POST_BODY');
   if(t.race_id!==`auto:${b.raceDate.replaceAll('-','')}:${b.placeCode}:${b.raceNo}`)throw new Error('RACE_ID');}
 }
-export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers}> {
+export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
  validateTarget(t);
  const resource=await resourceId(t),event=`sports:${t.sport}:${at}:${resource}`,source=sourceFor(t.sport),started=Date.now();
  const active=env.SPORTS_ENABLED==='true'&&JSON.parse(env.SPORTS_PROVIDERS_JSON).includes(t.sport);
@@ -46,9 +46,9 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
     env.INDEX.prepare("UPDATE captures SET status='FAILED',error_code='INCOMPLETE_FETCH' WHERE event_id=? AND status='FETCHING'").bind(event),
     env.INDEX.prepare('UPDATE source_control SET blocked=1 WHERE source=?').bind(source)]);
   }
-  const saved=await env.INDEX.prepare('SELECT raw_sha256 FROM raw_observations WHERE observation_id=?').bind(event).first<{raw_sha256:string}>();
+  const saved=await env.INDEX.prepare('SELECT raw_sha256,received_at FROM raw_observations WHERE observation_id=?').bind(event).first<{raw_sha256:string;received_at:string}>();
   if(saved&&normalizationKind(t))await normalize(env,event,t);
-  return {status:saved?'RAW_STORED':prior.status,event_id:event};
+  return {status:saved?'RAW_STORED':prior.status,event_id:event,...saved?{received_at:saved.received_at}:{}};
  }
  if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000){
   await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'MISSED_WINDOW')").bind(event,iso(at)).run();return {status:'MISSED_WINDOW',event_id:event};}
@@ -77,7 +77,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
    dataset_kind:`SPORT_${t.sport.toUpperCase()}_${t.kind.toUpperCase()}`,url:t.url,race_id:t.race_id,target:safeTarget};
   await saveCapture(env,m,present?null:body,started);
   if(normalizationKind(t))await normalize(env,event,t);
-  return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers};
+  return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers,received_at:received};
  }catch(e){const reason=e instanceof Error?e.message:'';
   if(reason==='GUEST_FORMAT')stop=true;
   const code=['GUEST_FORMAT','SOURCE_DENIED','RATE_LIMITED','HTTP_ERROR','MISSED_WINDOW','CHALLENGE','BODY_LIMIT','BODY_EMPTY'].includes(reason)?reason:stage==='STORAGE'?'STORAGE_ERROR':controller.signal.aborted?'FETCH_TIMEOUT':'NETWORK_ERROR';
