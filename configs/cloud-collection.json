@@ -1,9 +1,10 @@
 {
-  "version": "nar-cloud-daily-v1",
+  "version": "nar-cloud-daily-v2",
   "timezone_offset_minutes": 540,
   "day_start": "07:00",
   "day_end": "23:00",
   "race_refresh_seconds": 1800,
+  "race_refresh_deferral_seconds": 300,
   "monthly_capture_time": "10:00",
   "monthly_min_interval_seconds": 86400,
   "request_timeout_seconds": 20,

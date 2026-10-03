@@ -1,6 +1,5 @@
 /** Small prospective evidence plans. Transport and provider controls stay in capture.ts. */
 import policy from "../../configs/cloud-collection.json";
-import collection from "../../configs/collection.json";
 import schedule from "../../configs/cloud-paper-schedule.json";
 
 export type PageTarget = {kind: "state" | "payout"; url: string; race_id: string};
@@ -99,10 +98,12 @@ export async function registerEvidenceBatch(env: Env, entries: (EvidenceTarget &
   return rows.map(e => e.event_id);
 }
 
-export async function nextPage(env: Env, nextRegularAt: number, earliestAt: number | null = null): Promise<PagePlan | null> {
+export async function nextPage(env: Env, latestAt: number, earliestAt: number | null = null,
+  kind: EvidenceTarget["kind"] | null = null): Promise<PagePlan | null> {
   // A page consumes a regular provider slot. It never adds a parallel request.
   // Keep an expired plan's original time, so capture records a gap without fetching.
   return env.INDEX.prepare(`SELECT p.* FROM page_capture_plans p LEFT JOIN captures c USING(event_id)
-    WHERE c.event_id IS NULL AND p.at<=? AND (? IS NULL OR p.at>=?) ORDER BY p.at,p.event_id LIMIT 1`)
-    .bind(nextRegularAt + collection.interval_seconds * 1000, earliestAt, earliestAt).first<PagePlan>();
+    WHERE c.event_id IS NULL AND p.at<=? AND (? IS NULL OR p.at>=?) AND (? IS NULL OR p.kind=?)
+    ORDER BY p.at,p.event_id LIMIT 1`)
+    .bind(latestAt, earliestAt, earliestAt, kind, kind).first<PagePlan>();
 }

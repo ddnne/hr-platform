@@ -534,6 +534,96 @@ const packet=(at,race=1)=>[
  {at:at+120000,kind:'race',race_id:target('state',race).race_id,url:'https://www.keiba.go.jp/KeibaWeb/DataDownload/RaceDataDownload?type=daily'},
  {at:at+1200000,...target('payout',race)}];
 
+async function savedPacket(r,at) {
+ for(const entry of packet(at)) await r.db.prepare(
+  'INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+  .bind(`nar-daily-${entry.kind}:${entry.at}`,entry.at,entry.kind,entry.url,entry.race_id,new Date(at-900000).toISOString()).run();
+}
+
+test('nearby reserved race replaces duplicate refresh and keeps odds before and after evidence',async()=>{
+ const r=await runtime([{body:zip},{body:zip},{body:zip},
+  {body:'<html>SYNTHETIC state</html>',headers:{'content-type':'text/html'}},{body:zip},{body:zip}]);
+ try{
+  const stateAt=Date.parse('2000-01-01T08:07:00Z'),asof=stateAt+300000;
+  await r.drive(stateAt-1980000,'race',stateAt-1980000);
+  await savedPacket(r,stateAt);
+  const first=await r.drive(stateAt-300000,'odds',stateAt-300000);
+  assert.equal(first.job.kind,'odds');assert.equal(first.job.at,stateAt-120000);
+  const stable=await(await r.mf.dispatchFetch('http://local/ensure?now='+(stateAt-240000))).json();
+  assert.deepEqual(stable.job,first.job);assert.equal(stable.alarm,first.alarm);
+  const before=await r.drive(first.job.at,'odds',first.job.at);
+  assert.equal(before.job.kind,'state');assert.equal(before.job.at,stateAt);
+  const state=await r.drive(stateAt,'state',stateAt);
+  assert.equal(state.job.kind,'race');assert.equal(state.job.at,stateAt+120000);
+  const race=await r.drive(state.job.at,'race',state.job.at);
+  assert.equal(race.job.kind,'odds');assert.equal(race.job.at,asof-60000);
+  await r.drive(race.job.at,'odds',race.job.at);
+  const rows=(await r.db.prepare("SELECT received_at FROM raw_observations WHERE dataset_kind='DAILY_SNAPSHOT' ORDER BY received_at").all()).results;
+  assert.equal(rows.length,3);assert.equal(Date.parse(rows[1].received_at),stateAt-120000);
+  assert.equal(asof-120000-Date.parse(rows[1].received_at),300000);
+  assert.equal(Date.parse(rows[2].received_at),asof-60000);
+  assert.equal(r.requests.filter(x=>x.url.includes('RaceDataDownload')).length,2);
+  assert.equal(r.requests.length,6);
+ }finally{await r.mf.dispose();}
+});
+
+test('ensure shares the slot adjustment, remains stable and follows a future reservation change',async()=>{
+ const r=await runtime([{body:zip},{body:zip}]);
+ try{
+  const stateAt=Date.parse('2000-01-01T08:07:00Z');
+  await r.drive(stateAt-1980000,'race',stateAt-1980000);
+  const old=await r.drive(stateAt-300000,'odds',stateAt-300000);
+  assert.equal(old.job.kind,'race');assert.equal(old.job.at,stateAt-180000);
+  await savedPacket(r,stateAt);
+  const ensure=async()=>(await r.mf.dispatchFetch('http://local/ensure?now='+(stateAt-240000))).json();
+  const aligned=await ensure();assert.equal(aligned.job.kind,'odds');assert.equal(aligned.job.at,stateAt-120000);
+  assert.deepEqual(await ensure(),aligned);
+  await r.db.prepare('DELETE FROM page_capture_plans').run();await savedPacket(r,stateAt+60000);
+  const revised=await ensure();assert.equal(revised.job.kind,'odds');assert.equal(revised.job.at,stateAt-60000);
+  assert.deepEqual(await ensure(),revised);assert.equal(r.requests.length,2);
+ }finally{await r.mf.dispose();}
+});
+
+test('alignment retains response waits even when bounded delays miss the fixed input time',async()=>{
+ const r=await runtime([{body:zip},{body:zip},{body:zip},
+  {body:'<html>SYNTHETIC state</html>',headers:{'content-type':'text/html'}},{body:zip}]);
+ try{
+  const stateAt=Date.parse('2000-01-01T08:07:00Z');
+  await r.drive(stateAt-1980000,'race',stateAt-1980000);await savedPacket(r,stateAt);
+  const first=await r.drive(stateAt-300000,'odds',stateAt-300000);
+  const before=await r.drive(first.job.at,'odds',first.job.at+20000);
+  assert.equal(before.job.at,stateAt);assert.equal(before.alarm,stateAt+20000);
+  const state=await r.drive(stateAt,'state',stateAt+40000);
+  assert.equal(state.job.at,stateAt+120000);assert.equal(state.alarm,stateAt+160000);
+  const race=await r.drive(state.job.at,'race',state.job.at+60000);
+  assert.equal(race.job.kind,'odds');assert.equal(race.job.at,stateAt+300000);
+  assert.equal((await r.db.prepare('SELECT next_allowed_at FROM source_control').first()).next_allowed_at,race.job.at);
+  assert.equal(r.requests.length,5);
+ }finally{await r.mf.dispose();}
+});
+
+test('an earlier payout reservation is not skipped to manufacture a pre-state odds slot',async()=>{
+ const r=await runtime([{body:zip},{body:zip}]);
+ try{
+  const stateAt=Date.parse('2000-01-01T08:07:00Z');
+  await r.drive(stateAt-1980000,'race',stateAt-1980000);await savedPacket(r,stateAt);
+  const payoutAt=stateAt-150000;
+  await r.db.prepare('INSERT INTO page_capture_plans(event_id,at,kind,url,race_id,registered_at) VALUES(?,?,?,?,?,?)')
+   .bind('nar-daily-payout:'+payoutAt,payoutAt,'payout',target('payout',2).url,target('payout',2).race_id,new Date(payoutAt-900000).toISOString()).run();
+  const next=await r.drive(stateAt-300000,'odds',stateAt-300000);
+  assert.equal(next.job.kind,'payout');assert.equal(next.job.at,payoutAt);assert.equal(r.requests.length,2);
+ }finally{await r.mf.dispose();}
+});
+
+test('nearby reservations do not defer the first race bundle of the day',async()=>{
+ const r=await runtime([{body:zip}]);
+ try{
+  const stateAt=Date.parse('2000-01-01T08:07:00Z');await savedPacket(r,stateAt);
+  const next=await r.drive(stateAt-300000,'odds',stateAt-300000);
+  assert.equal(next.job.kind,'race');assert.equal(next.job.at,stateAt-180000);
+ }finally{await r.mf.dispose();}
+});
+
 test('input packets are reserved completely or rejected without partial rows',async()=>{
  const r=await runtime([]);
  try{
