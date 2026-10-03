@@ -52,18 +52,19 @@ test('boat current and legacy time classes retain display phase without inventin
   assert.equal(parser.parseBoat(fake,target).phase,'UNKNOWN');
  }
 });
-const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
+const bundle=await build({stdin:{contents:`import {collect,validateTarget} from './workers/sports/capture';import {history,normalize,savedProgram,closedOddsSaved} from './workers/sports/storage';import {discoveryTargets} from './workers/sports/discovery-plan';import {capture} from './workers/ingestion/capture';
 export {SportsControl} from './workers/sports/index';
 export default {async fetch(req,env){const v=await req.json();
  if(v.op==='oddsPlan'){try{return Response.json(JSON.parse(await env.CONTROL.oddsPlan(v.event,v.race_id,v.at,v.runners)));}catch(e){return Response.json({error:e.message});}}
  if(v.op==='nar'){await capture(v.at,env);return new Response('ok');}
+ if(v.op==='closedOdds')return Response.json(await closedOddsSaved(env,v.event));
  if(v.op==='scopedHistory')return Response.json(await history(env,v.sport,v.race_id,v.cutoff,100,'',v.kind));
  if(v.op==='history')return Response.json(await history(env,'auto','auto:20000101:6:8',v.cutoff,100,'',v.kind??'odds'));
  if(v.op==='reparse'){const store=v.fault==='context'?{...env,RAW:{get:async(k)=>{if(k==='manifests/'+v.context+'.json')throw new Error('R2_TEMPORARY');return env.RAW.get(k);},put:env.RAW.put.bind(env.RAW)}}:env;
  try{return new Response(await normalize(store,v.event,v.target,v.version));}catch(e){return new Response(e.message,{status:503});}}
  if(v.op==='programPlan'){try{const s=await savedProgram(env,v.event,v.now??Date.now());return Response.json({...s,plan:discoveryTargets(s.value,v.event)});}catch(e){return Response.json({error:e.message});}}
  const bindings=v.fault==='publish'?{...env,INDEX:{prepare:env.INDEX.prepare.bind(env.INDEX),batch:async()=>{throw new Error('INDEX_FAILED');}}}:v.fault==='normalized'?{...env,RAW:{head:env.RAW.head.bind(env.RAW),get:env.RAW.get.bind(env.RAW),put:async(k,b)=>{if(k.startsWith('sports/normalized/'))throw new Error('R2_FAILED');return env.RAW.put(k,b);}}}:env;
- return Response.json(await collect(v.at,bindings,v.target));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ return Response.json(await collect(v.at,bindings,v.target,undefined,v.parallel===true));}};`,resolveDir:process.cwd(),sourcefile:'sports-harness.ts'},external:['cloudflare:workers'],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
 const schema=(await Promise.all(['0001_capture','0002_processing_metrics','0010_sports_history'].map(n=>readFile('migrations/'+n+'.sql','utf8')))).join('\n');
 const settings=JSON.parse(await readFile('configs/sports-collection.json','utf8'));
 const nextProgramVersion=settings.program_parser_version.replace(/\d+$/,v=>String(Number(v)+1));
@@ -73,13 +74,50 @@ async function runtime(responses=[],enabled=true,doClass=null){
  ...(doClass?{durableObjects:{SPORTS:{className:doClass,useSQLite:true}}}:{}),
  ...(!doClass?{serviceBindings:{CONTROL:{name:'sports',entrypoint:'SportsControl'}}}:{}),
  bindings:{SPORTS_ENABLED:String(enabled),SPORTS_PROVIDERS_JSON:'["auto","boat","keirin"]',COLLECTION_ENABLED:'true',SOURCE_APPROVED:'true'},d1Databases:['INDEX'],r2Buckets:['RAW'],log:new Log(LogLevel.NONE),
- outboundService:async req=>{requests.push({url:req.url,method:req.method,body:await req.text(),cookie:req.headers.get('Cookie')});const matching=responses.findIndex(r=>r.route&&req.url.includes(r.route));const r=responses.splice(matching<0?0:matching,1)[0];if(r instanceof Error)throw r;if(!r)throw new Error('UNEXPECTED_FETCH');return new Response(r.body??autoBody(),{status:r.status??200,headers:r.headers});}}));
+ outboundService:async req=>{requests.push({url:req.url,method:req.method,body:await req.text(),cookie:req.headers.get('Cookie')});const matching=responses.findIndex(r=>r.route&&req.url.includes(r.route));const r=responses.splice(matching<0?0:matching,1)[0];if(r instanceof Error)throw r;if(!r)throw new Error('UNEXPECTED_FETCH');if(typeof r==='function')return r(req);return new Response(r.body??autoBody(),{status:r.status??200,headers:r.headers});}}));
  const db=await mf.getD1Database('INDEX');for(const s of schema.replace(/^--.*$/gm,'').split(';').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
  const call=async v=>{const r=await mf.dispatchFetch('http://test/',{method:'POST',body:JSON.stringify(v)});assert.equal(r.status,200);return r;};
- const tick=async(at=Date.now(),t=target)=>(await call({at,target:t})).json();
+ const tick=async(at=Date.now(),t=target,parallel=false)=>(await call({at,target:t,parallel})).json();
  const reset=()=>db.prepare("UPDATE source_control SET next_allowed_at=0 WHERE source LIKE 'sports-%'").run();
  return {mf,db,requests,tick,reset,call};
 }
+test('atomic shared provider cap permits four simultaneous races and refuses a fifth until release',async()=>{
+ let release;const hold=new Promise(resolve=>release=resolve);let active=0,peak=0;
+ const r=await runtime(Array.from({length:settings.maximum_parallel_requests},()=>async()=>{active++;peak=Math.max(peak,active);await hold;active--;return new Response(autoBody());}));
+ const at=Date.now(),targets=Array.from({length:settings.maximum_parallel_requests+1},(_,i)=>({...target,race_id:`auto:20000101:6:${i+1}`,body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:i+1})}));
+ const pending=targets.map(t=>r.tick(at,t,true));
+ try{
+  for(let i=0;i<500&&r.requests.length<settings.maximum_parallel_requests;i++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal(peak,settings.maximum_parallel_requests);assert.equal(r.requests.length,settings.maximum_parallel_requests);
+  assert.equal((await r.db.prepare("SELECT count(*) AS n FROM captures WHERE status='FETCHING'").first()).n,settings.maximum_parallel_requests);
+  release();const results=await Promise.all(pending);assert.equal(results.filter(r=>r.status==='WAIT_OR_BLOCKED').length,1);
+  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,settings.maximum_parallel_requests);
+  assert.equal((await r.db.prepare("SELECT count(*) AS n FROM captures WHERE status='FETCHING'").first()).n,0);
+ }finally{release();await Promise.allSettled(pending);await r.mf.dispose();}
+});
+for(const status of [403,429])test('parallel '+status+' preserves the shared provider stop/wait and leaves NAR enabled',async()=>{
+ let deniedRelease,successRelease;
+ const deniedHold=new Promise(resolve=>deniedRelease=resolve),successHold=new Promise(resolve=>successRelease=resolve);
+ const r=await runtime([async()=>{await deniedHold;return new Response('synthetic denial',{status,headers:{'retry-after':'600'}});},async()=>{await successHold;return new Response(autoBody());}]);
+ const at=Date.now(),other={...target,race_id:'auto:20000101:6:7',body:JSON.stringify({placeCode:6,raceDate:'2000-01-01',raceNo:7})};
+ const first=r.tick(at,target,true),second=r.tick(at,other,true);
+ try{
+ for(let i=0;i<500&&r.requests.length<2;i++)await new Promise(resolve=>setTimeout(resolve,2));assert.equal(r.requests.length,2);
+ deniedRelease();const until=Date.now()+5000;let rejected;while(!(rejected=await r.db.prepare("SELECT status FROM captures WHERE error_code=?").bind(status===403?'SOURCE_DENIED':'RATE_LIMITED').first())&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,2));assert.ok(rejected);
+ const floor=(await r.db.prepare("SELECT * FROM source_control WHERE source='sports-auto'").first()).next_allowed_at;
+ successRelease();await Promise.all([first,second]);
+ const gate=await r.db.prepare("SELECT * FROM source_control WHERE source='sports-auto'").first();
+ assert.equal(gate.blocked,status===403?1:0);if(status===429){assert.ok(gate.next_allowed_at>=at+600000);assert.ok(gate.next_allowed_at>=floor);}
+ assert.equal((await r.tick(at+1,other,true)).status,'WAIT_OR_BLOCKED');assert.equal(r.requests.length,2);
+ assert.equal((await r.db.prepare("SELECT blocked FROM source_control WHERE source='nar-daily-odds'").first()).blocked,0);
+ }finally{deniedRelease();successRelease();await Promise.allSettled([first,second]);await r.mf.dispose();}
+});
+
+test('a queued intermediate request cannot start after its advertised deadline even inside the capture window',async()=>{
+ const r=await runtime();try{const at=Date.now()-1000,result=await r.tick(at,{...target,deadline_at:at+500},true);
+ assert.equal(result.status,'MISSED_WINDOW');assert.equal(r.requests.length,0);
+ }finally{await r.mf.dispose();}
+});
 test('an unrecognized boat time label records a format signal and keeps the earlier cutoff unchanged',async()=>{
  const t={sport:'boat',race_id:'boat:20000101:1:1',kind:'odds',market:'trifecta',
   url:'https://www.boatrace.jp/owpc/pc/race/odds3t?hd=20000101&jcd=01&rno=1'};
@@ -105,6 +143,22 @@ test('append same body at a later time, redelivery is silent, changed recovery a
  await r.call({op:'reparse',event:one.event_id,target,version:'sports-odds-v2'});
  assert.deepEqual(await (await r.call({op:'history',cutoff:cut})).json(),before);
  assert.equal((await r.db.prepare("SELECT count(*) AS n FROM captures WHERE status='FAILED'").first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+test('closing evidence uses the latest parse for its own observation and cannot change past history',async()=>{
+ const r=await runtime([{body:autoBody()},{body:autoBody('5.0',1)}]);try{
+ const first=await r.tick();await r.reset();const cut=new Date().toISOString();
+ const before=await (await r.call({op:'history',cutoff:cut})).json();
+ assert.equal(await (await r.call({op:'closedOdds',event:first.event_id})).json(),false);
+ await new Promise(resolve=>setTimeout(resolve,2));const last=await r.tick();
+ assert.equal(await (await r.call({op:'closedOdds',event:last.event_id})).json(),true);
+ assert.deepEqual(await (await r.call({op:'history',cutoff:cut})).json(),before);
+ const row=await r.db.prepare('SELECT * FROM sports_parses WHERE observation_id=?').bind(last.event_id).first();
+ for(const [version,status,key] of [['sports-odds-v9','COMPLETE',row.normalized_key],['sports-odds-v10','PARSE_ERROR',null]]){
+  await r.db.prepare('INSERT INTO sports_parses VALUES(?,?,?,?,?,?,?,?,?,?)').bind(row.observation_id,version,row.sport,row.race_id,row.resource_id,row.parsed_at,row.available_at,status,key,null).run();
+ }
+ assert.equal(await (await r.call({op:'closedOdds',event:last.event_id})).json(),false);
+ assert.equal(r.requests.length,2);assert.equal((await r.db.prepare('SELECT count(*) AS n FROM raw_observations').first()).n,2);
  }finally{await r.mf.dispose();}
 });
 for(const status of [403,419,429])test('provider '+status+' is isolated from NAR and stops or waits',async()=>{

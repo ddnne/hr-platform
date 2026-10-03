@@ -16,6 +16,7 @@ export function validateTarget(t:Target):void {
  const [,day,venue,no]=t.race_id.split(':');date(day);
  if(['odds','result'].includes(t.kind)&&(Number(venue)<1||Number(venue)>config.discovery.maximum_venue_number||Number(no)<1||Number(no)>config.discovery.maximum_race_number))throw new Error('RACE_ID');
  if(t.discovery_stage!==undefined&&(!['venue','race'].includes(t.discovery_stage)||!['schedule','guest'].includes(t.kind)))throw new Error('DISCOVERY_STAGE');
+ if(t.deadline_at!==undefined&&(t.kind!=='odds'||!Number.isSafeInteger(t.deadline_at)))throw new Error('CAPTURE_DEADLINE');
  if(t.sport==='boat'&&['odds','result'].includes(t.kind)){const race=`boat:${u.searchParams.get('hd')}:${Number(u.searchParams.get('jcd'))}:${Number(u.searchParams.get('rno'))}`;if(t.race_id!==race)throw new Error('RACE_ID');}
  if(t.kind==='result'&&!supportsResult(t))throw new Error('RESULT_RESOURCE');
  if(t.sport==='auto'&&u.pathname==='/race_info/RaceResult'&&t.kind!=='result')throw new Error('RESULT_RESOURCE');
@@ -28,7 +29,7 @@ export function validateTarget(t:Target):void {
   const b=JSON.parse(t.body);if(Object.keys(b).sort().join(',')!=='placeCode,raceDate,raceNo'||!Number.isInteger(b.placeCode)||!Number.isInteger(b.raceNo)||!/^\d{4}-\d{2}-\d{2}$/.test(b.raceDate))throw new Error('READ_POST_BODY');
   if(t.race_id!==`auto:${b.raceDate.replaceAll('-','')}:${b.placeCode}:${b.raceNo}`)throw new Error('RACE_ID');}
 }
-export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
+export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body:Uint8Array,headers:Headers)=>Promise<void>,parallel=false,deadline=t.deadline_at):Promise<{status:string;event_id:string;body?:Uint8Array;response_headers?:Headers;received_at?:string}> {
  validateTarget(t);
  const resource=await resourceId(t),event=`sports:${t.sport}:${at}:${resource}`,source=sourceFor(t.sport),started=Date.now();
  const active=env.SPORTS_ENABLED==='true'&&JSON.parse(env.SPORTS_PROVIDERS_JSON).includes(t.sport);
@@ -50,18 +51,30 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
   if(saved&&normalizationKind(t))await normalize(env,event,t);
   return {status:saved?'RAW_STORED':prior.status,event_id:event,...saved?{received_at:saved.received_at}:{}};
  }
- if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000){
+ if(!Number.isSafeInteger(at)||Date.now()<at||Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline){
   await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,status) VALUES(?,?,'MISSED_WINDOW')").bind(event,iso(at)).run();return {status:'MISSED_WINDOW',event_id:event};}
  await env.INDEX.prepare('INSERT OR IGNORE INTO source_control(source) VALUES(?)').bind(source).run();
- const claim=await env.INDEX.prepare('UPDATE source_control SET owner_event_id=?,next_allowed_at=? WHERE source=? AND blocked=0 AND next_allowed_at<=?')
-  .bind(event,Date.now()+(config.request_timeout_seconds+config.request_spacing_seconds)*1000,source,Date.now()).run();
- if(!claim.meta.changes)return {status:'WAIT_OR_BLOCKED',event_id:event};
- const insertion=await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,fetch_started_at,status) VALUES(?,?,?,'FETCHING')").bind(event,iso(at),iso(Date.now())).run();
+ let insertion;
+ if(parallel){
+  // The single atomic insert shares the provider stop/wait and concurrency cap.
+  // FETCHING remains claimed through raw publication, including crash recovery.
+  insertion=await env.INDEX.prepare(`INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,fetch_started_at,status)
+   SELECT ?,?,?,'FETCHING' WHERE EXISTS(SELECT 1 FROM source_control WHERE source=? AND blocked=0 AND next_allowed_at<=?)
+   AND (SELECT count(*) FROM captures WHERE status='FETCHING' AND event_id GLOB ?)<?`)
+   .bind(event,iso(at),iso(Date.now()),source,Date.now(),`sports:${t.sport}:*`,config.maximum_parallel_requests).run();
+  if(!insertion.meta.changes)return {status:'WAIT_OR_BLOCKED',event_id:event};
+ }else {
+  const claim=await env.INDEX.prepare(`UPDATE source_control SET owner_event_id=?,next_allowed_at=? WHERE source=? AND blocked=0 AND next_allowed_at<=?
+   AND NOT EXISTS(SELECT 1 FROM captures WHERE status='FETCHING' AND event_id GLOB ?)`)
+   .bind(event,Date.now()+(config.request_timeout_seconds+config.request_spacing_seconds)*1000,source,Date.now(),`sports:${t.sport}:*`).run();
+  if(!claim.meta.changes)return {status:'WAIT_OR_BLOCKED',event_id:event};
+  insertion=await env.INDEX.prepare("INSERT OR IGNORE INTO captures(event_id,scheduled_capture_at,fetch_started_at,status) VALUES(?,?,?,'FETCHING')").bind(event,iso(at),iso(Date.now())).run();
+ }
  if(!insertion.meta.changes)return {status:'DUPLICATE',event_id:event};
  let http:number|null=null,headersAt:string|null=null,received:string|null=null,stop=false,stage='HTTP';
- const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),config.request_timeout_seconds*1000);
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(config.request_timeout_seconds*1000,(deadline??Infinity)-Date.now())));
  try {
-  if(Date.now()-at>config.capture_window_seconds*1000)throw new Error('MISSED_WINDOW');
+  if(Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline)throw new Error('MISSED_WINDOW');
   const response=await fetchPublic(t.url,t.sport==='boat'||t.kind==='guest'?'text/html':'application/json',controller.signal,t.headers,t.body);
   http=response.status;headersAt=iso(Date.now());
   if([401,403,419].includes(http)||response.headers.get('cf-mitigated')==='challenge'){stop=true;await discard(response);throw new Error('SOURCE_DENIED');}
@@ -87,6 +100,6 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
  }finally{clearTimeout(timer);await env.INDEX.prepare('UPDATE source_control SET blocked=max(blocked,?),next_allowed_at=max(next_allowed_at,?) WHERE source=?')
    .bind(Number(stop),Date.now()+config.request_spacing_seconds*1000,source).run();
   // Release only this request's lease. A 429 keeps the durable Retry-After floor.
-  if(http!==429)await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=? WHERE source=? AND owner_event_id=?')
+  if(!parallel&&http!==429)await env.INDEX.prepare('UPDATE source_control SET next_allowed_at=? WHERE source=? AND owner_event_id=?')
    .bind(Date.now()+config.request_spacing_seconds*1000,source,event).run();}
 }

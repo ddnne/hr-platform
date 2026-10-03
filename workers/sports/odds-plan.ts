@@ -5,7 +5,7 @@ import {contextNavigation} from './context';
 import {programRaces,type Program} from './discovery';
 import type {Target} from './types';
 type Source={value:Program;target:Target};
-export function oddsTargets(source:Source,raceId:string,at:number,runners?:Source) {
+export function oddsTargets(source:Source,raceId:string,at:number,runners?:Source,purpose:'INTERMEDIATE'|'CLOSED'='INTERMEDIATE') {
  const {value,target}=source,program=value.program,targets:Target[]=[],deferred:{race_id:string;reason:string;market?:string}[]=[],not_offered:{market:string;source_label:string}[]=[];
  validateTarget(target);if(runners)validateTarget(runners.target);
  const defer=(reason:string,market?:string)=>deferred.push({race_id:raceId,reason,...(market?{market}:{})});
@@ -39,10 +39,12 @@ export function oddsTargets(source:Source,raceId:string,at:number,runners?:Sourc
     url:config.sources.keirin.origin+config.sources.keirin.json_path+'?'+new URLSearchParams({type:config.sources.keirin.odds_json_type,encp:navigation,kake,mode:'0'})});
   }
  }
- // Leave the whole race unbooked if even one page would be scheduled after the advertised cutoff.
- if(!Number.isSafeInteger(at)||at+(targets.length-1)*config.request_spacing_seconds*1000>=Date.parse(race.close_at)){
-  targets.length=0;defer('OUTSIDE_PRE_CLOSE_WINDOW');
+ // The purpose constrains request times; the provider response determines its phase.
+ const close=Date.parse(race.close_at),last=at+(targets.length-1)*config.request_spacing_seconds*1000;
+ if(!Number.isSafeInteger(at)||(purpose==='INTERMEDIATE'?last>=close:
+  at<close+config.daily.final_odds_delay_seconds*1000||last>close+config.daily.final_odds_window_seconds*1000)){
+  targets.length=0;defer(purpose==='INTERMEDIATE'?'OUTSIDE_PRE_CLOSE_WINDOW':'OUTSIDE_CLOSED_ODDS_WINDOW');
  }
- for(const t of targets)validateTarget(t);
+ for(const t of targets){if(purpose==='INTERMEDIATE')t.deadline_at=close;validateTarget(t);}
  return {targets,deferred,not_offered};
 }

@@ -4,7 +4,7 @@ import {parseOdds} from './parsers';
 import {parseProgram,supportsProgram,type Program} from './discovery';
 import {parseResult,supportsResult} from './results';
 import {validateContext,requiresContext,RaceContextError} from './context';
-import type {Sport,Target} from './types';
+import type {Sport,Target,Snapshot,ResultSnapshot} from './types';
 export function normalizationKind(t:Target):'odds'|'program'|'result'|null {
  return supportsProgram(t)?'program':supportsResult(t)?'result':t.kind==='odds'?'odds':null;
 }
@@ -47,6 +47,29 @@ export async function normalize(env:CaptureStorage,event:string,target:Target,ve
 }
 export async function resourceId(t:Target):Promise<string> {
  return digest(new TextEncoder().encode(JSON.stringify([t.sport,t.race_id,t.kind,t.url,t.body??null])));
+}
+export async function closedOddsSaved(env:CaptureStorage,event:string):Promise<boolean> {
+ const value=await completedBody<Snapshot>(env,event,'odds','COMPLETE');
+ return !!value&&value.schema==='sports-odds-v1'&&['FINAL_ONLY','CLOSE_ONLY'].includes(value.phase)&&value.markets.length>0&&value.markets.every(m=>m.complete);
+}
+export async function publishedResultSaved(env:CaptureStorage,event:string,markets:string[]):Promise<boolean> {
+ const value=await completedBody<ResultSnapshot>(env,event,'result','RESULT_PARSED');
+ return completePayoutMarkets(value,markets);
+}
+export function completePayoutMarkets(value:ResultSnapshot|null,markets:string[]):boolean {
+ if(!value||value.schema!=='sports-result-v1'||value.publication!=='PUBLISHED')return false;
+ return markets.length>0&&[1,2,3].every(rank=>value.placings.some(p=>p.rank===rank))&&markets.every(m=>{
+  const rows=value.payouts.filter(p=>p.market===m);return rows.length>0&&rows.every(p=>p.status==='NUMERIC'&&p.amount_yen!==null&&p.amount_yen>0);
+ });
+}
+async function completedBody<T>(env:CaptureStorage,event:string,kind:'odds'|'result',status:string):Promise<T|null> {
+ const prefix=`sports-${kind}-v`;
+ const row=await env.INDEX.prepare(`SELECT status,normalized_key FROM sports_parses WHERE observation_id=?
+ AND parser_version LIKE ? ORDER BY available_at DESC,CAST(substr(parser_version,?) AS INTEGER) DESC LIMIT 1`)
+ .bind(event,prefix+'%',prefix.length+1).first<{status:string;normalized_key:string|null}>();
+ if(!row||row.status!==status||!row.normalized_key)return null;
+ const object=await env.RAW.get(row.normalized_key);if(!object)throw new Error('NORMALIZED_MISSING');
+ return object.json<T>();
 }
 export async function savedProgram(env:CaptureStorage,event:string,at=Date.now()) {
  const cutoff=iso(at);
