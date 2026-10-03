@@ -5,7 +5,8 @@ import shutil
 
 from prepare_python_worker import prepare
 
-RESEARCH_FILES = ('cloud_research.py', 'research_suite.py', 'research_alternatives.py', 'research_expansions.py',
+RESEARCH_FILES = ('cloud_research.py', 'research_evaluation.py', 'evaluation.py',
+    'research_suite.py', 'research_alternatives.py', 'research_expansions.py',
     'research_joint_kelly.py', 'research_kelly.py', 'research_neutral.py', 'research_portfolio.py',
     'research_portfolio_scenarios.py', 'research_selection.py', 'research_all_markets.py', 'research_ticket_events.py')
 
