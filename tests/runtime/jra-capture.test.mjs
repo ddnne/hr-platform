@@ -96,10 +96,10 @@ test('JRA results share immutable originals, as-of history, redelivery and saved
   assert.equal(plan.entries.length,1);assert.equal(plan.entries[0].target.kind,'result');
   assert.equal(new URLSearchParams(plan.entries[0].target.body).get('cname'),'pw01sde1005200001010220000101/BB');
   assert.equal((await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:3',at:Date.now()+60000})).deferred[0].reason,'RESULT_NAVIGATION_MISSING');
-  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v3'}),'RESULT_PARSED');
+  assert.equal(await r.call({op:'reparse',event:first.event_id,target:resultTarget,version:'sports-result-v4'}),'RESULT_PARSED');
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);assert.equal(r.requests.length,2);
   const later=new Date().toISOString().replace('Z','000+00:00');
-  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v4',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-result-v5',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
    .bind(later,later,first.event_id,config.result_parser_version).run();
   assert.deepEqual(await r.call({op:'resultPlan',event:first.event_id,race:'jra:20000101:5:2',at:Date.now()+60000}),{error:'RESULT_UNAVAILABLE'});
   assert.deepEqual(await r.call({op:'resultHistory',at:cutoff}),past);
@@ -111,9 +111,9 @@ test('context is fixed to original fetch start, latest failure blocks new fetche
  const second=await r.tick(t,at);assert.equal(second.status,'RAW_STORED');
  await new Promise(resolve=>setTimeout(resolve,3));
  const future=new Date().toISOString().replace('Z','000+00:00');
- await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_PARSER_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
+ await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v4',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_PARSER_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?")
   .bind(future,future,first.event_id,config.parser_version).run();
- assert.equal(await r.call({op:'reparse',event:second.event_id,target:t,version:'sports-odds-v3'}),'COMPLETE');
+ assert.equal(await r.call({op:'reparse',event:second.event_id,target:t,version:'sports-odds-v4'}),'COMPLETE');
  await r.reset();assert.equal((await r.tick(t)).status,'INVALID_CONTEXT');assert.equal(r.requests.length,2);
  await r.db.prepare('DELETE FROM sports_parses WHERE observation_id=?').bind(second.event_id).run();
  await r.db.prepare('DELETE FROM raw_observations WHERE observation_id=?').bind(second.event_id).run();
@@ -128,7 +128,7 @@ for(const change of ['phase','flat'])test('daily context rechecks latest interme
   if(change==='phase')value.phase='FINAL_ONLY';else value.metadata.flat=false;
   const key='synthetic/reparsed-'+change+'.json';await r.raw.put(key,JSON.stringify(value));
   await new Promise(resolve=>setTimeout(resolve,3));const later=new Date().toISOString().replace('Z','000+00:00');
-  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'COMPLETE',?,NULL FROM sports_parses WHERE observation_id=? AND parser_version=?")
+  await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v4',sport,race_id,resource_id,?,?,'COMPLETE',?,NULL FROM sports_parses WHERE observation_id=? AND parser_version=?")
    .bind(later,later,key,first.event_id,config.parser_version).run();
   await r.reset();assert.equal((await r.tick({...target('quinella',first.event_id),context_phase:'INTERMEDIATE'})).status,'INVALID_CONTEXT');assert.equal(r.requests.length,1);
   await r.reset();const finite=await r.tick(target('quinella',first.event_id));
@@ -176,7 +176,7 @@ test('a held JRA request occupies its sole finite slot without allowing a second
 });
 test('temporary raw body I/O failure does not poison a parser version and remains retryable',async()=>{
  const r=await runtime([{}]);try{
- const first=await r.tick(),version='sports-odds-v3';
+ const first=await r.tick(),version='sports-odds-v4';
  assert.deepEqual(await r.call({op:'reparse',event:first.event_id,target:target(),version,bodyIO:true}),{error:'SYNTHETIC_R2_IO'});
  assert.equal((await r.db.prepare('SELECT count(*) AS n FROM sports_parses WHERE observation_id=? AND parser_version=?').bind(first.event_id,version).first()).n,0);
  assert.equal(await r.call({op:'reparse',event:first.event_id,target:target(),version}),'COMPLETE');assert.equal(r.requests.length,1);
@@ -285,8 +285,8 @@ for(const [missingWide,paidPlaces,invalidate] of [[false,3],[true,3],[false,2],[
   const rename=s=>s.replaceAll('20000101',day).replaceAll('20000102',day).replaceAll('2000年1月1日',`${year}年${month}月${date}日`).replaceAll('2000',year);
   let resultRequests=0,retried=false,invalidated=false,oldEvidenceRejected=false;
   const respond=async()=>{const name=new URLSearchParams(r.requests.at(-1).body).get('cname');
-   const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:++resultRequests===1&&missingWide,paidPlaces:oldEvidenceRejected?3:paidPlaces}):
-    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])),{paidPlaces});
+   const body=name.startsWith('pw01sli')?jraResultCatalog:name.startsWith('pw01srl')?jraResultProgram():name.startsWith('pw01sde')?jraResult({missingWide:++resultRequests===1&&missingWide,paidPlaces:oldEvidenceRejected?3:paidPlaces,frameColors:true}):
+    name.startsWith('pw15oli')?jraCatalog.slice(0,jraCatalog.indexOf('<h3>1月2日')):name.startsWith('pw15orl')?jraProgram():jraBody(Object.keys(config.tables).find(p=>name.startsWith(config.navigation_prefixes[p])),{paidPlaces,frameColors:true});
    return new Response(encoded(rename(body)));};
   responses.push(...Array(32).fill(respond));let at=window.start+3600000;
   for(let i=0;i<40;i++){
@@ -294,7 +294,7 @@ for(const [missingWide,paidPlaces,invalidate] of [[false,3],[true,3],[false,2],[
    const context=state.races[`jra:${day}:5:1`]?.final_context;
    if(invalidate&&!invalidated&&context&&Object.values(state.tasks).filter(t=>t.kind==='final_odds').every(t=>t.done)){
     const later=new Date().toISOString().replace('Z','000+00:00');
-    await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v3',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?").bind(later,later,context.event,config.parser_version).run();invalidated=true;
+    await r.db.prepare("INSERT INTO sports_parses SELECT observation_id,'sports-odds-v4',sport,race_id,resource_id,?,?,'PARSE_ERROR',NULL,'SYNTHETIC_FAILURE' FROM sports_parses WHERE observation_id=? AND parser_version=?").bind(later,later,context.event,config.parser_version).run();invalidated=true;
    }
    if(invalidate&&invalidated&&resultRequests===2&&state.tasks[`result:jra:${day}:5:1`]?.last_at){
     assert.notEqual(state.tasks[`result:jra:${day}:5:1`].done,true);oldEvidenceRejected=true;

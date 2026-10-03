@@ -20,9 +20,11 @@ function support(r:JraRunners){
 }
 export function decodeJra(body:Uint8Array):string {return new TextDecoder(config.charset,{fatal:true,ignoreBOM:false}).decode(body);}
 export function jraFrame(raw:string|undefined):number|null {
- const labels=[...(raw??'').matchAll(/<img\b([^>]*)>/gi)].map(m=>attribute(m[1],'alt')?.match(/^枠(\d+)$/)).filter(m=>m);
- if(labels.length!==1)return null;
- const frame=Number(labels[0]![1]);return Number.isInteger(frame)&&frame>=1&&frame<=config.maximum_frames?frame:null;
+ const frames=[...(raw??'').matchAll(/<img\b([^>]*)>/gi)].map(m=>{
+  const label=attribute(m[1],'alt'),entry=Object.entries(config.frame_labels).find(([,labels])=>labels.includes(label??''));
+  return entry?Number(entry[0]):null;
+ }).filter((frame):frame is number=>frame!==null);
+ return frames.length===1&&frames[0]>=1&&frames[0]<=config.maximum_frames?frames[0]:null;
 }
 export function jraMetadata(raw:string,raceId:string):JraSnapshot['metadata'] {
  const ids=[...raw.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map(m=>text(m[1]).match(/(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]*\d+回([^\d]+)\d+日\s*(\d+)レース/)).filter(m=>m!==null);

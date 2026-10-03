@@ -18,12 +18,14 @@ test('official result structure preserves eight payout markets, placings and pub
 });
 test('frame payout matches the leading frames, including the same-frame combination',()=>{
  const good=p.parseResult(jraResult(),resultTarget),wrong=structuredClone(good);
+ const colored=p.parseResult(jraResult({frameColors:true}),resultTarget);
+ assert.deepEqual(colored.placings,good.placings);assert.equal(p.completePayoutMarkets(colored,markets),true);
  wrong.payouts.find(x=>x.market==='frame_quinella').combination=[1,3];assert.equal(p.completePayoutMarkets(wrong,markets),false);
  const same=structuredClone(good);same.placings[1].frame=1;same.payouts.find(x=>x.market==='frame_quinella').combination=[1,1];
  assert.equal(p.completePayoutMarkets(same,markets),true);
  const duplicate=structuredClone(good);duplicate.payouts.push({...duplicate.payouts.find(x=>x.market==='frame_quinella')});
  assert.equal(p.completePayoutMarkets(duplicate,markets),false);
- for(const label of ['','<img alt="枠9" />','<img alt="枠1" /><img alt="枠2" />','<img data-alt="枠1" />',`<img data-note="note alt='枠1'" />`]){
+ for(const label of ['','<img alt="枠9" />','<img alt="枠1黒" />','<img alt="枠1" /><img alt="枠2" />','<img data-alt="枠1" />',`<img data-note="note alt='枠1'" />`]){
   const incomplete=p.parseResult(jraResult().replace('<img alt="枠1" />',label),resultTarget);
   assert.equal(incomplete.placings[0].frame,null);assert.equal(incomplete.publication,'PUBLISHED');
   assert.equal(p.completePayoutMarkets(incomplete,markets),false);assert.equal(incomplete.settlement_qualified,false);
