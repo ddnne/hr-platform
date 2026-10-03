@@ -20,6 +20,40 @@ def engine(c, **options):
         research_policy=json.loads(Path('configs/cloud-research.json').read_text()), engine_id='a' * 64, **options)
 
 
+@pytest.mark.parametrize('policy', [None, 'require_feasible', 'allow_inconsistent_shadow'])
+def test_cloud_research_and_paper_share_reference_policy(cloud, config, monkeypatch, policy):
+    original = f.markets
+    def inconsistent(*args, **kwargs):
+        markets = original(*args, **kwargs)
+        markets['win']['quotes']['1']['odds'] *= 0.5
+        return markets
+    monkeypatch.setattr(f, 'markets', inconsistent)
+    base = {**config, **({'reference_constraint_policy': policy} if policy else {})}
+    async def run():
+        paper = paper_engine(cloud)
+        plan = await inputs(cloud, paper, base)
+        cloud.clock[0] = f.at(4, 10)
+        research = engine(cloud)
+        bundle = await research.register('shared-reference-policy-v1', base, configs())
+        job = await research.enqueue(bundle['bundle_id'], f.RACE, plan['asof_at'])
+        assert (await research.tick())['status'] == 'COMPLETE'
+        output = (await research.result(job['job_id'], cloud.clock[0]))['result']['output']
+        decisions = (await paper.decide(plan['id']))['decisions']
+        for decision in decisions:
+            choice = output['candidates']['native_' + decision['model']]
+            if policy == 'allow_inconsistent_shadow':
+                assert choice['stake_yen'] == decision['stake_yen']
+                assert [t['selection'] for t in choice['tickets']] == ([decision['selection']] if decision['selection'] else [])
+                assert output['research_assumptions'] == ['INCONSISTENT_REFERENCES_SOFT_CALIBRATION']
+                assert decision['research_assumptions'].count(output['research_assumptions'][0]) == 1
+            else:
+                assert choice['reason'] == decision['reason'] == 'REFERENCE_INCONSISTENT'
+                assert choice['stake_yen'] == decision['stake_yen'] == 0 and not choice['tickets']
+        assert (await paper.decide(plan['id']))['decisions'] == decisions
+        assert (await research.result(job['job_id'], cloud.clock[0]))['result']['output'] == output
+    asyncio.run(run())
+
+
 def test_shared_91_choices_immutable_bundle_job_and_publication(cloud, config):
     async def run():
         paper = paper_engine(cloud)

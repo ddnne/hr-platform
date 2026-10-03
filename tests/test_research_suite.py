@@ -17,6 +17,49 @@ def configs():
              'joint-kelly', 'all-markets-kelly')}
 
 
+@pytest.mark.parametrize('policy', [None, 'require_feasible', 'allow_inconsistent_shadow'])
+def test_reference_policy_gates_primary_without_dropping_independent_trio(config, policy):
+    from hr_platform.research_suite import analyze_suite
+    markets = fixtures.markets('nonuniform')
+    markets['exacta']['quotes']['1-2']['odds'] *= 0.1
+    base = {**config, **({'reference_constraint_policy': policy} if policy else {})}
+    original = copy.deepcopy(markets)
+    result = analyze_suite([1, 2, 3, 4], markets, base, configs())
+    assert len(result['candidates']) == 91 and markets == original
+    assert result['trio_analysis']['identification']['status'] != 'INCONSISTENT'
+    assert all(result['candidates']['trio_' + m].get('status') != 'INPUT_EXCLUDED'
+               for m in ('direct', 'marginal', 'reference'))
+    if policy == 'allow_inconsistent_shadow':
+        assert result['primary_error'] is None
+        assert result['primary_analysis']['identification']['status'] == 'INCONSISTENT'
+        assert result['research_assumptions'] == ['INCONSISTENT_REFERENCES_SOFT_CALIBRATION']
+        assert all(result['candidates']['native_' + m].get('status') != 'INPUT_EXCLUDED'
+                   for m in ('direct', 'marginal', 'reference'))
+    else:
+        assert result['primary_error'] == 'REFERENCE_INCONSISTENT'
+        assert all(c['status'] == 'INPUT_EXCLUDED' and c['reason'] == 'REFERENCE_INCONSISTENT'
+                   and c['stake_yen'] == 0 and not c['tickets']
+                   for name, c in result['candidates'].items() if not name.startswith('trio_'))
+
+
+@pytest.mark.parametrize('policy', ['require_feasible', 'allow_inconsistent_shadow'])
+def test_trio_uses_its_own_reference_gate(config, policy):
+    from hr_platform.research_suite import analyze_suite
+    markets = fixtures.markets('nonuniform')
+    markets['trifecta']['quotes']['1-2-3']['odds'] *= 0.1
+    result = analyze_suite([1, 2, 3, 4], markets, {**config, 'reference_constraint_policy': policy}, configs())
+    assert result['primary_error'] is None
+    assert result['primary_analysis']['identification']['status'] != 'INCONSISTENT'
+    for method in ('direct', 'marginal', 'reference'):
+        choice = result['candidates']['trio_' + method]
+        if policy == 'require_feasible':
+            assert choice['status'] == 'INPUT_EXCLUDED' and choice['reason'] == 'REFERENCE_INCONSISTENT'
+            assert not choice['tickets'] and choice['stake_yen'] == 0
+        else:
+            assert choice['research_assumptions'] == ['INCONSISTENT_REFERENCES_SOFT_CALIBRATION']
+            assert result['trio_analysis']['identification']['status'] == 'INCONSISTENT'
+
+
 def test_pair_marginal_pl_reuses_observed_probabilities_without_fabricating_win_market(config):
     markets = fixtures.markets('nonuniform')
     del markets['win']

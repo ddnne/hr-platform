@@ -11,7 +11,7 @@ from .cloud_history import CloudHistory, PUBLICATION_CLOCK
 from .cloud_race_files import CloudRaceFiles
 from .cloud_pages import CloudPages
 from .common import canonical, identity, instant, paper_asof, seconds, stamp, utcnow
-from .paper_rules import eligibility, select, settlement_values, validate_paper_config
+from .paper_rules import eligibility, reference_eligibility, select, settlement_values, validate_paper_config
 from .prospective_rules import configuration, metadata_reason, qualify
 
 
@@ -163,11 +163,9 @@ class CloudPaper(CloudHistory):
                 envelope = {'status': 'MODEL_ERROR'}
             if analysis is None:
                 reason = 'DATA_MISSING' if envelope.get('status') == 'DATA_MISSING' else 'MODEL_ERROR'
-            elif analysis['identification']['status'] == 'INCONSISTENT':
-                if reference_policy == 'require_feasible':
-                    reason = 'REFERENCE_INCONSISTENT'
-                else:
-                    assumptions.append('INCONSISTENT_REFERENCES_SOFT_CALIBRATION')
+            else:
+                reason, reference_assumptions = reference_eligibility(analysis, config)
+                assumptions.extend(reference_assumptions)
         try:
             details = await self.save_body(canonical({'plan': plan, 'input_view': view, 'model': envelope}))
         except Exception:

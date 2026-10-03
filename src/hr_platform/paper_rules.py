@@ -62,6 +62,15 @@ def select(rows, model, tolerance):
     return min((row for edge, row in candidates if best - edge <= tolerance), key=lambda r: r["selection"])
 
 
+def reference_eligibility(analysis, config):
+    """Share the strict reference gate and explicit exploratory assumption."""
+    if analysis["identification"]["status"] != "INCONSISTENT":
+        return None, []
+    if config.get("reference_constraint_policy", "require_feasible") == "require_feasible":
+        return "REFERENCE_INCONSISTENT", []
+    return None, ["INCONSISTENT_REFERENCES_SOFT_CALIBRATION"]
+
+
 def settlement_values(decision, payout):
     """Calculate only from normalized payout/refund evidence; pending stays null."""
     rows = payout.get("tickets", [])
