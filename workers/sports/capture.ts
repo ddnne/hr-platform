@@ -72,7 +72,9 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
  }
  if(!insertion.meta.changes)return {status:'DUPLICATE',event_id:event};
  let http:number|null=null,headersAt:string|null=null,received:string|null=null,stop=false,stage='HTTP';
- const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(config.request_timeout_seconds*1000,(deadline??Infinity)-Date.now())));
+ const remaining=(deadline??Infinity)-Date.now(),timeout=config.request_timeout_seconds*1000;
+ const abortCode=remaining<=timeout?'DEADLINE_REACHED':'FETCH_TIMEOUT';
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(timeout,remaining)));
  try {
   if(Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline)throw new Error('MISSED_WINDOW');
   const response=await fetchPublic(t.url,t.sport==='boat'||t.kind==='guest'?'text/html':'application/json',controller.signal,t.headers,t.body);
@@ -93,7 +95,7 @@ export async function collect(at:number,env:SportsEnv,t:Target,onResponse?:(body
   return {status:'RAW_STORED',event_id:event,body,response_headers:response.headers,received_at:received};
  }catch(e){const reason=e instanceof Error?e.message:'';
   if(reason==='GUEST_FORMAT')stop=true;
-  const code=['GUEST_FORMAT','SOURCE_DENIED','RATE_LIMITED','HTTP_ERROR','MISSED_WINDOW','CHALLENGE','BODY_LIMIT','BODY_EMPTY'].includes(reason)?reason:stage==='STORAGE'?'STORAGE_ERROR':controller.signal.aborted?'FETCH_TIMEOUT':'NETWORK_ERROR';
+  const code=['GUEST_FORMAT','SOURCE_DENIED','RATE_LIMITED','HTTP_ERROR','MISSED_WINDOW','CHALLENGE','BODY_LIMIT','BODY_EMPTY'].includes(reason)?reason:stage==='STORAGE'?'STORAGE_ERROR':controller.signal.aborted?abortCode:'NETWORK_ERROR';
   await env.INDEX.prepare('UPDATE captures SET status=?,error_code=?,http_status=?,headers_received_at=?,collector_received_at=?,duration_ms=? WHERE event_id=?')
    .bind(code==='STORAGE_ERROR'?'STORAGE_ERROR':'FAILED',code,http,headersAt,received,Date.now()-started,event).run();
   return {status:code,event_id:event};
