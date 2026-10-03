@@ -41,6 +41,21 @@ def test_missing_corner_column_preserves_payouts_and_requires_matching_rows():
         parse_payout_page(malformed, f.RACE)
 
 
+def test_numeric_official_cache_key_preserves_race_identity_and_unknown_update_time():
+    raw = page().replace(b'k_babaCode=19', b'_ts=2000000000000&amp;k_babaCode=19')
+    assert parse_payout_page(raw, f.RACE) == parse_payout_page(page(), f.RACE)
+    assert parse_payout_page(raw, f.RACE)['source_updated_at'] is None
+    with pytest.raises(ValueError, match='PAYOUT_RACE_LINK'):
+        parse_payout_page(raw.replace(b'k_raceNo=1', b'k_raceNo=2'), f.RACE)
+
+
+@pytest.mark.parametrize('extra', ['_ts=', '_ts=invalid', '_ts=1&amp;_ts=2', 'other=1'])
+def test_unknown_or_ambiguous_result_link_keys_do_not_qualify(extra):
+    raw = page().replace(b'k_babaCode=19', (extra + '&amp;k_babaCode=19').encode())
+    with pytest.raises(ValueError, match='PAYOUT_RACE_LINK'):
+        parse_payout_page(raw, f.RACE)
+
+
 @pytest.mark.parametrize("status,refunds", [("除外", 6), ("中止", 0), ("取消", 0)])
 def test_refund_rule_distinguishes_exclusion_nonfinish_and_cancellation(status, refunds):
     result = parse_payout_page(page(status), f.RACE)
