@@ -129,12 +129,20 @@ export async function collect(at:number,env:SportsEnv,t:CaptureTarget,onResponse
  let http:number|null=null,headersAt:string|null=null,received:string|null=null,stop=false,stage='HTTP';
  const remaining=(deadline??Infinity)-Date.now(),timeout=config.request_timeout_seconds*1000;
  const abortCode=remaining<=timeout?'DEADLINE_REACHED':'FETCH_TIMEOUT';
- const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(timeout,remaining)));
+ const waitUntil=Date.now()+Math.max(1,Math.min(timeout,remaining));
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),waitUntil-Date.now());
  try {
   if(t.sport==='jra'&&daily)await waitJraStart(spacing,async()=>{
-   const gate=await env.INDEX.prepare('SELECT blocked,next_allowed_at FROM source_control WHERE source=?').bind(source).first<{blocked:number;next_allowed_at:number}>();
-   if(!gate||gate.blocked)throw new Error('SOURCE_DENIED');
-   if(gate.next_allowed_at>grantedUntil&&gate.next_allowed_at>Date.now())throw new Error('SOURCE_WAIT');
+   while(true){
+    const gate=await env.INDEX.prepare('SELECT blocked,next_allowed_at FROM source_control WHERE source=?').bind(source).first<{blocked:number;next_allowed_at:number}>();
+    if(!gate||gate.blocked)throw new Error('SOURCE_DENIED');
+    const delay=gate.next_allowed_at-Date.now();
+    if(gate.next_allowed_at<=grantedUntil||delay<=0)return;
+    // A normal completion can extend this floor too. Keep the original timeout
+    // and recheck refusal/wait before sending; long waits return to daily planning.
+    if(controller.signal.aborted||gate.next_allowed_at>=waitUntil)throw new Error('SOURCE_WAIT');
+    await new Promise(resolve=>setTimeout(resolve,delay));
+   }
   });
   if(Date.now()-at>config.capture_window_seconds*1000||deadline!==undefined&&Date.now()>=deadline)throw new Error('MISSED_WINDOW');
   if(controller.signal.aborted)throw new Error(abortCode);

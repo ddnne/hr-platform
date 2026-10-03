@@ -193,3 +193,17 @@ test('unfinished final pages refresh an expired final roster without extending t
  let entries=[];for(let i=0;i<8&&!entries.length;i++)entries=p.nextDailyParallel(state,state.wake_at);
  assert.ok(entries.some(e=>e.target.page!=='win_place'&&e.target.context_event===context.event));
 });
+
+test('an unsent source wait retries after spacing without reviving an old result recipe or its expiry',async()=>{
+ const state=await p.initialDaily('jra',now);state.tasks={};await p.acceptProgram(state,source(jraResultProgram(),resultVenue),now);
+ const key='result:jra:20000101:5:1',first=p.nextDailyParallel(state,now)[0],expires=state.tasks[key].expires_at;
+ await p.completeDaily(state,first,'SOURCE_WAIT',first.at);
+ assert.equal(state.tasks[key].done,undefined);assert.equal(state.tasks[key].next_at,first.at+config.daily_request_spacing_seconds*1000);
+ assert.equal(state.tasks[key].expires_at,expires);
+ const retry=p.nextDailyParallel(state,state.tasks[key].next_at).find(e=>e.daily_task===key);assert.ok(retry);assert.notEqual(retry.at,first.at);
+ await p.acceptProgram(state,source(jraResultProgram({name:'pw01sde1005200001010120000101/AB'}),resultVenue),retry.at+1);
+ const revised=state.tasks[key].next_at,revisedExpiry=state.tasks[key].expires_at;await p.completeDaily(state,retry,'SOURCE_WAIT',retry.at+2);assert.equal(state.tasks[key].next_at,revised);
+ const current=p.nextDailyParallel(state,revised).find(e=>e.daily_task===key);assert.ok(current);
+ await p.completeDaily(state,current,'SOURCE_WAIT',current.at);
+ assert.equal(state.tasks[key].expires_at,revisedExpiry);assert.ok(p.nextDailyParallel(state,revisedExpiry+1).every(e=>e.daily_task!==key));assert.equal(state.tasks[key].done,true);
+});
