@@ -188,6 +188,37 @@ test('ordinary HTML 429 waits; a 429 CAPTCHA stops; Retry-After is retained in b
  }
 });
 
+test('HTTP200 empty ZIP stream retains failure evidence and spacing without an observation or permanent stop',async()=>{
+ const r=await runtime([{body:new Uint8Array(),headers:{'content-type':'application/zip',etag:'"empty"'}},{body:zip}]);
+ try{
+  const before=Date.now();await r.tick(1);await r.tick(1);await r.tick(2);
+  assert.equal(r.requests.length,1);
+  const control=await r.db.prepare('SELECT * FROM source_control').first();
+  assert.equal(control.blocked,0);assert.ok(control.next_allowed_at>=before+120000);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  assert.equal((await r.db.prepare('SELECT error_code FROM captures').first()).error_code,'BODY_EMPTY');
+  const bucket=await r.mf.getR2Bucket('RAW'),failure=await (await bucket.get('failure-metadata/nar-daily-odds:1.json')).json();
+  assert.equal(failure.body_bytes,0);assert.equal(failure.body_prefix_base64,'');
+  await r.reset();await r.tick(121000);
+  assert.equal(r.requests.length,2);assert.equal(r.requests[1].etag,null);
+  assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,1);
+ }finally{await r.mf.dispose();}
+});
+
+test('an empty stream cannot bypass explicit denial headers or Retry-After',async()=>{
+ for(const headers of [{status:403},{status:200,headers:{'cf-mitigated':'challenge'}},{status:429,headers:{'retry-after':'600'}}]){
+  const r=await runtime([{...headers,body:new Uint8Array()}]);
+  try{
+   const before=Date.now();await r.tick(1);await r.tick(2);
+   const control=await r.db.prepare('SELECT * FROM source_control').first();
+   assert.equal(control.blocked,headers.status===429?0:1);
+   if(headers.status===429)assert.ok(control.next_allowed_at>=before+600000);
+   assert.equal(r.requests.length,1);
+   assert.equal((await r.db.prepare('SELECT count(*) n FROM raw_observations').first()).n,0);
+  }finally{await r.mf.dispose();}
+ }
+});
+
 test('successful publication records processing wall time separately from receipt duration',async()=>{
  const r=await runtime([{body:zip}]);
  try{
