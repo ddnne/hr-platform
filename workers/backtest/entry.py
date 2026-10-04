@@ -14,11 +14,15 @@ class Default(WorkerEntrypoint):
             research_policy=json.loads(self.env.RESEARCH_POLICY_JSON), engine_id=self.env.ENGINE_ID)
 
     async def scheduled(self, controller, env=None, ctx=None):
+        import asyncio
         if self.env.RESEARCH_ENABLED == 'true':
-            try:
-                await self.engine().tick()
-            except Exception:
-                print('{"component":"research_queue","status":"STORAGE_OR_RUNTIME_ERROR"}')
+            engine = self.engine()
+            tasks = [engine.tick()]
+            if getattr(self.env, 'AUTO_RESEARCH_ENABLED', 'false') == 'true':
+                tasks.extend([engine.schedule_registered(), engine.refresh_evaluations()])
+            for result in await asyncio.gather(*tasks, return_exceptions=True):
+                if isinstance(result, BaseException):
+                    print('{"component":"research_queue","status":"STORAGE_OR_RUNTIME_ERROR"}')
 
     async def research(self, payload):
         import json
@@ -28,7 +32,7 @@ class Default(WorkerEntrypoint):
                 raise ValueError('INPUT_LIMIT')
             request = json.loads(payload)
             operation = request.pop('operation')
-            if operation not in {'register', 'enqueue', 'jobs', 'result', 'final_prices', 'evaluate', 'evaluation'}:
+            if operation not in {'register', 'activate', 'enqueue', 'jobs', 'result', 'final_prices', 'evaluate', 'evaluation'}:
                 raise ValueError('OPERATION')
             result = await getattr(engine, operation)(**request)
             return json.dumps({'status': 'OK', 'result': result}, allow_nan=False)

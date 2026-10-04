@@ -53,7 +53,7 @@ class CloudHistory:
         return native(await self.db.prepare(sql).bind(*args).first())
 
     async def run(self, sql, *args):
-        await self.db.prepare(sql).bind(*args).run()
+        return native(await self.db.prepare(sql).bind(*args).run())
 
     async def all(self, sql, *args):
         return native(await self.db.prepare(sql).bind(*args).all())['results']
